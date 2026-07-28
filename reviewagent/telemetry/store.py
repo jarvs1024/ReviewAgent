@@ -204,6 +204,156 @@ class Store:
             )
 
 
+    # ---------- 查询 (Phase 3 数据采集用) ----------
+    def list_runs(
+        self,
+        *,
+        project_id: int | None = None,
+        mr_iid: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        command: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """列出 run 记录，支持多种过滤.
+
+        Args:
+            project_id: 按项目过滤
+            mr_iid: 按 MR 过滤 (需 project_id 同时)
+            since: ISO 时间下界 (e.g. '2026-07-21' 或 '2026-07-21T00:00:00Z')
+            until: ISO 时间上界
+            command: describe/review/improve
+            status: running/success/failed/timeout
+            limit: 默认 100
+            offset: 分页
+        """
+        clauses: list[str] = []
+        params: list = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if mr_iid is not None:
+            clauses.append("mr_iid = ?")
+            params.append(mr_iid)
+        if since:
+            clauses.append("started_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("started_at < ?")
+            params.append(until)
+        if command:
+            clauses.append("command = ?")
+            params.append(command)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT * FROM review_runs" + where +
+            " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def summary(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> dict:
+        """聚合统计 — 命令维度 / 状态维度 / 性能维度.
+
+        Returns:
+            {
+              "since": str, "until": str,
+              "total_runs": int,
+              "by_command": {cmd: {count, success, failed, avg_duration_ms, total_tokens}},
+              "by_status": {status: count},
+              "by_day": {YYYY-MM-DD: count},
+              "top_mrs": [{project_id, mr_iid, runs}, ...]
+            }
+        """
+        clauses: list[str] = []
+        params: list = []
+        if since:
+            clauses.append("started_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("started_at < ?")
+            params.append(until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        with self._conn() as conn:
+            # 1. by_command — 一次 group by 出整体 + 各 status 计数
+            by_command: dict[str, dict] = {}
+            by_status: dict[str, int] = {}
+            rows = conn.execute(
+                f"SELECT command, COUNT(*) as n, "
+                f"AVG(duration_ms) as avg_dur, "
+                f"SUM(total_tokens) as tokens "
+                f"FROM review_runs {where} GROUP BY command",
+                params,
+            ).fetchall()
+            for r in rows:
+                cmd = r["command"]
+                by_command[cmd] = {
+                    "count": r["n"],
+                    "success": 0, "failed": 0, "timeout": 0, "running": 0,
+                    "avg_duration_ms": int(r["avg_dur"] or 0),
+                    "total_tokens": int(r["tokens"] or 0),
+                }
+            rows = conn.execute(
+                f"SELECT command, status, COUNT(*) as n "
+                f"FROM review_runs {where} GROUP BY command, status",
+                params,
+            ).fetchall()
+            for r in rows:
+                cmd, st, n = r["command"], r["status"], r["n"]
+                if cmd in by_command and st in by_command[cmd]:
+                    by_command[cmd][st] = n
+                by_status[st] = by_status.get(st, 0) + n
+
+            # 2. by_day
+            rows = conn.execute(
+                f"SELECT substr(started_at, 1, 10) as day, COUNT(*) as n "
+                f"FROM review_runs {where} GROUP BY day ORDER BY day",
+                params,
+            ).fetchall()
+            by_day = {r["day"]: r["n"] for r in rows}
+
+            # 3. top_mrs
+            rows = conn.execute(
+                f"SELECT project_id, mr_iid, COUNT(*) as runs "
+                f"FROM review_runs {where} "
+                f"GROUP BY project_id, mr_iid "
+                f"ORDER BY runs DESC LIMIT 10",
+                params,
+            ).fetchall()
+            top_mrs = [
+                {"project_id": r["project_id"], "mr_iid": r["mr_iid"], "runs": r["runs"]}
+                for r in rows
+            ]
+
+            # 4. total
+            total = conn.execute(
+                f"SELECT COUNT(*) as n FROM review_runs {where}", params
+            ).fetchone()["n"]
+
+        return {
+            "since": since,
+            "until": until,
+            "total_runs": total,
+            "by_command": by_command,
+            "by_status": by_status,
+            "by_day": by_day,
+            "top_mrs": top_mrs,
+        }
+
+
 # ---------- 工具 ----------
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)

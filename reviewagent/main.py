@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from reviewagent.gitlab.client import GitLabError
 from reviewagent.logging_setup import logger, setup_logging
 from reviewagent.telemetry.store import get_store
+from reviewagent.api.router import router as telemetry_router
 from reviewagent.webhook.router import router as webhook_router
 
 
@@ -38,6 +39,7 @@ app = FastAPI(
 )
 
 app.include_router(webhook_router, tags=["webhook"])
+app.include_router(telemetry_router)
 
 
 @app.get("/", tags=["meta"])
