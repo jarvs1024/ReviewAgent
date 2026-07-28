@@ -1,11 +1,20 @@
 """RQ 任务 — 把 webhook 入的 job 实际执行.
 
 启动方式（另起终端）:
-    rq worker review --url redis://localhost:6379/0
+    rq worker review-v2 --url redis://127.0.0.1:63790/2
 
-PoC 阶段只实现 /describe；Phase 2 加 /review / /improve.
+支持的命令:
+    /describe  → update_mr_title + description
+    /review    → MR summary 评论 + 行内 key_issues
+    /improve   → MR summary 评论 + 行内可 Apply 的代码建议
+
+每个命令的具体逻辑在 `reviewagent/commands/<name>.py`；本模块只负责：
+    1. 入队（按 Note Hook / MR Hook 命令字符串分发）
+    2. RQ 任务函数 — 调命令的 run() 并把异常转换成 failed telemetry
 """
 from __future__ import annotations
+
+from typing import Any
 
 import redis
 from rq import Queue
@@ -29,18 +38,19 @@ def get_queue() -> Queue:
     return Queue(config.rq_queue_name, connection=get_redis())
 
 
-# ---------- 入队辅助 ----------
-def enqueue_describe(
+# ---------- 入队辅助（按命令） ----------
+def _enqueue(
+    command: str,
     *,
     project_id: int,
     mr_iid: int,
     triggered_by: str,
     actor_username: str,
 ) -> str:
-    """入队一个 /describe 任务."""
+    """内部 — 把命令对应的 rq 函数入队."""
     q = get_queue()
     job = q.enqueue(
-        "reviewagent.workers.tasks.run_describe",
+        f"reviewagent.workers.tasks.run_{command}",
         project_id=project_id,
         mr_iid=mr_iid,
         triggered_by=triggered_by,
@@ -52,6 +62,44 @@ def enqueue_describe(
     return job.id
 
 
+def enqueue_describe(
+    *, project_id: int, mr_iid: int, triggered_by: str, actor_username: str,
+) -> str:
+    return _enqueue(
+        "describe",
+        project_id=project_id, mr_iid=mr_iid,
+        triggered_by=triggered_by, actor_username=actor_username,
+    )
+
+
+def enqueue_review(
+    *, project_id: int, mr_iid: int, triggered_by: str, actor_username: str,
+) -> str:
+    return _enqueue(
+        "review",
+        project_id=project_id, mr_iid=mr_iid,
+        triggered_by=triggered_by, actor_username=actor_username,
+    )
+
+
+def enqueue_improve(
+    *, project_id: int, mr_iid: int, triggered_by: str, actor_username: str,
+) -> str:
+    return _enqueue(
+        "improve",
+        project_id=project_id, mr_iid=mr_iid,
+        triggered_by=triggered_by, actor_username=actor_username,
+    )
+
+
+# 命令 → 入队函数 映射表（供 router 集中调度，避免重复 if/elif）
+COMMAND_ENQUEUERS = {
+    "describe": enqueue_describe,
+    "review": enqueue_review,
+    "improve": enqueue_improve,
+}
+
+
 def enqueue_command_from_note(
     *,
     command: str,
@@ -60,42 +108,62 @@ def enqueue_command_from_note(
     triggered_by: str,
     actor_username: str,
 ) -> str:
-    """入队一个 Note Hook 命令（PoC 阶段只支持 describe）。"""
-    if command == "describe":
-        return enqueue_describe(
-            project_id=project_id,
-            mr_iid=mr_iid,
-            triggered_by=triggered_by,
-            actor_username=actor_username,
-        )
-    # Phase 2: review / improve
-    logger.warning("workers.unsupported_command cmd={}", command)
-    raise NotImplementedError(f"command not yet implemented: {command}")
+    """Note Hook 入队 — 按 command 字符串分发."""
+    fn = COMMAND_ENQUEUERS.get(command)
+    if fn is None:
+        logger.warning("workers.unsupported_command cmd={}", command)
+        raise NotImplementedError(f"command not yet implemented: {command}")
+    return fn(
+        project_id=project_id, mr_iid=mr_iid,
+        triggered_by=triggered_by, actor_username=actor_username,
+    )
 
 
-# ---------- 任务执行 ----------
-def run_describe(
+# ---------- RQ 任务执行（worker 直接 invoke） ----------
+def _run_command(
+    command: str,
     *,
     project_id: int,
     mr_iid: int,
     triggered_by: str,
     actor_username: str,
-) -> dict:
-    """RQ worker 调用的入口: 实际执行 /describe.
+) -> dict[str, Any]:
+    """共用的 RQ job 体，按 command 字符串 import + invoke."""
+    if command == "describe":
+        from reviewagent.commands.describe import DescribeCommand, DescribeError
+        CommandCls, ErrCls = DescribeCommand, DescribeError
+    elif command == "review":
+        from reviewagent.commands.review import ReviewCommand, ReviewError
+        CommandCls, ErrCls = ReviewCommand, ReviewError
+    elif command == "improve":
+        from reviewagent.commands.improve import ImproveCommand, ImproveError
+        CommandCls, ErrCls = ImproveCommand, ImproveError
+    else:
+        raise NotImplementedError(f"command not yet implemented: {command}")
 
-    失败抛异常 → RQ 标记 failed；不入 SQLite 失败表（事件流由 telemetry 处理）.
-    """
-    from reviewagent.commands.describe import DescribeCommand, DescribeError
-
-    logger.info("worker.run_describe project={} mr={}", project_id, mr_iid)
+    logger.info("worker.run_{} project={} mr={}", command, project_id, mr_iid)
     try:
-        return DescribeCommand(
+        return CommandCls(
             project_id=project_id,
             mr_iid=mr_iid,
             triggered_by=triggered_by,
             actor_username=actor_username,
         ).run()
-    except DescribeError as e:
-        logger.error("worker.run_describe failed project={} mr={} err={}",
-                     project_id, mr_iid, e)
+    except ErrCls as e:
+        logger.error(
+            "worker.run_{} failed project={} mr={} err={}",
+            command, project_id, mr_iid, e,
+        )
         raise
+
+
+def run_describe(**kw) -> dict[str, Any]:
+    return _run_command("describe", **kw)
+
+
+def run_review(**kw) -> dict[str, Any]:
+    return _run_command("review", **kw)
+
+
+def run_improve(**kw) -> dict[str, Any]:
+    return _run_command("improve", **kw)

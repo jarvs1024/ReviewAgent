@@ -99,6 +99,91 @@ class GitLabClient:
                     project_id, mr_iid, note.id)
         return note.id
 
+    # ---------- 行内评论 (Discussion) ----------
+    def get_mr_diff_refs(self, project_id: int, mr_iid: int) -> dict[str, str]:
+        """拉 MR 的 diff_refs（base_sha / start_sha / head_sha），用于发布行内评论.
+
+        Inline discussion 的 position 必须带这三个 SHA，缺一不可.
+        """
+        try:
+            project = self._gl.projects.get(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            refs = mr.diff_refs
+        except gitlab.exceptions.GitlabError as e:
+            raise GitLabError(f"get_mr_diff_refs failed: {e}") from e
+        if not refs:
+            raise GitLabError(
+                f"empty diff_refs for project={project_id} mr={mr_iid}"
+            )
+        logger.info("gitlab.get_mr_diff_refs project={} mr={} base={} start={} head={}",
+                    project_id, mr_iid, refs.get('base_sha'),
+                    refs.get('start_sha'), refs.get('head_sha'))
+        return refs
+
+    def post_mr_discussion(
+        self,
+        project_id: int,
+        mr_iid: int,
+        body: str,
+        *,
+        file_path: str,
+        new_line: int | None = None,
+        old_line: int | None = None,
+        side: str = "new",
+    ) -> str | None:
+        """发 MR 行内评论 (DiscussionNote in python-gitlab).
+
+        Args:
+            file_path: 相对仓库根的文件路径
+            new_line: 新文件行号（+1 起；指向 diff 中新增/修改行）
+            old_line: 旧文件行号（删除行时用；一般在 - 行时设）
+            side: 'new' / 'old' / 'both'
+
+        Returns:
+            note id (str) on success, None on fallback failure.
+        """
+        try:
+            refs = self.get_mr_diff_refs(project_id, mr_iid)
+        except GitLabError as e:
+            logger.warning("post_mr_discussion.refs_failed: {}", e)
+            return None
+
+        position: dict[str, Any] = {
+            "position_type": "text",
+            "new_path": file_path,
+            "old_path": file_path,
+            "base_sha": refs.get("base_sha"),
+            "start_sha": refs.get("start_sha"),
+            "head_sha": refs.get("head_sha"),
+        }
+        if new_line is not None:
+            position["new_line"] = new_line
+        if old_line is not None:
+            position["old_line"] = old_line
+
+        try:
+            project = self._gl.projects.get(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            discussion = mr.discussions.create(
+                {"body": body, "position": position}
+            )
+            note_id = (
+                discussion.id
+                if hasattr(discussion, "id")
+                else discussion.attributes.get("id")
+            )
+            logger.info(
+                "gitlab.post_discussion project={} mr={} file={} new={} old={} note={}",
+                project_id, mr_iid, file_path, new_line, old_line, note_id,
+            )
+            return str(note_id) if note_id is not None else None
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.post_discussion failed project={} mr={} file={} line={}: {}",
+                project_id, mr_iid, file_path, new_line, e,
+            )
+            return None
+
     # ---------- description ----------
     def update_mr_description(self, project_id: int, mr_iid: int, description: str) -> None:
         """覆盖 MR description（不修改 title，由调用方决定）."""
