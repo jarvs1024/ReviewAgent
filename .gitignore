@@ -1,0 +1,46 @@
+# 依赖与构建
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 配置与密钥（绝不入库）
+.env
+.env.*
+!.env.example
+
+# 数据与日志
+data/
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+/tmp/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 工作树（Claude Code）
+.claude/worktrees/
+
+# Python 字节码
+*.pyc

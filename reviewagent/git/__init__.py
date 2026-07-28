@@ -1,0 +1,1 @@
+"""git 包 — bare repo + worktree 管理 + 代码污染防护."""

@@ -1,0 +1,1 @@
+"""gitlab 包 — 薄封装 python-gitlab."""

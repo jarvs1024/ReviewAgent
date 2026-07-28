@@ -1,0 +1,56 @@
+[project]
+name = "reviewagent"
+version = "0.1.0"
+description = "GitLab 代码检视平台，基于 opencode + webhook"
+requires-python = ">=3.12"
+authors = [{ name = "ReviewAgent Team" }]
+license = { text = "MIT" }
+
+dependencies = [
+    # Web
+    "fastapi>=0.118",
+    "uvicorn[standard]>=0.32",
+    # GitLab
+    "python-gitlab>=5.0",
+    # opencode HTTP 客户端
+    "httpx>=0.27",
+    # 任务队列
+    "redis>=5.0",
+    "rq>=2.0",
+    # 日志
+    "loguru>=0.7",
+    # 提示词 frontmatter
+    "python-frontmatter>=1.1",
+    "pyyaml>=6.0",
+    # 工具
+    "tenacity>=9.0",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["reviewagent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B"]
+ignore = ["E501"]

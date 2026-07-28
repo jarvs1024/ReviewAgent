@@ -1,0 +1,1 @@
+"""webhook 包 — GitLab MR Hook + Note Hook 接入."""
