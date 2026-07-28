@@ -97,7 +97,7 @@ class DescribeCommand:
             # 4. 调 opencode agent
             result = opencode.run(
                 agent=self.prompt_cfg["name"],
-                prompt=self.prompt_cfg["prompt"],
+                prompt=self._build_user_prompt(),
                 workdir=ws.worktree,
                 files=[ws.diff_file],
                 timeout=config.rq_worker_timeout,
@@ -106,9 +106,11 @@ class DescribeCommand:
             # 5. 校验输出 schema
             self._validate(result)
 
+            # 5.5 规范化 description（强制 "## Description" 标题格式）
+            new_desc = self._normalize_description(result.get("description_md", "").strip())
+
             # 6. 写回 GitLab
             new_title = result.get("title", "").strip() or mr.title
-            new_desc = result.get("description_md", "").strip()
             self.gitlab.update_mr_title(self.project_id, self.mr_iid, new_title)
             if new_desc:
                 self.gitlab.update_mr_description(self.project_id, self.mr_iid, new_desc)
@@ -162,6 +164,15 @@ class DescribeCommand:
                     logger.warning("describe.cleanup failed (non-fatal): {}", e)
 
     @staticmethod
+    def _build_user_prompt() -> str:
+        """构造发给 opencode agent 的 user message.
+
+        agent 的 system prompt 已部署到 opencode config
+        (~/.config/opencode/agent/<name>.md)，这里只发 diff 文件引用 + 简短 trigger。
+        """
+        return "请按你的 system prompt 描述当前 MR（diff 内容见上方附件文件）。"
+
+    @staticmethod
     def _validate(result: dict[str, Any]) -> None:
         """校验 agent 返回值符合 schema."""
         if not isinstance(result, dict):
@@ -170,3 +181,22 @@ class DescribeCommand:
             raise OpencodeOutputError("agent output missing 'title' (str)")
         if "description_md" not in result or not isinstance(result["description_md"], str):
             raise OpencodeOutputError("agent output missing 'description_md' (str)")
+
+    @staticmethod
+    def _normalize_description(raw: str) -> str:
+        """规范化 description — 强制首行 "## Description" (两个 #，不加粗).
+
+        模型 (例如 MiniMax-M2.7) 经常输出 `### **Description**`；
+        这里去掉 bold、转 ### → ##，但保留 bullet 内容 / 末尾分隔线。
+        """
+        import re
+        if not raw:
+            return raw
+        lines = raw.split("\n")
+        for i in range(min(3, len(lines))):
+            stripped = lines[i].strip()
+            # 匹配: ### **Description** / ## Description / # Description 等所有变体
+            if re.fullmatch(r"#+\s*\**\s*Description\s*\**", stripped):
+                lines[i] = "## Description"
+                break
+        return "\n".join(lines)

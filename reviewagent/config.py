@@ -29,6 +29,7 @@ class Config:
     opencode_url: str = "http://localhost:4096"
     opencode_username: str = "opencode"
     opencode_password: str = ""
+    opencode_model: str = "minimax/MiniMax-M2.7"
 
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
@@ -73,6 +74,7 @@ class Config:
             opencode_url=_env("OPENCODE_URL", "http://localhost:4096"),
             opencode_username=_env("OPENCODE_USERNAME", "opencode"),
             opencode_password=_env("OPENCODE_PASSWORD", ""),
+            opencode_model=_env("OPENCODE_MODEL", "minimax/MiniMax-M2.7"),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=_env("RQ_QUEUE_NAME", "review"),
             rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "600")),
