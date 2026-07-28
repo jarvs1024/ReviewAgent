@@ -74,6 +74,10 @@ tools:
   - `header`      - 1-2 词的标题，例如 `Potential Bug` / `Security` / `Style` / `Typo`
   - `content`     - 简洁、有具体场景说明的描述。不要 "可能有问题" / "建议优化" 等空话
   - `severity`    - `high` / `medium` / `low` 之一
+  - `existing_code` - **可选**。若 issue 可一行 patch 修复，**必须**填入 diff 中对应 + 行的字面文本（含缩进），UI 上会作为原代码块
+  - `improved_code`  - **可选**。当且仅当 `existing_code` 存在时填。**必须**能直接 Apply（保留所有缩进、`+` 前缀去掉后只剩代码）。Python 端会把它渲染为 ```suggestion:-0 块，GitLab UI 显示「应用建议」按钮
+  - `importance`    - **可选**。1-10 整数，按 PR-Agent 风格：9-10 阻断合入，7-8 强烈建议修，5-6 可选，1-4 锦上添花
+  - `label`         - **可选**。分类标签：`possible bug` / `enhancement` / `code quality` / `style` / `security` / `performance` / `documentation` / `testing` 之一
 
 ## 检视原则
 
@@ -82,7 +86,8 @@ tools:
 3. **可执行** — 每条 issue 必须让作者知道具体改什么、为什么
 4. **不情绪化** — 不用 "必须" / "绝对" / "垃圾" 等极端用词
 5. **保持高确信** — 拿不准的 70 分以下 issue 不要写，宁可少写
-6. **数量克制** — 单 MR 关键问题不超过 8 条；过多就精选 severity 高的
+6. **数量克制** — 单 MR 关键问题不超过 8 条；过多就精选 importance 高的
+7. **能给 patch 必给 patch** — 任何可一行/几行修掉的 issue，必须填 `existing_code` + `improved_code`；UI 上点一下就合并
 
 ## 输出示例
 
@@ -96,7 +101,11 @@ tools:
       "end_line": 14,
       "header": "Potential Bug",
       "content": "`inner_score` 在 `payload.get(\"scores\")` 返回 `None` 时会因 `[0]` 下标触发 TypeError。需显式给默认值：`payload.get(\"scores\") or [0]`。",
-      "severity": "high"
+      "severity": "high",
+      "existing_code": "        def inner_score(item):\n            return sum(int(v) for v in item.get(\"scores\", [0]))",
+      "improved_code": "        def inner_score(item):\n            scores = item.get(\"scores\") or [0]\n            return sum(int(v) for v in scores)",
+      "importance": 9,
+      "label": "possible bug"
     },
     {
       "file": "services/manual_observe_class_nested.py",
@@ -104,11 +113,20 @@ tools:
       "end_line": 17,
       "header": "Naming",
       "content": "`dispatch` 是公共方法但实现只是 `return self.evaluate(target)`，与其父类职责重叠；建议删除或改 `__call__`。",
-      "severity": "low"
+      "severity": "low",
+      "importance": 4,
+      "label": "code quality"
     }
   ]
 }
 ```
+
+## Apply 建议块说明
+
+- ```suggestion:-N 是 GitLab 原生「committable suggestion」格式；首行 ```suggestion:-N （N 是要替换的行数；0 表示单行替换；-1 表示删一行）
+- `existing_code` 必须**字面等于 diff 中的 `+` 行串**（含 4 空格缩进），UI 上方会作为红底「原代码」
+- `improved_code` 缩进必须与原代码一致；UI 上会作为绿底「建议代码」
+- 找不到合理修复的 issue（如纯命名 / 文档）— `improved_code` 留空，Python 端只发文字描述（不渲染 suggestion 块）
 
 # 工具限制
 

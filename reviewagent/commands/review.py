@@ -87,7 +87,17 @@ class ReviewCommand(BaseCommand):
     # ---------- helpers ----------
     @staticmethod
     def _normalise_issue(issue: dict[str, Any]) -> dict[str, Any]:
-        """校验 + 构造 inline comment 的 body."""
+        """校验 + 构造 inline comment 的 body.
+
+        Body 布局 (PR-Agent review 风格):
+            **[SEVERITY]** **Header**  [importance: N]  — label
+
+            content 描述 (中文)
+
+            ```suggestion:-0
+            improved_code
+            ```
+        """
         if not isinstance(issue, dict):
             raise ValueError(f"issue must be dict, got {type(issue).__name__}")
         file_path = issue.get("file")
@@ -100,12 +110,34 @@ class ReviewCommand(BaseCommand):
         header = (issue.get("header") or "Issue").strip()
         content = (issue.get("content") or "").strip()
         severity = (issue.get("severity") or "").lower()
-        body_lines: list[str] = []
+        importance = issue.get("importance")
+        label = (issue.get("label") or "").strip().lower()
+        existing = (issue.get("existing_code") or "").strip("\n")
+        improved = (issue.get("improved_code") or "").strip("\n")
+
+        # 第一行: severity + header + importance + label
+        first_parts: list[str] = []
         if severity:
-            body_lines.append(f"**[{severity.upper()}]** ")
-        body_lines.append(f"**{header}**\n\n{content}")
+            first_parts.append(f"**[{severity.upper()}]**")
+        first_parts.append(f"**{header}**")
+        if isinstance(importance, int) and 1 <= importance <= 10:
+            first_parts.append(f"`importance: {importance}`")
+        if label:
+            first_parts.append(f"— `{label}`")
+        head_line = " ".join(first_parts) + "\n\n"
+
+        body = head_line + content
+
+        # 可 Apply 的 suggestion 块 (仅当 improved_code 非空)
+        if improved:
+            body += (
+                "\n\n```suggestion:-0\n"
+                f"{improved}\n"
+                "```"
+            )
+
         return {
             "file": file_path,
             "new_line": start_line,
-            "body": "".join(body_lines),
+            "body": body,
         }

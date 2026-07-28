@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -219,33 +220,49 @@ class OpencodeClient:
 
 
 def _extract_json_block(text: str) -> str:
-    """从文本中提取第一个完整的 JSON 对象（{...}），跳过 markdown 包裹."""
-    start = text.find("{")
-    if start < 0:
-        raise ValueError("no JSON object found in text")
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        c = text[i]
-        if escape:
-            escape = False
+    """从文本中提取第一个完整的 JSON 对象.
+
+    策略 (按优先级):
+      1. 剥 markdown 围栏 (```json ... ```) 后整段 parse
+      2. 整段 text 直接 json.loads
+      3. 用 json.JSONDecoder().raw_decode 从每个 { 位置试解，
+         跳过 <think>...</think> 之类的干扰
+    """
+    if not text:
+        raise ValueError("empty text")
+
+    # 1. 剥 markdown ```json ... ``` 围栏
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if fence:
+        candidate = fence.group(1).strip()
+        if candidate.startswith("{"):
+            try:
+                # 验证是合法 JSON
+                json.loads(candidate)
+                return candidate
+            except json.JSONDecodeError:
+                pass
+
+    # 2. 整段尝试
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            json.loads(stripped)
+            return stripped
+        except json.JSONDecodeError:
+            pass
+
+    # 3. 试每个 { 位置 (raw_decode 一次解完，从 i 开始到 i+长度)
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, end = decoder.raw_decode(text, m.start())
+            if isinstance(obj, dict):
+                return text[m.start() : end]
+        except json.JSONDecodeError:
             continue
-        if c == "\\":
-            escape = True
-            continue
-        if c == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    raise ValueError("unbalanced braces in JSON")
+
+    raise ValueError("no valid JSON object found in text")
 
 
 # 全局单例
