@@ -1,1 +1,1 @@
-"""commands 包 — /describe / /review / /improve 三大命令."""
+"""commands 包 — /describe / /improve 两大命令."""

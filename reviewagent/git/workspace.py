@@ -94,9 +94,23 @@ def _ensure_bare(project_id: int, git_url: str) -> Path:
 
 
 def _fetch_incremental(bare: Path, git_url: str) -> None:
-    """增量 fetch bare repo — shallow 优先, 失败则 full fetch fallback."""
+    """增量 fetch bare repo — shallow 优先, 失败则 full fetch fallback.
+
+    Refspec 用 refs/remotes/origin/* 而非 refs/heads/*:
+    bare repo 上若有遗留 worktree 把某些 branch checked out 了,
+    "+refs/heads/*:refs/heads/*" 会因为 "refusing to fetch into checked-out branch"
+    整批失败, 导致新 branch 拉不到, 进而 worktree add 报 "invalid reference".
+    用 remote-tracking refspec 只更新 refs/remotes/origin/*, 不碰本地 branch,
+    永远不会冲突. _create_worktree 只需要 commit SHA, object db 里有就能 worktree add.
+    """
+    # 先 prune 掉残留的 worktree 引用, 防止 stale ref 卡住后续命令
+    subprocess.run(
+        ["git", "-C", str(bare), "worktree", "prune"],
+        capture_output=True, text=True, timeout=30,
+    )
     proc = subprocess.run(
-        ["git", "-C", str(bare), "fetch", "--depth=1", git_url, "+refs/heads/*:refs/heads/*"],
+        ["git", "-C", str(bare), "fetch", "--depth=1", git_url,
+         "+refs/heads/*:refs/remotes/origin/*"],
         capture_output=True, text=True, timeout=120,
     )
     if proc.returncode == 0:
@@ -105,7 +119,7 @@ def _fetch_incremental(bare: Path, git_url: str) -> None:
     logger.warning("git.fetch shallow failed, trying full: {}", proc.stderr.strip()[:300])
     # Fallback: full fetch (unshallow)
     proc = subprocess.run(
-        ["git", "-C", str(bare), "fetch", git_url, "+refs/heads/*:refs/heads/*"],
+        ["git", "-C", str(bare), "fetch", git_url, "+refs/heads/*:refs/remotes/origin/*"],
         capture_output=True, text=True, timeout=180,
     )
     if proc.returncode != 0:

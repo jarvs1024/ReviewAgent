@@ -18,7 +18,7 @@ PROMPTS_DIR = Path(__file__).parent
 
 
 def load(name: str) -> dict[str, Any]:
-    """name: 'describe' / 'review' / 'improve' / 'weekly_report' 等（不带 .md）.
+    """name: 'describe' / 'improve' / 'weekly_report' 等（不带 .md）.
 
     返回:
         {

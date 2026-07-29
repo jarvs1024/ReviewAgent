@@ -2,8 +2,8 @@
 
 核心原则:
     - webhook handler 必须立即返回 200，避免 GitLab 重试
-    - MR Hook → 入队命令链 (pr_commands: describe → review → improve)
-    - Push Hook → 入队命令链 (push_commands: describe → review)
+    - MR Hook → 入队命令链 (pr_commands: describe → improve)
+    - Push Hook → 入队命令链 (push_commands: describe → improve)
     - Note Hook → 单命令入队
     - 死循环防护 + cooldown + bot 白名单 + MR 状态检查
 """

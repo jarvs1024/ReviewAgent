@@ -60,7 +60,7 @@ async def health() -> dict[str, Any]:
 async def list_runs(
     project_id: int | None = Query(None, description="按 project_id 过滤"),
     mr_iid: int | None = Query(None, description="按 mr_iid 过滤 (需 project_id 同时)"),
-    command: str | None = Query(None, description="describe/review/improve"),
+    command: str | None = Query(None, description="describe/improve"),
     status: str | None = Query(None, description="running/success/failed/timeout"),
     since: str | None = Query(None, description="起始 ISO 时间"),
     until: str | None = Query(None, description="结束 ISO 时间 (exclusive)"),

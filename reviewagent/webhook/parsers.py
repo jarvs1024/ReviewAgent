@@ -80,7 +80,6 @@ class NoteHookPayload:
 # ---------- 命令提取 ----------
 COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^/describe\b", re.MULTILINE), "describe"),
-    (re.compile(r"^/review\b", re.MULTILINE), "review"),
     (re.compile(r"^/improve\b", re.MULTILINE), "improve"),
 ]
 

@@ -5,7 +5,6 @@
 
 支持的命令:
     /describe  → update_mr_title + description
-    /review    → MR summary 评论 + 行内 key_issues
     /improve   → MR summary 评论 + 行内可 Apply 的代码建议
 
 每个命令的具体逻辑在 `reviewagent/commands/<name>.py`；本模块只负责：
@@ -74,16 +73,6 @@ def enqueue_describe(
     )
 
 
-def enqueue_review(
-    *, project_id: int, mr_iid: int, triggered_by: str, actor_username: str,
-) -> str:
-    return _enqueue(
-        "review",
-        project_id=project_id, mr_iid=mr_iid,
-        triggered_by=triggered_by, actor_username=actor_username,
-    )
-
-
 def enqueue_improve(
     *, project_id: int, mr_iid: int, triggered_by: str, actor_username: str,
 ) -> str:
@@ -97,7 +86,6 @@ def enqueue_improve(
 # 命令 → 入队函数 映射表（供 router 集中调度，避免重复 if/elif）
 COMMAND_ENQUEUERS = {
     "describe": enqueue_describe,
-    "review": enqueue_review,
     "improve": enqueue_improve,
 }
 
@@ -114,7 +102,7 @@ def enqueue_mr_chain(
     """把 command 列表变成单个 RQ chain job（串行执行，避免并发竞态）.
 
     设计:
-    - 单 job 内串行执行所有命令 (describe → review → improve)
+    - 单 job 内串行执行所有命令 (describe → improve)
     - 失败隔离: 某命令失败不影响后续命令
     - 不同 MR 并行: 多 worker 各自处理不同 MR 的 chain job
     - 重试: 瞬态失败自动重试 2 次 (interval=10s)
@@ -173,9 +161,6 @@ def _run_command(
     if command == "describe":
         from reviewagent.commands.describe import DescribeCommand, DescribeError
         CommandCls, ErrCls = DescribeCommand, DescribeError
-    elif command == "review":
-        from reviewagent.commands.review import ReviewCommand, ReviewError
-        CommandCls, ErrCls = ReviewCommand, ReviewError
     elif command == "improve":
         from reviewagent.commands.improve import ImproveCommand, ImproveError
         CommandCls, ErrCls = ImproveCommand, ImproveError
@@ -200,10 +185,6 @@ def _run_command(
 
 def run_describe(**kw) -> dict[str, Any]:
     return _run_command("describe", **kw)
-
-
-def run_review(**kw) -> dict[str, Any]:
-    return _run_command("review", **kw)
 
 
 def run_improve(**kw) -> dict[str, Any]:

@@ -18,7 +18,7 @@ def _env(key: str, default: str | None = None, required: bool = False) -> str:
 
 
 def _env_tuple(key: str, default: str) -> tuple[str, ...]:
-    """读逗号分隔的 tuple（如 'describe,review,improve'）."""
+    """读逗号分隔的 tuple（如 'describe,improve'）."""
     raw = os.environ.get(key, default)
     return tuple(s.strip() for s in raw.split(",") if s.strip())
 
