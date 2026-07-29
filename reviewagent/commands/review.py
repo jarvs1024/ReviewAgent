@@ -28,7 +28,7 @@ ReviewError = BaseCommandError
 
 class ReviewCommand(BaseCommand):
     COMMAND_NAME = "review"
-    DEFAULT_AGENT = "review"
+    DEFAULT_AGENT = "reviewer"  # opencode frontmatter name in prompts/review.md
 
     def _publish(self, agent_result: dict[str, Any]) -> dict[str, Any]:
         summary_md = (agent_result.get("summary_md") or "").strip()
@@ -37,6 +37,13 @@ class ReviewCommand(BaseCommand):
             raise OpencodeOutputError(
                 f"agent output 'key_issues' must be list, got {type(key_issues).__name__}"
             )
+
+        # 0. 预读每个 file 的 source（用于校验 improved_code 与 start_line 对齐）
+        file_sources: dict[str, list[str]] = {}
+        for issue in key_issues:
+            fp = issue.get("file") if isinstance(issue, dict) else None
+            if fp and fp not in file_sources:
+                file_sources[fp] = self._read_file_lines(fp)
 
         # 1. 顶层 summary 评论
         top_comment_id: int | None = None
@@ -53,7 +60,10 @@ class ReviewCommand(BaseCommand):
         inline_skipped: list[dict[str, Any]] = []
         for issue in key_issues:
             try:
-                normalised = self._normalise_issue(issue)
+                normalised = self._normalise_issue(
+                    issue,
+                    file_lines=file_sources.get(issue.get("file", ""), []),
+                )
             except ValueError as e:
                 logger.warning(
                     "review.skip_invalid_issue project={} mr={} issue={} err={}",
@@ -85,8 +95,11 @@ class ReviewCommand(BaseCommand):
         }
 
     # ---------- helpers ----------
-    @staticmethod
-    def _normalise_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    def _normalise_issue(
+        self,
+        issue: dict[str, Any],
+        file_lines: list[str] | None = None,
+    ) -> dict[str, Any]:
         """校验 + 构造 inline comment 的 body.
 
         Body 布局 (PR-Agent review 风格):
@@ -128,16 +141,82 @@ class ReviewCommand(BaseCommand):
 
         body = head_line + content
 
-        # 可 Apply 的 suggestion 块 (仅当 improved_code 非空)
+        # 可 Apply 的 suggestion 块（仅当 improved_code 非空且与 start_line 对齐）
         if improved:
-            body += (
-                "\n\n```suggestion:-0\n"
-                f"{improved}\n"
-                "```"
-            )
-
+            aligned = self._check_suggestion_aligned(file_lines, start_line, improved)
+            if aligned:
+                body += (
+                    "\n\n```suggestion:-0\n"
+                    f"{improved}\n"
+                    "```"
+                )
+            else:
+                logger.warning(
+                    "review.suggestion_misaligned project={} mr={} file={} start_line={} — "
+                    "improved_code 第一行与 file 中 start_line 处代码不匹配，降级为纯文字描述",
+                    self.project_id, self.mr_iid, file_path, start_line,
+                )
         return {
             "file": file_path,
             "new_line": start_line,
             "body": body,
         }
+
+    @staticmethod
+    def _check_suggestion_aligned(
+        file_lines: list[str] | None,
+        start_line: int,
+        improved_code: str,
+    ) -> bool:
+        """校验 improved_code 第一行确实是替换 file 中 start_line 那一行.
+
+        启发式:
+          1. improved_code 第一非空行的"主体 token"（去缩进后 ≥3 字符的标识符）
+             必须出现在 file[start_line-1] 中（说明替换目标就是这一行）
+          2. 或 file[start_line-1] 是 `def foo(...)` 行，improved_code 第一行
+             也是 `def foo(...)` 行（说明改进目标就是这个函数）
+        """
+        if not file_lines or start_line < 1 or start_line > len(file_lines):
+            return False
+        target = file_lines[start_line - 1]
+        imp_lines = [l for l in improved_code.split("\n") if l.strip()]
+        if not imp_lines:
+            return False
+        first = imp_lines[0]
+        # 同 def 行（且函数名一致 — 避免 SQL/eval 等多 def 文件的误匹配）
+        if target.lstrip().startswith("def ") and first.lstrip().startswith("def "):
+            import re as _re
+            m_t = _re.match(r"\s*def\s+(\w+)", target)
+            m_f = _re.match(r"\s*def\s+(\w+)", first)
+            if m_t and m_f and m_t.group(1) == m_f.group(1):
+                return True
+        # 同 class 行
+        if target.lstrip().startswith("class ") and first.lstrip().startswith("class "):
+            return True
+        # token overlap: 共享 ≥3 字符的标识符
+        import re
+        target_tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", target))
+        first_tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", first))
+        # 排除太通用的 token
+        common_stop = {"def", "return", "self", "None", "True", "False", "and", "or",
+                       "not", "if", "else", "elif", "for", "while", "in", "is",
+                       "import", "from", "class", "try", "except", "finally",
+                       "with", "as", "raise", "pass", "lambda", "yield"}
+        overlap = (target_tokens & first_tokens) - common_stop
+        return bool(overlap)
+
+    def _read_file_lines(self, file_path: str) -> list[str]:
+        """从当前 worktree 读 file 源，按行 split；读不到返回 []."""
+        try:
+            from pathlib import Path
+            ws = getattr(self, "ws", None)
+            wt = Path(ws.worktree) if ws and getattr(ws, "worktree", None) else None
+            if not wt or not wt.is_dir():
+                return []
+            p = wt / file_path
+            if not p.exists():
+                return []
+            return p.read_text(encoding="utf-8", errors="replace").split("\n")
+        except Exception as e:
+            logger.warning("review._read_file_lines failed file={} err={}", file_path, e)
+            return []

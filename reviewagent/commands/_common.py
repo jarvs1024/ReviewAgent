@@ -199,6 +199,7 @@ class BaseCommand:
                 git_url=git_url,
                 tag=self.COMMAND_NAME,
             )
+            self.ws = ws  # 让 _publish 等子类方法能拿到 worktree 路径
 
             # 4. 调 opencode agent
             oc_result = opencode.run(

@@ -69,15 +69,36 @@ tools:
 - 数组，可空
 - 每条字段：
   - `file`        - 相对仓库根的文件路径（与 diff 头部 `diff --git a/... b/...` 完全一致）
-  - `start_line`  - 起始**新文件**行号（`+` 加 1 起；指向需要 review 的位置）
+  - `start_line`  - 起始**新文件**行号（`+` 加 1 起）。**必须等于 `improved_code` 第一行要替换的目标行号**（即被改进代码块的最顶行，例如 `def foo(...)` 行，或被替换的那一行）。**不能**指向 bug 触发行（log/调用点/赋值行）—— 那样 suggestion 块会贴错位置。若拿不准 start_line 与 improved_code 的对应，宁可不填 `improved_code`
   - `end_line`    - 结束行号（一般 = start_line，除非争议跨多行）
   - `header`      - 1-2 词的标题，例如 `Potential Bug` / `Security` / `Style` / `Typo`
   - `content`     - 简洁、有具体场景说明的描述。不要 "可能有问题" / "建议优化" 等空话
   - `severity`    - `high` / `medium` / `low` 之一
-  - `existing_code` - **可选**。若 issue 可一行 patch 修复，**必须**填入 diff 中对应 + 行的字面文本（含缩进），UI 上会作为原代码块
-  - `improved_code`  - **可选**。当且仅当 `existing_code` 存在时填。**必须**能直接 Apply（保留所有缩进、`+` 前缀去掉后只剩代码）。Python 端会把它渲染为 ```suggestion:-0 块，GitLab UI 显示「应用建议」按钮
+  - `existing_code` - **可选**。若 issue 可一行 patch 修复，**必须**填入从 `start_line` 起的 diff 中对应 + 行的字面文本（含缩进），UI 上会作为原代码块
+  - `improved_code`  - **可选**。当且仅当 `existing_code` 存在时填。**必须**能直接 Apply（保留所有缩进、`+` 前缀去掉后只剩代码）。**第一行必须是替换 `start_line` 那一行的版本**（不是 bug 触发行处的代码）。Python 端会把它渲染为 ```suggestion:-0 块，GitLab UI 显示「应用建议」按钮。若第一行与 file 中 `start_line` 处代码不一致，Python 端会自动丢弃 suggestion 块并只发文字描述
   - `importance`    - **可选**。1-10 整数，按 PR-Agent 风格：9-10 阻断合入，7-8 强烈建议修，5-6 可选，1-4 锦上添花
   - `label`         - **可选**。分类标签：`possible bug` / `enhancement` / `code quality` / `style` / `security` / `performance` / `documentation` / `testing` 之一
+
+## start_line 对齐规则（**最关键，违反即降级**）
+
+`start_line` 是 GitLab suggestion 块替换/插入的**目标行号**，不是"bug 触发行"。
+
+- ✅ `start_line` = `improved_code` 第一行要替换/插入的那一行
+  - 改进一个函数：`start_line` = 该函数 `def` 那一行
+  - 替换一行赋值：`start_line` = 该赋值行
+  - 在某行后插入新代码：`start_line` = 该行
+- ❌ `start_line` ≠ bug 触发行（log/print 行、调用点行、注释行）
+- ❌ `start_line` ≠ 文件中 issue 第一次出现的最早行
+
+**强制流程**：
+1. 用 `read` 工具打开 `file` 字段所指的文件，看实际内容
+2. 找到"修复目标"那一行（多数情况是 `def` 行）
+3. 把"修复目标"的行号作为 `start_line`
+4. 写 `improved_code`，**第一行必须是 `start_line` 那一行的修改版**（保留 `def foo(...):` 主体、修改参数或 body）
+
+反例（**会导致 suggestion 块贴错位置**）:
+- 改进 `add_tags` 的 mutable default，但 `start_line` = 17（DB_PASSWORD 行）
+- 改进 `find_user` 的 SQL injection，但 `start_line` = 39（log_event 的 def 行）
 
 ## 检视原则
 
