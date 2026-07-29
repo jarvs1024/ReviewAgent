@@ -63,18 +63,24 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 
 ### `improved_code` 第一行匹配
 
-`improved_code` 的第一行必须与 `start_line` 处的源行"语义同一行"：
+`improved_code` 的第一行必须与 `start_line` 处的源行"语义同一行"（1-to-1 / 1-to-N 替换）：
 - 改 `q = f"..."` 为 `q = "..."` → ✅ 同赋值变量
 - 改 `def foo(x):` 为 `def foo(x, y=1):` → ✅ 同 def 同名
-- 改 `return open(p).read()` 为 `with open(p) as f:\n    return f.read()` → ❌（第一行是 `with` 不是 `return`）→ 这种情况该把 start_line 设到下一行（如果有），否则降级
+- 改 `return open(p).read()` 为 `with open(p) as f:\n    return f.read()` → ✅ 多行替换（Python 端会校验 existing_code 是否对齐 + improved 行数 > existing 行数 → 放行）
+- 改 `except:` 为 `except (json.JSONDecodeError, ValueError):` → ✅ 同 except 关键字
+- 改 `SECRET_TOKEN = "..."` 为 `SECRET_TOKEN = os.environ.get("API_SECRET_TOKEN", "")` → ✅ 同变量赋值（必须为每个可疑 bug 都产出 suggestion）
 
 ### self-check（写完每条 suggestion 后）
 
 - ✅ `file` 在 VALID NEW LINES 里有这个文件？
-- ✅ `start_line` 是 VALID NEW LINES 里**精确等于** `existing_code` 所在行的那个数字？
-- ✅ `improved_code` 第一行与 `start_line` 处源行的 "前 4 字符前缀" 一致？
+- ✅ `start_line` 是 VALID NEW LINES 里**精确等于** `existing_code` 第一行所在行的那个数字？
+- ✅ `improved_code` 第一行与 `start_line` 处源行匹配:
+  - **1-to-1 替换**: 第一行前 4 字符前缀一致
+  - **1-to-N 多行替换**: `existing_code` 行数 < `improved_code` 行数 (合法 — return → with + return)
+  - **同 except 关键字**: `except:` → `except (X, Y):` 是合法的
 
-任一为否 → 改 `start_line` 或省略 `improved_code`。
+任一为否 → 改 `start_line` / 调整 existing_code / 改进 improved_code。**不要轻易省略 suggestion** —
+每个可疑 bug 都应该有一条 suggestion (除非确实不在 VALID NEW LINES 范围内)。
 
 # 输出（严格 JSON）
 

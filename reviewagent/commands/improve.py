@@ -223,10 +223,24 @@ class ImproveCommand(BaseCommand):
                 file_sources=file_sources,
             )
             if decision["action"] == "post":
+                body_to_post = normalised["body"]
+                nc = decision.get("normalised_code")
+                if nc and nc != normalised["improved_code"]:
+                    logger.info(
+                        "improve.fix_indent project={} mr={} file={} line={}",
+                        self.project_id, self.mr_iid, file_path, decision["new_line"],
+                    )
+                    n_lines = len(nc.split("\n"))
+                    sev = normalised.get("severity", "medium").upper()
+                    body_to_post = (
+                        f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
+                        f"{normalised['rationale']}\n\n"
+                        f"```suggestion:-0+{n_lines}\n{nc}\n```"
+                    )
                 note_id = self.gitlab.post_mr_discussion(
                     self.project_id,
                     self.mr_iid,
-                    normalised["body"],
+                    body_to_post,
                     file_path=file_path,
                     new_line=decision["new_line"],
                 )
@@ -338,13 +352,69 @@ class ImproveCommand(BaseCommand):
             return {"action": "general", "new_line": start_line,
                     "reason": "file content unavailable for alignment check"}
 
-        target_line = file_lines[start_line - 1].strip()
+        target_line_raw = file_lines[start_line - 1] if start_line - 1 < len(file_lines) else ""
+        target_line = target_line_raw.strip()
         imp_first = (improved_code.splitlines()[0] if improved_code else "").strip()
+
+        # 4a. 多行替换（improved 行数 > existing 行数）→ 第一行可以完全不同
+        #     场景: return open(p).read() → with open(p) as f: \n return f.read()
+        #     此时第一行是 with 而原行是 return — 这是合法的 "1→N" 替换
+        existing_lines = existing_code.strip("\n").split("\n") if existing_code and existing_code.strip() else []
+        improved_lines = improved_code.strip("\n").split("\n") if improved_code else []
+        is_multi_line_replacement = (
+            bool(existing_lines)
+            and len(improved_lines) > len(existing_lines)
+            and existing_lines[0].strip() == target_line
+        )
+
+        if is_multi_line_replacement:
+            # 信任模型: existing_code 已通过 snap 校验 + improved 行数 > existing 行数
+            # 说明模型在把单行展开成多行(如 with... + return...)
+            # 但仍要校验: improved 第一行缩进 == target_line 缩进, 否则自动补齐
+            normalised_code = self._fix_indent(target_line_raw, improved_code)
+            logger.info(
+                "improve.multiline_replace project={} mr={} file={} line={} existing_lines={} improved_lines={}",
+                self.project_id, self.mr_iid, file_path, start_line,
+                len(existing_lines), len(improved_lines),
+            )
+            # 更新 normalised_code 到 normalisation 结果 (在 publish 阶段生效)
+            return {"action": "post", "new_line": start_line, "reason": "multi_line_replacement",
+                    "normalised_code": normalised_code}
+
+        # 4b. 正常的对齐检查 (1→1 或 N→N 等行数替换)
         if not _code_first_line_matches(target_line, imp_first):
             return {"action": "general", "new_line": start_line,
                     "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
 
-        return {"action": "post", "new_line": start_line, "reason": "ok"}
+        # 4c. 缩进修正: 若 improved_code 第一行缺缩进, 自动补齐
+        normalised_code = self._fix_indent(target_line_raw, improved_code)
+
+        return {"action": "post", "new_line": start_line, "reason": "ok",
+                "normalised_code": normalised_code}
+
+    @staticmethod
+    def _fix_indent(target_line: str, improved_code: str) -> str:
+        """确保 improved_code 第一行的缩进 == target_line 的缩进.
+
+        模型有时会忘记给 improved 第一行加缩进, 导致 Apply 后格式错乱.
+        例如: target=`    q = f"..."`, improved=`q = "..."\n    return ...`
+        → 修正为 `    q = "..."\n    return ...`
+        """
+        lines = improved_code.split("\n")
+        if not lines or not target_line:
+            return improved_code
+        # 提取 target 的前导空白
+        target_indent = target_line[: len(target_line) - len(target_line.lstrip())]
+        # 第一行当前前导空白
+        first = lines[0]
+        first_indent_len = len(first) - len(first.lstrip())
+        target_indent_len = len(target_indent)
+        if first_indent_len < target_indent_len:
+            # 补齐缺失的缩进
+            pad = target_indent[first_indent_len:]
+            lines[0] = pad + first
+            return "\n".join(lines)
+        return improved_code
 
     @staticmethod
     def _normalise_suggestion(s: dict[str, Any]) -> dict[str, Any]:
@@ -367,10 +437,18 @@ class ImproveCommand(BaseCommand):
         label = (s.get("label") or "enhancement").strip()
         severity = (s.get("severity") or "medium").strip().lower()
 
+        # GitLab suggestion 格式: ```suggestion:-A+B
+        # - A (默认 0, 负数表示从 new_line 往下删除 A 行)
+        # - B (正数) = 替换 B 行(包含 new_line 那行), 建议块内容填这里
+        # pr-agent 用法: range = existing_lines_end - existing_lines_start + 1
+        # 我们没有 end_line, 但有 existing_code 行数 → range = existing 行数(最少 1)
+        existing_lines = existing.split("\n") if existing else []
+        range_n = max(1, len(existing_lines))
+
         body = (
             f"**[{severity.upper()}]** **{header}** — {label}\n\n"
             f"{rationale}\n\n"
-            f"```suggestion:-0\n{improved}\n```"
+            f"```suggestion:-0+{range_n}\n{improved}\n```"
         )
         return {
             "file": file_path,
@@ -378,6 +456,8 @@ class ImproveCommand(BaseCommand):
             "improved_code": improved,
             "header": header,
             "rationale": rationale,
+            "label": label,
+            "severity": severity,
             "body": body,
         }
 
@@ -402,6 +482,9 @@ def _code_first_line_matches(target_line: str, improved_first: str) -> bool:
 
     # 0. 前缀必须一致（去除前导空白后前 4 字符一致）— 防止 "sys.stderr.write" vs "def log_event"
     # 这种整行重写的情况
+    # 注：调用方应在调用前已经判定 "这是多行替换" (improved 行数 > existing 行数),
+    # 在那种情况下 improved_first 不需要和 target_line 是同类操作 (e.g. return → with),
+    # 所以多行替换应当从外部直接放行, 不进此函数
     t_pref = target_line.lstrip()[:4]
     f_pref = improved_first.lstrip()[:4]
     if t_pref != f_pref:
@@ -426,6 +509,11 @@ def _code_first_line_matches(target_line: str, improved_first: str) -> bool:
         m_f = re.match(r"class\s+(\w+)", f)
         if m_t and m_f and m_t.group(1) == m_f.group(1):
             return True
+
+    # except 行（bare except → typed except）— 两者都以 except: 开头
+    if t.startswith("except") and f.startswith("except"):
+        # 都是 except 关键字开头, 即便 f 加了 (X, Y) 参数也算同一行
+        return True
 
     # 赋值 / 调用同名前缀
     m_t = re.match(r"([A-Za-z_]\w*)\s*[=(.]", t)
