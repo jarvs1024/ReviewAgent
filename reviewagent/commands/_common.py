@@ -214,6 +214,22 @@ class BaseCommand:
             completion_tokens = oc_result.completion_tokens
             model_used = oc_result.model or self.model
 
+            if isinstance(agent_result, dict):
+                _preview = str(agent_result)
+                if len(_preview) > 4000:
+                    _preview = _preview[:4000] + "...(truncated)"
+                logger.info(
+                    "{}.agent_raw project={} mr={} keys={} preview={}",
+                    self.COMMAND_NAME, self.project_id, self.mr_iid,
+                    list(agent_result.keys()), _preview,
+                )
+            else:
+                logger.info(
+                    "{}.agent_raw project={} mr={} type={} preview={!r}",
+                    self.COMMAND_NAME, self.project_id, self.mr_iid,
+                    type(agent_result).__name__, str(agent_result)[:300],
+                )
+
             # 5. 校验（必须 dict）
             if not isinstance(agent_result, dict):
                 raise OpencodeOutputError(

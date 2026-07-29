@@ -73,8 +73,70 @@ class ImproveCommand(BaseCommand):
                 continue
         return []
 
+    @staticmethod
+    def _find_line_by_existing_code(
+        file_lines: list[str],
+        existing_code: str,
+        *,
+        hint_line: int = 0,
+        max_window: int = 5,
+    ) -> int | None:
+        """在 file_lines 中搜索 existing_code 块，返回匹配首行行号（1-based）.
+
+        匹配策略（按优先级）:
+          1. 从 hint_line 附近 ±max_window 找最接近的完整块匹配
+          2. 整文件从头到尾找第一个完整块匹配
+          3. 找首行精确匹配（fallback — 处理 existing_code 只有一行的情况）
+
+        返回 None 表示没找到.
+        """
+        if not file_lines or not existing_code.strip():
+            return None
+        target_lines = existing_code.strip("\n").split("\n")
+        target_first = target_lines[0].strip()
+        if not target_first:
+            return None
+
+        n = len(file_lines)
+        m = len(target_lines)
+
+        def _block_matches_at(start_idx: int) -> bool:
+            if start_idx + m > n:
+                return False
+            for j in range(m):
+                if file_lines[start_idx + j].strip() != target_lines[j].strip():
+                    return False
+            return True
+
+        # 1. hint_line 附近（±max_window）
+        if hint_line >= 1:
+            lo = max(1, hint_line - max_window)
+            hi = min(n - m + 1, hint_line + max_window)
+            best: int | None = None
+            best_dist = max_window + 1
+            for s in range(lo, hi + 1):
+                if _block_matches_at(s - 1):
+                    dist = abs(s - hint_line)
+                    if dist < best_dist:
+                        best = s
+                        best_dist = dist
+            if best is not None:
+                return best
+
+        # 2. 整文件从头找
+        for s in range(1, n - m + 2):
+            if _block_matches_at(s - 1):
+                return s
+
+        # 3. 首行精确匹配（fallback）
+        for i, line in enumerate(file_lines, start=1):
+            if line.strip() == target_first:
+                return i
+        return None
+
     def _build_user_prompt(self) -> str:
-        """把 diff 的 valid new_line 集合喂给 agent — 严格约束它的 start_line 取值."""
+        """把 diff 的 valid new_line 集合 + 完整文件源码喂给 agent —
+        严格约束它的 start_line 取值，让模型能精确数出文件行号。"""
         line_map = self._diff_line_map()
         if not line_map:
             return (
@@ -82,6 +144,19 @@ class ImproveCommand(BaseCommand):
                 "（变更内容见上方附件文件）。"
             )
         formatted = format_line_map_for_prompt(line_map)
+
+        # 收集每个文件的源码（带 `<行号>: ` 前缀，方便模型精确数行）
+        file_blocks: list[str] = []
+        for fp in sorted(line_map.keys()):
+            lines = self._read_file_lines(fp)
+            if not lines:
+                continue
+            numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
+            file_blocks.append(
+                f"### 完整源码：`{fp}`（共 {len(lines)} 行；行号在左侧）\n```\n{numbered}\n```"
+            )
+        files_text = "\n\n".join(file_blocks) if file_blocks else "(no files)"
+
         return (
             "请按你的 system prompt 处理当前 MR 的 diff\n"
             "（变更内容见上方附件文件）。\n\n"
@@ -91,7 +166,12 @@ class ImproveCommand(BaseCommand):
             "若你怀疑某 issue 的目标行不在此集合里（context 行 / 删除行 / "
             "跨文件推断），请放弃 `improved_code`，改为在 `summary_md` 里文字描述，"
             "不要强行填一个错位的 suggestion。\n\n"
-            f"{formatted}\n"
+            f"{formatted}\n\n"
+            "## 完整文件源码（带行号）\n\n"
+            "**强烈建议**：每条 suggestion 的 `start_line` 必须**精确等于** "
+            "下方源码里 `existing_code` 第一行对应的行号。"
+            "Python 端会用 `existing_code` 反查行号校验 — 行号错位的会被自动降级。\n\n"
+            f"{files_text}\n"
         )
 
     def _publish(self, agent_result: dict[str, Any]) -> dict[str, Any]:
@@ -133,10 +213,12 @@ class ImproveCommand(BaseCommand):
             file_path = normalised["file"]
             start_line = normalised["new_line"]
             improved = normalised["improved_code"]
+            existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
             decision = self._validate_suggestion(
                 file_path=file_path,
                 start_line=start_line,
                 improved_code=improved,
+                existing_code=existing,
                 line_map=line_map,
                 file_sources=file_sources,
             )
@@ -201,15 +283,18 @@ class ImproveCommand(BaseCommand):
         file_path: str,
         start_line: int,
         improved_code: str,
+        existing_code: str = "",
         line_map: dict[str, set[int]],
         file_sources: dict[str, list[str]],
     ) -> dict[str, Any]:
         """校验 + snap — 返回 {"action": post|general|drop, "new_line": int, "reason": str}.
 
         校验顺序:
-          1. new_line 是否在 diff valid 集合内；不在 → snap 到最近 valid
-          2. snap 后 improved_code 第一行是否与 file[start_line-1] 匹配
-          3. 任一不匹配 → degrade 为 general comment
+          1. file 在 diff 中？否则 drop
+          2. 优先用 existing_code 反查真实行号（model 经常把 start_line 写错，
+             但 existing_code 内容是对的）— 比 snap 准
+          3. 反查结果不在 diff valid 集合 → snap 到最近 valid
+          4. improved_code 第一行 vs file[start_line-1] 不匹配 → degrade
         """
         valid = line_map.get(file_path)
         # 文件不在 diff 中（agent 乱猜）→ drop
@@ -217,22 +302,38 @@ class ImproveCommand(BaseCommand):
             return {"action": "drop", "new_line": start_line,
                     "reason": f"file '{file_path}' not in diff"}
 
-        # 1. snap 到最近 valid
-        snapped = find_nearest_valid_line(file_path, start_line, line_map)
-        if snapped is None:
-            return {"action": "drop", "new_line": start_line,
-                    "reason": "no valid line in file"}
-        if snapped != start_line:
-            logger.info(
-                "improve.snap_line project={} mr={} file={} {} -> {}",
-                self.project_id, self.mr_iid, file_path, start_line, snapped,
-            )
-        start_line = snapped
-
-        # 2. improved_code 第一行 vs file[start_line-1] 对齐检查
+        # 预读文件
         if file_path not in file_sources:
             file_sources[file_path] = self._read_file_lines(file_path)
         file_lines = file_sources[file_path]
+
+        # 2. 用 existing_code 反查真实行号
+        actual_line: int | None = None
+        if existing_code and existing_code.strip():
+            actual_line = self._find_line_by_existing_code(
+                file_lines, existing_code, hint_line=start_line, max_window=8,
+            )
+            if actual_line is not None and actual_line != start_line:
+                logger.info(
+                    "improve.snap_to_existing project={} mr={} file={} {} -> {} (from existing_code)",
+                    self.project_id, self.mr_iid, file_path, start_line, actual_line,
+                )
+                start_line = actual_line
+
+        # 3. snap 到最近 valid（如果上面没改）
+        if actual_line is None:
+            snapped = find_nearest_valid_line(file_path, start_line, line_map)
+            if snapped is None:
+                return {"action": "drop", "new_line": start_line,
+                        "reason": "no valid line in file"}
+            if snapped != start_line:
+                logger.info(
+                    "improve.snap_line project={} mr={} file={} {} -> {}",
+                    self.project_id, self.mr_iid, file_path, start_line, snapped,
+                )
+                start_line = snapped
+
+        # 4. improved_code 第一行 vs file[start_line-1] 对齐检查
         if not file_lines or start_line - 1 >= len(file_lines):
             return {"action": "general", "new_line": start_line,
                     "reason": "file content unavailable for alignment check"}

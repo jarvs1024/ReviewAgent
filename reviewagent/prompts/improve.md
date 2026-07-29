@@ -39,17 +39,42 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 
 ## 严格约束（违反即降级为普通文字）
 
+**🔴 必做：在输出任何 suggestion 之前，先用 `read` 工具读 target 文件的源码，对照 `start_line` 确认行号。**
+
+行号错位是 GitLab API 的硬拒原因之一（"line must be part of the MR diff"）。
+**没有用 read 工具读过文件就直接输出 start_line 的 suggestion 会被 Python 端校验拒绝。**
+
+### 流程（强制）
+
+1. 先 `read <file>` 把目标文件读进 context
+2. 对每个疑似 bug，从读到的源码里**精确数出 `start_line`**
+3. 把 `start_line` 与 `existing_code` 同时给出 — Python 端会用 `existing_code` 反查行号校验
+4. **不要用 diff 的 `+` 行序号当行号** — diff 的 `+` 是 1-indexed 但有 `@@` 头偏移，**数错是常态**
+
+### start_line 取值规则
+
 1. `start_line` **必须且只能取自 VALID NEW LINES** — 这是唯一合法的 suggestion 锚点
-2. 不在 VALID NEW LINES 里的行号 = GitLab API 会拒（"line must be part of the MR diff"）
+2. 不在 VALID NEW LINES 里的行号 = GitLab API 会拒
 3. 不要用 context 行（`@@` 附近不变的行）做 suggestion 锚点
 4. 不要用删除行（`-` 行）做 suggestion 锚点
-5. 如果你怀疑某个 issue 的真正目标行**不在** VALID NEW LINES 里（譬如跨函数推断、引用其他文件的代码、context 行里的 bug）：
+5. 如果你怀疑某个 issue 的真正目标行**不在** VALID NEW LINES 里：
    - **不要填 `improved_code`**，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
    - 或直接不写这条 suggestion（`suggestions: []` 也是合法输出）
-6. **`improved_code` 的第一行必须与 `start_line` 处的源行"语义同一行"**：
-   - 改 `q = f"..."` 为 `q = "..."` → ✅ 同赋值变量
-   - 改 `def foo(x):` 为 `def foo(x, y=1):` → ✅ 同 def 同名
-   - 改 `return open(p).read()` 为 `with open(p) as f:\n    return f.read()` → ❌（第一行是 `with` 不是 `return`）→ 这种情况该把 start_line 设到下一行（如果有），否则降级
+
+### `improved_code` 第一行匹配
+
+`improved_code` 的第一行必须与 `start_line` 处的源行"语义同一行"：
+- 改 `q = f"..."` 为 `q = "..."` → ✅ 同赋值变量
+- 改 `def foo(x):` 为 `def foo(x, y=1):` → ✅ 同 def 同名
+- 改 `return open(p).read()` 为 `with open(p) as f:\n    return f.read()` → ❌（第一行是 `with` 不是 `return`）→ 这种情况该把 start_line 设到下一行（如果有），否则降级
+
+### self-check（写完每条 suggestion 后）
+
+- ✅ `file` 在 VALID NEW LINES 里有这个文件？
+- ✅ `start_line` 是 VALID NEW LINES 里**精确等于** `existing_code` 所在行的那个数字？
+- ✅ `improved_code` 第一行与 `start_line` 处源行的 "前 4 字符前缀" 一致？
+
+任一为否 → 改 `start_line` 或省略 `improved_code`。
 
 # 输出（严格 JSON）
 
