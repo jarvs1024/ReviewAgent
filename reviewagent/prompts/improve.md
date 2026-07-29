@@ -61,6 +61,21 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
    - **不要填 `improved_code`**，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
    - 或直接不写这条 suggestion（`suggestions: []` 也是合法输出）
 
+### 🔴 强制要求: 每个可疑 bug 都必须有一条 suggestion
+
+diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 inline suggestion (除非确实无法 Apply)：
+- 硬编码 secret、SQL 注入、可变默认参数、文件未关闭、裸 except、eval、MD5、pickle 等常见反模式 → 一律产出 suggestion
+- 哪怕你不确定 100% 是 bug，也给出建议 — reviewer 会判断采纳与否
+- 不要因为"看起来修复较复杂"或"涉及部署配置"就跳过 — env var / 参数化 / `with` 块都是已知套路
+
+**禁用的跳过理由**（之前出过此类问题）:
+- ❌ "这是 module-level 配置，不算代码 bug" → 仍要给 env var 替换
+- ❌ "eval 没有完美替代" → 用 `sum()` / `ast.literal_eval` 即可
+- ❌ "pickle 必须保留" → 给出 `with` 关闭 + 提示 JSON 替代
+- ❌ "MD5 在内网用没问题" → 一律建议 pbkdf2_hmac / sha256
+
+如果实在无法构造合法 suggestion（极少见），在 summary_md 里明确列出该 bug 并解释为什么未给 suggestion。
+
 ### `improved_code` 第一行匹配
 
 `improved_code` 的第一行必须与 `start_line` 处的源行"语义同一行"（1-to-1 / 1-to-N 替换）：
