@@ -44,8 +44,8 @@ class Config:
     rq_worker_count: int = 3  # 并发 worker 数
 
     # ---- 命令链（每个 MR 按顺序串行执行）----
-    pr_commands: tuple[str, ...] = ("describe", "review", "improve")
-    push_commands: tuple[str, ...] = ("describe", "review")
+    pr_commands: tuple[str, ...] = ("describe", "improve")
+    push_commands: tuple[str, ...] = ("describe", "improve")
 
     # ---- 存储 ----
     data_dir: Path = field(default_factory=lambda: Path("./data"))
@@ -94,8 +94,8 @@ class Config:
             rq_queue_name=_env("RQ_QUEUE_NAME", "review"),
             rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "600")),
             rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
-            pr_commands=_env_tuple("PR_COMMANDS", "describe,review,improve"),
-            push_commands=_env_tuple("PUSH_COMMANDS", "describe,review"),
+            pr_commands=_env_tuple("PR_COMMANDS", "describe,improve"),
+            push_commands=_env_tuple("PUSH_COMMANDS", "describe,improve"),
             data_dir=Path(_env("REVIEWAGENT_DATA_DIR", "./data")),
             log_level=_env("REVIEWAGENT_LOG_LEVEL", "INFO"),
             mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "30")),
