@@ -9,7 +9,7 @@ output_schema:
       description: 优化后的 MR title（≤ 60 字，保留原意）
     description_md:
       type: string
-      description: MR description Markdown，以 "## Description" 开头 + 1-4 行中文 bullet
+      description: MR description Markdown，以 "## 变更概览" 开头 + 1-4 行中文 bullet
   required:
     - title
     - description_md
@@ -36,13 +36,13 @@ tools:
 ```json
 {
   "title": "≤60 字的中文 title",
-  "description_md": "## Description\n\n- 8字内含文件/类名的中文 bullet\n\n- 8字内含函数名的中文 bullet"
+  "description_md": "## 变更概览\n\n- 8字内含文件/类名的中文 bullet\n\n- 8字内含函数名的中文 bullet"
 }
 ```
 
 ## description_md 字面格式（**必须遵守**）
 
-1. **首行必须字面是 `## Description`**（两个 `#` 后空格，非 `###`，不要 `**` 加粗）
+1. **首行必须字面是 `## 变更概览`**（两个 `#` 后空格，非 `###`，不要 `**` 加粗）
 2. 紧接 **空一行**
 3. 再放 **1-4 条 bullet**，每条以 `- ` 开头
 4. 每条 bullet 字面长度 **不超过 8 个中文字**（含标点，**不含反引号内文**）。超过必须压缩
@@ -57,11 +57,11 @@ tools:
 ```json
 {
   "title": "新增 marker 错位回归验证脚本",
-  "description_md": "## Description\n\n- 新增 `services/manual_observe_class_nested.py` 验证 marker 修复\n\n- 定义 `ComplianceOrchestrator` 类，含 `evaluate` 及嵌套函数 `inner_score`\n\n- 覆盖类方法 + 内嵌函数 + 默认参数的错位场景\n\n- 验证 marker 修复在不同行号与外层边界条件下通用生效"
+  "description_md": "## 变更概览\n\n- 新增 `services/manual_observe_class_nested.py` 验证 marker 修复\n\n- 定义 `ComplianceOrchestrator` 类，含 `evaluate` 及嵌套函数 `inner_score`\n\n- 覆盖类方法 + 内嵌函数 + 默认参数的错位场景\n\n- 验证 marker 修复在不同行号与外层边界条件下通用生效"
 }
 ```
 
-注意：`## Description` 是 **两个 `#`**，**非 `###`**，**不加粗**。这是 GitLab UI 渲染约定的最小标题 + 居中排版（与 PR-Agent 同）。
+注意：`## 变更概览` 是 **两个 `#`**，**非 `###`**，**不加粗**。这是 GitLab UI 渲染约定的最小标题 + 居中排版。
 
 # 工作原则
 

@@ -69,17 +69,17 @@ class DescribeCommand(BaseCommand):
 
     @staticmethod
     def _normalize_description(raw: str) -> str:
-        """把常见 description 标题变体归一到字面 `## Description`.
+        """把常见 description 标题变体归一到字面 `## 变更概览`.
 
-        触发场景: MiniMax-M2.7 model 经常输出 `### **Description**` / `## 📝 Description`,
-        而 pr-agent 风格统一是 `## Description` (两个 #，不加粗).
+        触发场景: MiniMax-M2.7 model 经常输出 `### **变更概览**` / `## 📝 变更概览`,
+        而 pr-agent 风格统一是 `## 变更概览` (两个 #，不加粗).
         """
         if not raw:
             return raw
         lines = raw.split("\n")
         for i in range(min(3, len(lines))):
             stripped = lines[i].strip()
-            if re.fullmatch(r"#+\s*\**\s*Description\s*\**", stripped):
-                lines[i] = "## Description"
+            if re.fullmatch(r"#+\s*\**\s*(变更概览|Description|Change[ ]?[Oo]verview|Summary)\s*\**", stripped):
+                lines[i] = "## 变更概览"
                 break
         return "\n".join(lines)
