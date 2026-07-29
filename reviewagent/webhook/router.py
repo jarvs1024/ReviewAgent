@@ -35,6 +35,8 @@ async def webhook(request: Request) -> dict:
 
     from reviewagent.workers.tasks import enqueue_mr_chain, enqueue_command_from_note
 
+    logger.info("webhook.received object_kind={} event_type={}", object_kind, payload.get("event_type", ""))
+
     if object_kind in ("merge_request", "push"):
         return await _handle_code_change(payload, object_kind, enqueue_mr_chain)
     if object_kind == "note":
@@ -65,13 +67,20 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         logger.info("webhook.skip state={} project={} mr={}", mr.state, mr.project_id, mr.mr_iid)
         return {"status": "skipped", "reason": f"state={mr.state}"}
 
-    # 3. open / reopen（push → push_commands 处理 code update；避免重复）
-    if mr.action not in ("open", "reopen"):
+    # 3. 处理不同 action
+    if mr.action == "update":
+        # update 事件：仅当有新 commit 时才触发 push_commands
+        if not locks.check_diff_head_changed(mr.project_id, mr.mr_iid, mr.head_sha):
+            logger.info("webhook.skip action=update (no new commit) project={} mr={}", mr.project_id, mr.mr_iid)
+            return {"status": "skipped", "reason": "action=update no new commit"}
+        commands = config.push_commands
+    elif mr.action in ("open", "reopen"):
+        commands = config.pr_commands if object_kind == "merge_request" else config.push_commands
+    else:
         logger.info("webhook.skip action={} project={} mr={}", mr.action, mr.project_id, mr.mr_iid)
         return {"status": "skipped", "reason": f"action={mr.action}"}
 
     # 4. cooldown
-    commands = config.pr_commands if object_kind == "merge_request" else config.push_commands
     first_cmd = commands[0]
     if locks.should_skip_cooldown(mr.project_id, mr.mr_iid, first_cmd):
         logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)

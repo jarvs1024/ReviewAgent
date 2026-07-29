@@ -29,6 +29,32 @@ class MRLockManager:
             self._redis = _redis_mod.from_url(config.redis_url, decode_responses=True)
         return self._redis
 
+    def check_diff_head_changed(self, project_id: int, mr_iid: int, head_sha: str) -> bool:
+        """检查 MR 的 diff head SHA 是否变化（判断是否有新 commit）.
+
+        Redis key: reviewagent:diff_head:{project_id}:{mr_iid}
+        首次调用时存储并返回 True；后续调用比较是否变化.
+        Redis 不可用时 fail-open (返回 True，不阻塞).
+        """
+        if not head_sha:
+            return False
+        key = f"reviewagent:diff_head:{project_id}:{mr_iid}"
+        try:
+            r = self._get_redis()
+            prev = r.get(key)
+            if prev is None:
+                # 首次存储
+                r.set(key, head_sha)
+                return True
+            if prev == head_sha:
+                return False
+            # SHA 变了 → 新 commit
+            r.set(key, head_sha)
+            return True
+        except Exception as e:
+            logger.warning("locks.diff_head redis failed (fail-open): {}", e)
+            return True
+
     def is_bot(self, username: str) -> bool:
         """判断是否为 bot 自己（防回环）."""
         if not username:

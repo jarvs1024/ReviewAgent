@@ -18,12 +18,14 @@ class MRHookPayload:
     source_branch: str
     target_branch: str
     state: str
+    head_sha: str = ""          # diff_refs.head_sha — 用于判断是否有新 commit
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "MRHookPayload":
         obj = payload.get("object_attributes", {})
         proj = payload.get("project", {})
         author = payload.get("user", {})
+        diff_refs = obj.get("diff_refs", {}) or {}
         return cls(
             project_id=proj.get("id", 0),
             mr_iid=obj.get("iid", 0),
@@ -33,6 +35,7 @@ class MRHookPayload:
             source_branch=obj.get("source_branch", ""),
             target_branch=obj.get("target_branch", ""),
             state=obj.get("state", "opened"),
+            head_sha=diff_refs.get("head_sha", ""),
         )
 
 
