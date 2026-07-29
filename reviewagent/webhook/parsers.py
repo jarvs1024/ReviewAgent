@@ -26,6 +26,12 @@ class MRHookPayload:
         proj = payload.get("project", {})
         author = payload.get("user", {})
         diff_refs = obj.get("diff_refs", {}) or {}
+        last_commit = obj.get("last_commit", {}) or {}
+        head_sha = (
+            diff_refs.get("head_sha", "")
+            or last_commit.get("id", "")
+            or (payload.get("diff_refs") or {}).get("head_sha", "")
+        )
         return cls(
             project_id=proj.get("id", 0),
             mr_iid=obj.get("iid", 0),
@@ -35,7 +41,7 @@ class MRHookPayload:
             source_branch=obj.get("source_branch", ""),
             target_branch=obj.get("target_branch", ""),
             state=obj.get("state", "opened"),
-            head_sha=diff_refs.get("head_sha", ""),
+            head_sha=head_sha,
         )
 
 

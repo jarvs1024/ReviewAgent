@@ -71,8 +71,11 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
     if mr.action == "update":
         # update 事件：仅当有新 commit 时才触发 push_commands
         if not locks.check_diff_head_changed(mr.project_id, mr.mr_iid, mr.head_sha):
-            logger.info("webhook.skip action=update (no new commit) project={} mr={}", mr.project_id, mr.mr_iid)
+            logger.info("webhook.skip action=update (no new commit) project={} mr={} head_sha={!r}",
+                        mr.project_id, mr.mr_iid, mr.head_sha)
             return {"status": "skipped", "reason": "action=update no new commit"}
+        logger.info("webhook.action=update new commit project={} mr={} head_sha={}",
+                    mr.project_id, mr.mr_iid, mr.head_sha)
         commands = config.push_commands
     elif mr.action in ("open", "reopen"):
         commands = config.pr_commands if object_kind == "merge_request" else config.push_commands
