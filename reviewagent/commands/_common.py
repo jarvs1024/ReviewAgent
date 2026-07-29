@@ -92,6 +92,14 @@ class BaseCommand:
         """
         raise NotImplementedError
 
+    def _should_skip(self, mr_dict: dict) -> dict[str, Any] | None:
+        """子类 hook: 在拉 diff 之前决定是否跳过本次 run.
+
+        返回 None → 正常执行；返回 dict → 立即跳过，dict 作为 result_summary.
+        默认实现: 不跳过.
+        """
+        return None
+
     # ---------- 主流程 ----------
     def run(self) -> dict[str, Any]:
         """主入口: 返回执行结果摘要（不入库）."""
@@ -130,6 +138,24 @@ class BaseCommand:
                     duration_ms=duration_ms,
                 )
                 return {"status": "skipped", "reason": f"mr_state={mr_state}"}
+
+            # 1.6. 子类 hook: 一次性 / 幂等守卫（describe 的 "只改一次 title" 等场景）
+            skip_summary = self._should_skip(mr_dict)
+            if skip_summary is not None:
+                reason = skip_summary.get("reason", "subclass_skip")
+                logger.info(
+                    "{}.skip_custom project={} mr={} reason={}",
+                    self.COMMAND_NAME, self.project_id, self.mr_iid, reason,
+                )
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                events.emit_run_finished(
+                    run_id, status="skipped", model=model_used,
+                    prompt_tokens=0, completion_tokens=0,
+                    duration_ms=duration_ms,
+                )
+                skip_summary.setdefault("status", "skipped")
+                skip_summary["duration_ms"] = duration_ms
+                return skip_summary
 
             # 2. 拉 diff
             diff_text = self.gitlab.get_mr_diff(self.project_id, self.mr_iid)
