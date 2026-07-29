@@ -18,7 +18,6 @@ agent prompt 模板在 reviewagent/prompts/<name>.md（仓库内）+ 同步到
 ~/.config/opencode/agent/<name>.md（用 scripts/sync_agents.py 同步）。
 """
 from __future__ import annotations
-import json
 
 import time
 from typing import Any, Callable
@@ -214,13 +213,6 @@ class BaseCommand:
             prompt_tokens = oc_result.prompt_tokens
             completion_tokens = oc_result.completion_tokens
             model_used = oc_result.model or self.model
-
-            logger.info(
-                "{}.agent_raw project={} mr={} keys={} preview={}",
-                self.COMMAND_NAME, self.project_id, self.mr_iid,
-                list(agent_result.keys()) if isinstance(agent_result, dict) else type(agent_result).__name__,
-                json.dumps(agent_result, ensure_ascii=False)[:1500] if isinstance(agent_result, dict) else str(agent_result)[:500],
-            )
 
             # 5. 校验（必须 dict）
             if not isinstance(agent_result, dict):

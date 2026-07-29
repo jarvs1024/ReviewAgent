@@ -34,7 +34,22 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 
 - 工作目录已 `git worktree` 切到目标 MR source branch HEAD
 - `diff.patch`：本次 MR 的完整 unified diff（**含文件路径、`+` 起始行号**）
+- **VALID NEW LINES**（在 user message 里）— 本次 diff 每个文件所有 `+` 行的新文件行号集合
 - 仓库惯例 (`AGENTS.md`) 若有，可参考
+
+## 严格约束（违反即降级为普通文字）
+
+1. `start_line` **必须且只能取自 VALID NEW LINES** — 这是唯一合法的 suggestion 锚点
+2. 不在 VALID NEW LINES 里的行号 = GitLab API 会拒（"line must be part of the MR diff"）
+3. 不要用 context 行（`@@` 附近不变的行）做 suggestion 锚点
+4. 不要用删除行（`-` 行）做 suggestion 锚点
+5. 如果你怀疑某个 issue 的真正目标行**不在** VALID NEW LINES 里（譬如跨函数推断、引用其他文件的代码、context 行里的 bug）：
+   - **不要填 `improved_code`**，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
+   - 或直接不写这条 suggestion（`suggestions: []` 也是合法输出）
+6. **`improved_code` 的第一行必须与 `start_line` 处的源行"语义同一行"**：
+   - 改 `q = f"..."` 为 `q = "..."` → ✅ 同赋值变量
+   - 改 `def foo(x):` 为 `def foo(x, y=1):` → ✅ 同 def 同名
+   - 改 `return open(p).read()` 为 `with open(p) as f:\n    return f.read()` → ❌（第一行是 `with` 不是 `return`）→ 这种情况该把 start_line 设到下一行（如果有），否则降级
 
 # 输出（严格 JSON）
 
