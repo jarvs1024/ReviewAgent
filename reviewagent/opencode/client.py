@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,15 @@ class OpencodeTimeoutError(OpencodeError):
 
 class OpencodeOutputError(OpencodeError):
     """opencode 输出无法解析为 JSON."""
+
+
+@dataclass
+class OpencodeResult:
+    """opencode run 结果 — 包含解析后的 dict 和 token 统计."""
+    data: dict[str, Any]
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model: str = ""
 
 
 class OpencodeClient:
@@ -84,8 +94,8 @@ class OpencodeClient:
         workdir: Path,
         files: list[Path] | None = None,
         timeout: int | None = None,
-    ) -> dict[str, Any]:
-        """通过 HTTP API 调用 opencode serve 执行 agent；返回解析后的 dict.
+    ) -> OpencodeResult:
+        """通过 HTTP API 调用 opencode serve 执行 agent；返回 OpencodeResult.
 
         Args:
             agent: agent 名称（与 prompts/<name>.md 的 frontmatter.name 对应）
@@ -95,7 +105,7 @@ class OpencodeClient:
             timeout: 超时秒数；默认 self.default_timeout
 
         Returns:
-            解析后的 dict（agent 必须输出 JSON）
+            OpencodeResult — 包含解析后的 dict 和 token 统计
         """
         workdir_str = str(workdir)
         file_names = [f.name for f in (files or [])]
@@ -118,28 +128,38 @@ class OpencodeClient:
             raise OpencodeError(f"create session returned no id: {session}")
 
         try:
-            # 2. 构造 parts：先放 prompt text，再放 files（作为 data URL）
-            parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            # 2. 构造 parts：把 file 内容直接拼到 prompt text（不开 file parts）
+            #
+            # 原因: opencode HTTP API 的 file parts (data URL) 在内容较大时
+            #       会触发 Server 500 / 长时间无响应. 而 opencode HTTP API 不接受 cwd 字段,
+            #       agent 又无法访问 worktree 目录里的 .diff.patch.
+            #
+            # 解决: prompt 里直接贴 diff 内容, 截断到 config.opencode_max_diff_chars.
+            MAX_DIFF_CHARS = config.opencode_max_diff_chars
+            prompt_text = prompt
             for fp in files or []:
                 try:
-                    raw = fp.read_bytes()
+                    content = fp.read_text(encoding="utf-8", errors="replace")
                 except OSError as e:
                     raise OpencodeError(f"read file {fp} failed: {e}") from e
-                b64 = base64.b64encode(raw).decode("ascii")
-                parts.append({
-                    "type": "file",
-                    "filename": fp.name,
-                    "mime": "text/plain",
-                    "url": f"data:text/plain;base64,{b64}",
-                })
+                if len(content) > MAX_DIFF_CHARS:
+                    content = (
+                        content[:MAX_DIFF_CHARS]
+                        + f"\n\n[... diff 截断, 原始 {len(content)} 字符 ...]"
+                    )
+                prompt_text += f"\n\n## 文件: `{fp.name}`\n```\n{content}\n```\n"
+
+            parts: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
 
             # 3. 发消息（同步，等待完整响应）
+            # 注意: 不传 cwd 字段 — opencode 会用 daemon 自己的 cwd (通常是 /root).
+            #       如果传 cwd, opencode 会尝试在 worktree 里初始化 .opencode/,
+            #       git worktree 里没有这个目录, 导致 Server 500.
             payload = {
                 "parts": parts,
                 "model": {"providerID": self.model.split("/", 1)[0],
                           "modelID": self.model.split("/", 1)[1]},
                 "agent": agent,
-                "cwd": workdir_str,  # 让 opencode 在 workdir 内执行
             }
             try:
                 r = self._request(
@@ -153,7 +173,14 @@ class OpencodeClient:
                 raise OpencodeError(f"send message failed: {e}") from e
 
             msg = r.json()
-            return self._extract_assistant_dict(msg)
+            data = self._extract_assistant_dict(msg)
+            tokens = self._extract_tokens(msg)
+            return OpencodeResult(
+                data=data,
+                prompt_tokens=tokens.get("input", 0),
+                completion_tokens=tokens.get("output", 0),
+                model=msg.get("info", {}).get("modelID", ""),
+            )
 
         finally:
             # 4. 清理 session（epemeral；不污染 opencode 数据库）
@@ -217,6 +244,21 @@ class OpencodeClient:
             )
 
         return data
+
+    @staticmethod
+    def _extract_tokens(msg: dict[str, Any]) -> dict[str, int]:
+        """从 /message 响应中提取 token 统计.
+
+        msg.info.tokens 结构因 provider 不同:
+            {"input": 5227, "output": 2}  (deepseek/openai-compatible)
+            {"prompt": ..., "completion": ...}  (其他 provider)
+        """
+        info = msg.get("info") or {}
+        tokens = info.get("tokens") or {}
+        return {
+            "input": tokens.get("input", 0) or tokens.get("prompt", 0) or 0,
+            "output": tokens.get("output", 0) or tokens.get("completion", 0) or 0,
+        }
 
 
 def _extract_json_block(text: str) -> str:

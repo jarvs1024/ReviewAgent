@@ -17,6 +17,12 @@ def _env(key: str, default: str | None = None, required: bool = False) -> str:
     return val or ""
 
 
+def _env_tuple(key: str, default: str) -> tuple[str, ...]:
+    """读逗号分隔的 tuple（如 'describe,review,improve'）."""
+    raw = os.environ.get(key, default)
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
 @dataclass(frozen=True)
 class Config:
     # ---- GitLab ----
@@ -35,6 +41,11 @@ class Config:
     redis_url: str = "redis://localhost:6379/0"
     rq_queue_name: str = "review"
     rq_worker_timeout: int = 600  # 单任务超时（秒）
+    rq_worker_count: int = 3  # 并发 worker 数
+
+    # ---- 命令链（每个 MR 按顺序串行执行）----
+    pr_commands: tuple[str, ...] = ("describe", "review", "improve")
+    push_commands: tuple[str, ...] = ("describe", "review")
 
     # ---- 存储 ----
     data_dir: Path = field(default_factory=lambda: Path("./data"))
@@ -43,6 +54,10 @@ class Config:
     # ---- 限制 ----
     mr_cooldown_seconds: int = 30
     max_review_calls_per_mr: int = 0  # 0 = 不限；>0 强制上限
+
+    # ---- Diff 限制 ----
+    max_diff_chars: int = 50000              # 超过则跳过检视并评论告知
+    opencode_max_diff_chars: int = 20000     # opencode prompt 内联 diff 截断阈值
 
     # ---------- 派生路径 ----------
     @property
@@ -78,10 +93,15 @@ class Config:
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=_env("RQ_QUEUE_NAME", "review"),
             rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "600")),
+            rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
+            pr_commands=_env_tuple("PR_COMMANDS", "describe,review,improve"),
+            push_commands=_env_tuple("PUSH_COMMANDS", "describe,review"),
             data_dir=Path(_env("REVIEWAGENT_DATA_DIR", "./data")),
             log_level=_env("REVIEWAGENT_LOG_LEVEL", "INFO"),
             mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "30")),
             max_review_calls_per_mr=int(_env("MAX_REVIEW_CALLS_PER_MR", "0")),
+            max_diff_chars=int(_env("MAX_DIFF_CHARS", "50000")),
+            opencode_max_diff_chars=int(_env("OPENCODE_MAX_DIFF_CHARS", "20000")),
         )
         # 确保目录存在
         cfg.data_dir.mkdir(parents=True, exist_ok=True)

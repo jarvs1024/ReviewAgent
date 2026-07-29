@@ -25,12 +25,23 @@ class GitLabClient:
             private_token=config.gitlab_pat,
             timeout=30,
         )
+        # project 对象缓存 — 同一 command 执行中多次复用
+        self._project_cache: dict[int, Any] = {}
+
+    def _get_project(self, project_id: int):
+        """获取 project 对象（带缓存，避免重复 API 调用）."""
+        if project_id not in self._project_cache:
+            try:
+                self._project_cache[project_id] = self._gl.projects.get(project_id)
+            except gitlab.exceptions.GitlabError as e:
+                raise GitLabError(f"get_project failed: {e}") from e
+        return self._project_cache[project_id]
 
     # ---------- MR 元信息 ----------
     def get_mr(self, project_id: int, mr_iid: int) -> dict[str, Any]:
         """拉取 MR 完整元信息."""
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
         except gitlab.exceptions.GitlabError as e:
             raise GitLabError(f"get_mr failed: {e}") from e
@@ -43,7 +54,7 @@ class GitLabClient:
         同时支持 http:// 与 https:// GitLab 实例.
         """
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
         except gitlab.exceptions.GitlabError as e:
             raise GitLabError(f"get_project_git_url failed: {e}") from e
 
@@ -60,7 +71,7 @@ class GitLabClient:
         优先用 /changes 端点（单次返回元信息 + diffs），简化逻辑.
         """
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             changes = project.mergerequests.get(mr_iid, lazy=True).changes(get_all=True)
         except gitlab.exceptions.GitlabError as e:
             raise GitLabError(f"get_mr_diff failed: {e}") from e
@@ -90,7 +101,7 @@ class GitLabClient:
     def post_mr_comment(self, project_id: int, mr_iid: int, body: str) -> int:
         """发 MR 普通评论（不是行内 DiffNote）；返回 note_id."""
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
             note = mr.notes.create({"body": body})
         except gitlab.exceptions.GitlabError as e:
@@ -106,7 +117,7 @@ class GitLabClient:
         Inline discussion 的 position 必须带这三个 SHA，缺一不可.
         """
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
             refs = mr.diff_refs
         except gitlab.exceptions.GitlabError as e:
@@ -162,7 +173,7 @@ class GitLabClient:
             position["old_line"] = old_line
 
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
             discussion = mr.discussions.create(
                 {"body": body, "position": position}
@@ -188,7 +199,7 @@ class GitLabClient:
     def update_mr_description(self, project_id: int, mr_iid: int, description: str) -> None:
         """覆盖 MR description（不修改 title，由调用方决定）."""
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
             mr.description = description
             mr.save()
@@ -200,7 +211,7 @@ class GitLabClient:
     def update_mr_title(self, project_id: int, mr_iid: int, title: str) -> None:
         """修改 MR title（用于 /describe 优化标题）."""
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
             mr.title = title
             mr.save()
@@ -215,25 +226,29 @@ class GitLabClient:
         project_id: int,
         *,
         state: str = "merged",
+        source_branch: str | None = None,
         updated_after: str | None = None,
         updated_before: str | None = None,
         per_page: int = 100,
     ) -> list[dict[str, Any]]:
-        """列出项目 MR 列表（周报聚合用）.
+        """列出项目 MR 列表.
 
         Args:
             state: 'opened' | 'closed' | 'merged' | 'all'
+            source_branch: 按 source branch 过滤（push hook 用）
             updated_after: ISO 8601 时间字符串（包含）
             updated_before: ISO 8601 时间字符串（不包含）
         """
         params: dict[str, Any] = {"state": state, "per_page": per_page}
+        if source_branch:
+            params["source_branch"] = source_branch
         if updated_after:
             params["updated_after"] = updated_after
         if updated_before:
             params["updated_before"] = updated_before
 
         try:
-            project = self._gl.projects.get(project_id)
+            project = self._get_project(project_id)
             mrs = project.mergerequests.list(**params)
         except gitlab.exceptions.GitlabError as e:
             raise GitLabError(f"list_project_mrs failed: {e}") from e

@@ -17,10 +17,11 @@ from __future__ import annotations
 from typing import Any
 
 import redis
-from rq import Queue
+from rq import Queue, Retry
 
 from reviewagent.config import config
 from reviewagent.logging_setup import logger
+from reviewagent.webhook.locks import locks
 
 
 # ---------- Redis / Queue ----------
@@ -47,7 +48,7 @@ def _enqueue(
     triggered_by: str,
     actor_username: str,
 ) -> str:
-    """内部 — 把命令对应的 rq 函数入队."""
+    """内部 — 把命令对应的 rq 函数入队 (含重试)."""
     q = get_queue()
     job = q.enqueue(
         f"reviewagent.workers.tasks.run_{command}",
@@ -58,6 +59,7 @@ def _enqueue(
         job_timeout=config.rq_worker_timeout,
         result_ttl=3600,
         failure_ttl=86400,
+        retry=Retry(max=2, interval=10),
     )
     return job.id
 
@@ -100,6 +102,45 @@ COMMAND_ENQUEUERS = {
 }
 
 
+# ---------- MR 命令链 ----------
+def enqueue_mr_chain(
+    *,
+    commands: tuple[str, ...],
+    project_id: int,
+    mr_iid: int,
+    triggered_by: str,
+    actor_username: str,
+) -> list[str]:
+    """把 command 列表变成单个 RQ chain job（串行执行，避免并发竞态）.
+
+    设计:
+    - 单 job 内串行执行所有命令 (describe → review → improve)
+    - 失败隔离: 某命令失败不影响后续命令
+    - 不同 MR 并行: 多 worker 各自处理不同 MR 的 chain job
+    - 重试: 瞬态失败自动重试 2 次 (interval=10s)
+
+    返回: [job_id] (单元素列表)
+    """
+    q = get_queue()
+    job = q.enqueue(
+        "reviewagent.workers.tasks.run_mr_chain",
+        commands=list(commands),
+        project_id=project_id,
+        mr_iid=mr_iid,
+        triggered_by=triggered_by,
+        actor_username=actor_username,
+        job_timeout=config.rq_worker_timeout * len(commands),
+        result_ttl=3600,
+        failure_ttl=86400,
+        retry=Retry(max=2, interval=10),
+    )
+    logger.info(
+        "chain.enqueued commands={} project={} mr={} job={}",
+        list(commands), project_id, mr_iid, job.id,
+    )
+    return [job.id]
+
+
 def enqueue_command_from_note(
     *,
     command: str,
@@ -108,7 +149,7 @@ def enqueue_command_from_note(
     triggered_by: str,
     actor_username: str,
 ) -> str:
-    """Note Hook 入队 — 按 command 字符串分发."""
+    """Note Hook 入队 — 单个命令，不串链."""
     fn = COMMAND_ENQUEUERS.get(command)
     if fn is None:
         logger.warning("workers.unsupported_command cmd={}", command)
@@ -167,3 +208,36 @@ def run_review(**kw) -> dict[str, Any]:
 
 def run_improve(**kw) -> dict[str, Any]:
     return _run_command("improve", **kw)
+
+
+def run_mr_chain(
+    *,
+    commands: list[str],
+    project_id: int,
+    mr_iid: int,
+    triggered_by: str,
+    actor_username: str,
+) -> list[dict[str, Any]]:
+    """串行执行命令链 — 单 RQ job 内按顺序跑完所有命令.
+
+    失败隔离: 某命令失败不影响后续命令执行.
+    返回: 每个命令的执行结果列表.
+    """
+    results: list[dict[str, Any]] = []
+    for cmd in commands:
+        try:
+            result = _run_command(
+                cmd,
+                project_id=project_id,
+                mr_iid=mr_iid,
+                triggered_by=triggered_by,
+                actor_username=actor_username,
+            )
+            results.append({"command": cmd, "status": "success", "result": result})
+        except Exception as e:
+            logger.error(
+                "chain.run_{} failed project={} mr={} err={}",
+                cmd, project_id, mr_iid, e,
+            )
+            results.append({"command": cmd, "status": "failed", "error": str(e)})
+    return results

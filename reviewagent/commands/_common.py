@@ -106,6 +106,9 @@ class BaseCommand:
         t0 = time.monotonic()
         ws: Workspace | None = None
         result_summary: dict[str, Any] = {}
+        prompt_tokens = 0
+        completion_tokens = 0
+        model_used = self.model
 
         try:
             # 1. MR 元信息
@@ -113,10 +116,52 @@ class BaseCommand:
             mr = MRRecord.from_gitlab(mr_dict)
             events.emit_mr_activity(mr)
 
+            # 1.5. 执行时状态校验 — MR 可能在排队等待期间已 merged/closed
+            mr_state = mr_dict.get("state", "")
+            if mr_state and mr_state not in ("opened",):
+                logger.info(
+                    "{}.skip_state project={} mr={} state={}",
+                    self.COMMAND_NAME, self.project_id, self.mr_iid, mr_state,
+                )
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                events.emit_run_finished(
+                    run_id, status="skipped", model=model_used,
+                    prompt_tokens=0, completion_tokens=0,
+                    duration_ms=duration_ms,
+                )
+                return {"status": "skipped", "reason": f"mr_state={mr_state}"}
+
             # 2. 拉 diff
             diff_text = self.gitlab.get_mr_diff(self.project_id, self.mr_iid)
             if not diff_text.strip():
                 raise BaseCommandError("MR has no diff (empty or binary-only)")
+
+            # 2.5. MR 大小限制 — diff 过大时跳过并评论告知
+            if len(diff_text) > config.max_diff_chars:
+                logger.info(
+                    "{}.skip_large_diff project={} mr={} bytes={} limit={}",
+                    self.COMMAND_NAME, self.project_id, self.mr_iid,
+                    len(diff_text), config.max_diff_chars,
+                )
+                try:
+                    self.gitlab.post_mr_comment(
+                        self.project_id, self.mr_iid,
+                        f"> ⚠️ **{self.COMMAND_NAME}** 跳过：MR diff 过大"
+                        f"（{len(diff_text)} 字符 > 上限 {config.max_diff_chars}），"
+                        f"无法进行有效自动检视。",
+                    )
+                except GitLabError:
+                    pass  # best-effort comment
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                events.emit_run_finished(
+                    run_id, status="skipped", model=model_used,
+                    prompt_tokens=0, completion_tokens=0,
+                    duration_ms=duration_ms,
+                )
+                return {
+                    "status": "skipped", "reason": "diff_too_large",
+                    "diff_chars": len(diff_text), "limit": config.max_diff_chars,
+                }
 
             # 3. 准备 workspace
             git_url = self.gitlab.get_project_git_url(self.project_id)
@@ -126,16 +171,21 @@ class BaseCommand:
                 source_sha=mr_dict["sha"],
                 diff_text=diff_text,
                 git_url=git_url,
+                tag=self.COMMAND_NAME,
             )
 
             # 4. 调 opencode agent
-            agent_result = opencode.run(
+            oc_result = opencode.run(
                 agent=self.DEFAULT_AGENT,
                 prompt=self._build_user_prompt(),
                 workdir=ws.worktree,
                 files=[ws.diff_file],
                 timeout=config.rq_worker_timeout,
             )
+            agent_result = oc_result.data
+            prompt_tokens = oc_result.prompt_tokens
+            completion_tokens = oc_result.completion_tokens
+            model_used = oc_result.model or self.model
 
             # 5. 校验（必须 dict）
             if not isinstance(agent_result, dict):
@@ -149,8 +199,8 @@ class BaseCommand:
             # 7. 标记成功
             duration_ms = int((time.monotonic() - t0) * 1000)
             events.emit_run_finished(
-                run_id, status="success", model=self.model,
-                prompt_tokens=0, completion_tokens=0,
+                run_id, status="success", model=model_used,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
             result_summary.setdefault("status", "success")
@@ -165,7 +215,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             events.emit_run_finished(
                 run_id, status="failed", error=f"opencode: {e}",
-                prompt_tokens=0, completion_tokens=0,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
             raise BaseCommandError(f"opencode error: {e}") from e
@@ -173,7 +223,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             events.emit_run_finished(
                 run_id, status="failed", error=f"infra: {e}",
-                prompt_tokens=0, completion_tokens=0,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
             raise BaseCommandError(f"infra error: {e}") from e
@@ -181,7 +231,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             events.emit_run_finished(
                 run_id, status="failed", error=f"unexpected: {e}",
-                prompt_tokens=0, completion_tokens=0,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
             raise
