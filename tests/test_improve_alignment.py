@@ -266,3 +266,72 @@ def test_validate_missing_indent_gets_fixed():
     assert decision["action"] == "post", f"got: {decision}"
     assert decision.get("normalised_code", "").startswith("    "), \
         f"got normalised_code: {decision.get('normalised_code')!r}"
+
+
+# ---------- 新增文件 + agent 输出不连贯: 反查失败 → drop ----------
+
+def test_validate_existing_code_not_found_drops_when_start_in_valid():
+    """MR #134 案例: 文件是新增 (start_line in valid), 但 agent 给的 existing_code
+    在 worktree 文件 start_line 附近搜不到 (agent 视图过期或行号错位).
+    期望: 直接 drop, 不走 snap → 不发 '改进补充' 汇总评论.
+    """
+    cmd, file_sources = _make_command_with_source(
+        "x.py",
+        "def f():\n    items = []\n    items.append(1)\n    return items\n",
+    )
+    # 整文件 valid (新增文件场景)
+    line_map = {"x.py": {1, 2, 3, 4}}
+    decision = cmd._validate_suggestion(
+        file_path="x.py",
+        start_line=4,  # valid 内
+        improved_code="    except ValueError as e:\n        logger.error(e)",
+        existing_code="    except:",  # 文件里没有这行
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    assert decision["action"] == "drop", f"expected drop, got: {decision}"
+    assert "existing_code not found" in decision["reason"], f"reason: {decision['reason']}"
+
+
+def test_validate_existing_code_not_found_snap_when_start_outside_valid():
+    """start_line 不在 valid set 但 existing_code 反查命中 → 走原 snap 逻辑
+    (这是 agent 给错 start_line 但 existing_code 对的场景, 应该校正而非 drop).
+    """
+    cmd, file_sources = _make_command_with_source(
+        "x.py",
+        "def f():\n    except:\n        pass\n    return 1\n",
+    )
+    line_map = {"x.py": {1, 4}}  # only line 1 and 4 are diff-introduced
+    decision = cmd._validate_suggestion(
+        file_path="x.py",
+        start_line=2,  # not in valid (agent 给错行号)
+        improved_code="    except ValueError as e:\n        logger.error(e)",
+        existing_code="    except:",  # 实际在 line 2
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    # 反查命中 line 2, snap 后走 step 4 对齐
+    # improved 第一行 'except ValueError as e:' vs target line 2 'except:'
+    # 前 4 字符 exce == exce → 通过, 走 multi_line 判定
+    # improved 2 行 vs existing 1 行 → multi_line_replacement
+    # 尾行校验: improved_tail vs file[3:] ('return 1') — 应该 drop (dropped_or_general)
+    assert decision["action"] in ("drop", "general"), f"got: {decision}"
+
+
+def test_validate_no_existing_code_still_snaps():
+    """agent 没给 existing_code (空字符串) → 走原 snap 行为, 不被新逻辑影响."""
+    cmd, file_sources = _make_command_with_source(
+        "x.py",
+        "def f():\n    return items\n",
+    )
+    line_map = {"x.py": {1, 2}}
+    decision = cmd._validate_suggestion(
+        file_path="x.py",
+        start_line=2,  # in valid
+        improved_code="    return items or []",
+        existing_code="",  # agent 没给
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    # snap 跳过 (start_line=2 已在 valid), step 4 对齐: target='return items' vs imp='return items or []', 共享 token 'items' (>=5字符) → post
+    assert decision["action"] == "post", f"expected post, got: {decision}"

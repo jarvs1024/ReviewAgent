@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -222,3 +223,41 @@ async def dismissals(
     if rule_key:
         rows = [r for r in rows if r.get("file_path") == rule_key or r.get("reason") == rule_key]
     return {"total": len(rows), "dismissals": rows}
+@router.get("/dismissals/by-rule")
+async def dismissals_by_rule(
+    project_id: int | None = Query(None),
+    since: str | None = Query(None),
+) -> dict[str, Any]:
+    return {"rules": get_store().dismissals_by_rule(project_id=project_id, since=_parse_iso(since))}
+
+@router.get("/mrs/{project_id}/{mr_iid}/dismissals")
+async def mr_dismissals(project_id: int, mr_iid: int, limit: int = Query(200, ge=1, le=2000)) -> dict[str, Any]:
+    return {"dismissals": get_store().list_dismissals(project_id=project_id, mr_iid=mr_iid, limit=limit)}
+
+@router.get("/weekly-reports")
+async def list_weekly_reports(
+    project_id: int | None = Query(None), limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    from reviewagent.config import config
+    base = (config.weekly_reports_dir if hasattr(config, "weekly_reports_dir") else config.data_dir / "weekly_reports")
+    if not base.exists():
+        return {"reports": []}
+    files = []
+    for p in sorted(base.glob("weekly-*.json"), reverse=True):
+        if project_id and f"-{project_id}-" not in p.name and "project_id" in p.read_text(errors='replace')[:200]:
+            pass
+        files.append({"name": p.name, "path": str(p), "size": p.stat().st_size,
+                      "modified": p.stat().st_mtime})
+    return {"total": len(files), "reports": files[:limit]}
+
+@router.get("/weekly-reports/{name}")
+async def read_weekly_report(name: str) -> dict[str, Any]:
+    from reviewagent.config import config
+    base = (config.weekly_reports_dir if hasattr(config, "weekly_reports_dir") else config.data_dir / "weekly_reports")
+    if "/" in name or ".." in name:
+        raise HTTPException(400, "invalid name")
+    path = base / name
+    if not path.exists():
+        raise HTTPException(404, f"report not found: {name}")
+    return {"name": name, "json": json.loads(path.read_text(encoding="utf-8"))}
+

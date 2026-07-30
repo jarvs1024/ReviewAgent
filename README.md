@@ -101,10 +101,9 @@ rq worker review --url redis://localhost:6379/0
 | 功能 | 触发方式 | 状态 |
 |---|---|---|
 | `/describe` | MR open / update / Note `/describe` | ✅ |
-| `/review` | Note `/review` | ⏳ Phase 2 |
-| `/improve` | Note `/improve` | ⏳ Phase 2 |
-| Telemetry API | — | ⏳ Phase 3 |
-| 周报 | — | ⏳ Phase 4 |
+| `/improve` | Note `/improve` | ✅ |
+| Telemetry API (`/api/v1/telemetry/*`) | — | ✅ |
+| 周报 | — | ⛔ 不实现 |
 
 ## API
 
@@ -140,6 +139,6 @@ rq worker review --url redis://localhost:6379/0
 
 详见 `C:\Users\reviewer\.claude\plans\glistening-gathering-perlis.md`，Phase 1 完成后：
 
-- **Phase 2** — `/review` `/improve` agent prompt + 命令实现
+- **Phase 2** — `/improve` agent prompt + 命令实现
 - **Phase 3** — Telemetry API（`/api/v1/telemetry/*`）
 - **Phase 4** — 周报生成（agent 主导）
