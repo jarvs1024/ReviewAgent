@@ -175,7 +175,8 @@ class ImproveCommand(BaseCommand):
             f"{source_block}\n\n"
             f"### VALID NEW LINES（start_line 只能从此取）\n\n{vl_str}\n\n"
             f"## 输出\n\n"
-            f"按 system prompt 输出 JSON（只含本文件的 suggestions）。"
+            f"按 system prompt 输出 JSON。"
+            f"**summary_md 输出空字符串 `\"\"`**，只输出本文件的 suggestions。"
         )
 
     @staticmethod
@@ -212,9 +213,27 @@ class ImproveCommand(BaseCommand):
 
         merged_suggestions = list(seen.values())
 
-        # summary: 拼接所有 chunk 的摘要
-        if summaries:
-            merged_summary = "\n\n".join(summaries)
+        # summary: 从 suggestions 列表生成概览
+        total_suggestions = len(merged_suggestions)
+        if total_suggestions > 0:
+            items: list[str] = []
+            for s in merged_suggestions:
+                fp = s.get("file", "")
+                line = s.get("start_line", "")
+                header = (s.get("header") or "").strip()
+                severity = (s.get("severity") or "medium").upper()
+                label = s.get("label", "")
+                rationale = (s.get("rationale") or "").strip()
+                # 简短版: 文件 + 行号 + 标签 + header + 理由首句
+                short = rationale.split("。")[0].split("，")[0]
+                line_str = f"L{line}" if line else ""
+                items.append(
+                    f"- **`{fp}`**{line_str} — **{header}** [{severity}/{label}]: {short}"
+                )
+            merged_summary = (
+                "## 改进总览\n\n"
+                + "\n".join(items)
+            )
         else:
             merged_summary = "## 改进总览\n\n未发现问题。"
 
@@ -593,6 +612,30 @@ class ImproveCommand(BaseCommand):
         )
 
         if is_multi_line_replacement:
+            n_added = len(improved_lines) - len(existing_lines)
+
+            # 尾行校验: improved 末尾新增行必须保留 original 中 existing 之后的代码
+            # 防止 agent 只写新 docstring 丢掉 return 行
+            orig_after = file_lines[start_line - 1 + len(existing_lines):]
+            if n_added > 0 and orig_after:
+                n_check = min(n_added, len(orig_after), len(improved_lines))
+                improved_tail = improved_lines[-n_check:]
+                orig_tail = [l.strip() for l in orig_after[:n_check]]
+                match = all(
+                    it.strip() == ot for it, ot in zip(improved_tail, orig_tail)
+                )
+                if not match:
+                    logger.info(
+                        "improve.multiline_tail_mismatch project={} mr={} file={} "
+                        "line={} n_added={}",
+                        self.project_id, self.mr_iid, file_path,
+                        start_line, n_added,
+                    )
+                    return {"action": "general", "new_line": start_line,
+                            "reason": "multi-line replacement trailing lines "
+                                       "don't match source — agent dropped "
+                                       "original code"}
+
             # 信任模型: existing_code 已通过 snap 校验 + improved 行数 > existing 行数
             # 说明模型在把单行展开成多行(如 with... + return...)
             # 但仍要校验: improved 第一行缩进 == target_line 缩进, 否则自动补齐
@@ -614,7 +657,27 @@ class ImproveCommand(BaseCommand):
             return {"action": "general", "new_line": start_line,
                     "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
 
-        # 4c. 缩进修正: 若 improved_code 第一行缺缩进, 自动补齐
+        # 4c. 收缩检查: M < N 时，被多删的 existing 行不能是现有代码（context）
+        #     防止 agent 把 unchanged context 包进 existing_code 导致 GitLab 丢弃
+        if len(improved_lines) < len(existing_lines):
+            n_extra = len(existing_lines) - len(improved_lines)
+            extra_start = start_line - 1 + len(improved_lines)
+            for i in range(n_extra):
+                fp = extra_start + i  # 0-based
+                if fp < len(file_lines):
+                    extra_line = existing_lines[len(improved_lines) + i].strip()
+                    if extra_line == file_lines[fp].strip():
+                        # 被删行在新文件里仍然存在 — 是不该删的 context
+                        logger.info(
+                            "improve.shrink_drops_context project={} mr={} file={} "
+                            "line={} extra_line={!r}",
+                            self.project_id, self.mr_iid, file_path,
+                            start_line, extra_line,
+                        )
+                        return {"action": "general", "new_line": start_line,
+                                "reason": f"shrinking suggestion drops existing context line {fp+1}"}
+
+        # 4d. 缩进修正: 若 improved_code 第一行缺缩进, 自动补齐
         normalised_code = self._fix_indent(target_line_raw, improved_code)
 
         return {"action": "post", "new_line": start_line, "reason": "ok",
