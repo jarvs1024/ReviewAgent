@@ -136,51 +136,67 @@ class OpencodeClient:
             #
             # 解决: prompt 里直接贴 diff 内容, 截断到 config.opencode_max_diff_chars.
             MAX_DIFF_CHARS = config.opencode_max_diff_chars
-            prompt_text = prompt
-            for fp in files or []:
+            
+            # 重试逻辑：若 finish=length（模型输出被截断），减小 diff 后重试
+            last_error = None
+            for attempt in range(2):  # 最多重试 1 次
+                prompt_text = prompt
+                current_max = MAX_DIFF_CHARS // (2 ** attempt)  # 第 1 次: 原值, 第 2 次: 减半
+                for fp in files or []:
+                    try:
+                        content = fp.read_text(encoding="utf-8", errors="replace")
+                    except OSError as e:
+                        raise OpencodeError(f"read file {fp} failed: {e}") from e
+                    if len(content) > current_max:
+                        content = (
+                            content[:current_max]
+                            + f"\n\n[... diff 截断, 原始 {len(content)} 字符 ...]"
+                        )
+                    prompt_text += f"\n\n## 文件: `{fp.name}`\n```\n{content}\n```\n"
+
+                parts: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
+
+                # 3. 发消息（同步，等待完整响应）
+                # 注意: 不传 cwd 字段 — opencode 会用 daemon 自己的 cwd (通常是 /root).
+                #       如果传 cwd, opencode 会尝试在 worktree 里初始化 .opencode/,
+                #       git worktree 里没有这个目录, 导致 Server 500.
+                payload = {
+                    "parts": parts,
+                    "model": {"providerID": self.model.split("/", 1)[0],
+                              "modelID": self.model.split("/", 1)[1]},
+                    "agent": agent,
+                }
                 try:
-                    content = fp.read_text(encoding="utf-8", errors="replace")
-                except OSError as e:
-                    raise OpencodeError(f"read file {fp} failed: {e}") from e
-                if len(content) > MAX_DIFF_CHARS:
-                    content = (
-                        content[:MAX_DIFF_CHARS]
-                        + f"\n\n[... diff 截断, 原始 {len(content)} 字符 ...]"
+                    r = self._request(
+                        "POST", f"/session/{sid}/message",
+                        json=payload,
+                        timeout=timeout or self.default_timeout,
                     )
-                prompt_text += f"\n\n## 文件: `{fp.name}`\n```\n{content}\n```\n"
+                except httpx.TimeoutException as e:
+                    raise OpencodeTimeoutError(f"opencode timeout after {timeout or self.default_timeout}s") from e
+                except OpencodeError as e:
+                    raise OpencodeError(f"send message failed: {e}") from e
 
-            parts: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
-
-            # 3. 发消息（同步，等待完整响应）
-            # 注意: 不传 cwd 字段 — opencode 会用 daemon 自己的 cwd (通常是 /root).
-            #       如果传 cwd, opencode 会尝试在 worktree 里初始化 .opencode/,
-            #       git worktree 里没有这个目录, 导致 Server 500.
-            payload = {
-                "parts": parts,
-                "model": {"providerID": self.model.split("/", 1)[0],
-                          "modelID": self.model.split("/", 1)[1]},
-                "agent": agent,
-            }
-            try:
-                r = self._request(
-                    "POST", f"/session/{sid}/message",
-                    json=payload,
-                    timeout=timeout or self.default_timeout,
-                )
-            except httpx.TimeoutException as e:
-                raise OpencodeTimeoutError(f"opencode timeout after {timeout or self.default_timeout}s") from e
-            except OpencodeError as e:
-                raise OpencodeError(f"send message failed: {e}") from e
-
-            msg = r.json()
-            data = self._extract_assistant_dict(msg)
-            tokens = self._extract_tokens(msg)
-            return OpencodeResult(
-                data=data,
-                prompt_tokens=tokens.get("input", 0),
-                completion_tokens=tokens.get("output", 0),
-                model=msg.get("info", {}).get("modelID", ""),
-            )
+                msg = r.json()
+                try:
+                    data = self._extract_assistant_dict(msg)
+                    tokens = self._extract_tokens(msg)
+                    return OpencodeResult(
+                        data=data,
+                        prompt_tokens=tokens.get("input", 0),
+                        completion_tokens=tokens.get("output", 0),
+                        model=msg.get("info", {}).get("modelID", ""),
+                    )
+                except OpencodeOutputError as e:
+                    # 检查是否是 finish=length（模型输出被截断）
+                    if "finish=length" in str(e) and attempt == 0:
+                        logger.warning(
+                            "opencode.finish=length, retrying with smaller diff ({} -> {})",
+                            current_max, current_max // 2,
+                        )
+                        last_error = e
+                        continue  # 重试
+                    raise  # 其他错误或重试后仍失败，抛出
 
         finally:
             # 4. 清理 session（epemeral；不污染 opencode 数据库）
