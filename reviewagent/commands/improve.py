@@ -421,7 +421,6 @@ class ImproveCommand(BaseCommand):
         # 2. 每条 suggestion：先校验 new_line + improved_code 对齐
         inline_posted: list[str] = []
         inline_skipped: list[dict[str, Any]] = []
-        general_added: list[str] = []
         for raw in suggestions:
             try:
                 normalised = self._normalise_suggestion(raw)
@@ -500,43 +499,15 @@ class ImproveCommand(BaseCommand):
                         logger.warning("improve.record_suggestion failed: {}", e)
                 else:
                     inline_skipped.append({"suggestion": raw, "reason": "gitlab_rejected"})
-            elif decision["action"] == "general":
-                # 降级为 general comment（同一 file 聚合到一条）
-                general_added.append(
-                    f"- **{normalised['header']}** ({file_path}:{start_line}): "
-                    f"{normalised['rationale']}"
-                )
-                inline_skipped.append({
-                    "suggestion": raw,
-                    "reason": decision["reason"],
-                })
-                logger.warning(
-                    "improve.degrade_general project={} mr={} file={} line={} reason={}",
-                    self.project_id, self.mr_iid, file_path, start_line,
-                    decision["reason"],
-                )
             else:
-                # dropped
+                # action == "drop" — 不发任何评论, 仅记 telemetry
                 inline_skipped.append({"suggestion": raw, "reason": decision["reason"]})
-
-        # 把降级的条目合并到 summary 末尾（或发一条独立 follow-up）
-        if general_added:
-            try:
-                self.gitlab.post_mr_comment(
-                    self.project_id, self.mr_iid,
-                    "## 改进补充（无法 Apply 的建议）\n\n"
-                    + "\n".join(general_added)
-                    + "\n\n_以下建议因位置/内容不在 diff 范围内，未生成可 Apply 代码块；请人工核对。_",
-                )
-            except GitLabError as e:
-                logger.warning("improve.post_general_comment failed: {}", e)
 
         return {
             "top_comment_id": top_comment_id,
             "suggestions_count": len(suggestions),
             "inline_posted": len(inline_posted),
             "inline_skipped": len(inline_skipped),
-            "degraded_to_general": len(general_added),
         }
 
     def _validate_suggestion(
@@ -549,7 +520,7 @@ class ImproveCommand(BaseCommand):
         line_map: dict[str, set[int]],
         file_sources: dict[str, list[str]],
     ) -> dict[str, Any]:
-        """校验 + snap — 返回 {"action": post|general|drop, "new_line": int, "reason": str}.
+        """校验 + snap — 返回 {"action": "post"|"drop", "new_line": int, "reason": str}.
 
         校验顺序:
           1. file 在 diff 中？否则 drop
@@ -581,6 +552,19 @@ class ImproveCommand(BaseCommand):
                     self.project_id, self.mr_iid, file_path, start_line, actual_line,
                 )
                 start_line = actual_line
+            elif actual_line is None and start_line in valid:
+                # 反查失败但 start_line 在 valid set 内 — agent 给的 existing_code
+                # 在文件里搜不到 (典型: 视图过期 / 行号填错 / 文件已被同步之前改动).
+                # 不再走 snap + step 4 对齐 (那会 snap 到 valid 内某行然后对不上 → general,
+                # 误以为 "diff 范围"问题). 视为 agent 输出不连贯, 直接 drop.
+                logger.warning(
+                    "improve.existing_code_not_found project={} mr={} file={} "
+                    "start_line={} hint='{}'",
+                    self.project_id, self.mr_iid, file_path, start_line,
+                    existing_code[:80].replace("\n", " "),
+                )
+                return {"action": "drop", "new_line": start_line,
+                        "reason": "existing_code not found near start_line in worktree — agent output inconsistent"}
 
         # 3. snap 到最近 valid（如果上面没改）
         if actual_line is None:
@@ -597,7 +581,7 @@ class ImproveCommand(BaseCommand):
 
         # 4. improved_code 第一行 vs file[start_line-1] 对齐检查
         if not file_lines or start_line - 1 >= len(file_lines):
-            return {"action": "general", "new_line": start_line,
+            return {"action": "drop", "new_line": start_line,
                     "reason": "file content unavailable for alignment check"}
 
         target_line_raw = file_lines[start_line - 1] if start_line - 1 < len(file_lines) else ""
@@ -635,7 +619,7 @@ class ImproveCommand(BaseCommand):
                         self.project_id, self.mr_iid, file_path,
                         start_line, n_added,
                     )
-                    return {"action": "general", "new_line": start_line,
+                    return {"action": "drop", "new_line": start_line,
                             "reason": "multi-line replacement trailing lines "
                                        "don't match source — agent dropped "
                                        "original code"}
@@ -657,7 +641,7 @@ class ImproveCommand(BaseCommand):
         # existing_code 反查只负责校正行号，不能替代 improved_code 的语义对齐校验。
         # 否则模型只要给出任意存在的 existing_code，就可能把无关代码发布到该行。
         if not _code_first_line_matches(target_line, imp_first):
-            return {"action": "general", "new_line": start_line,
+            return {"action": "drop", "new_line": start_line,
                     "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
 
         # 4c. 收缩检查: M < N 时，被多删的 existing 行不能是现有代码（context）
@@ -677,7 +661,7 @@ class ImproveCommand(BaseCommand):
                             self.project_id, self.mr_iid, file_path,
                             start_line, extra_line,
                         )
-                        return {"action": "general", "new_line": start_line,
+                        return {"action": "drop", "new_line": start_line,
                                 "reason": f"shrinking suggestion drops existing context line {fp+1}"}
 
         # 4d. 缩进修正: 若 improved_code 第一行缺缩进, 自动补齐
