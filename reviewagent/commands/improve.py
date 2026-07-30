@@ -18,10 +18,13 @@
 """
 from __future__ import annotations
 
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from reviewagent.commands._common import BaseCommand, BaseCommandError
+from reviewagent.config import config
 from reviewagent.git.diff_lines import (
     find_nearest_valid_line,
     format_line_map_for_prompt,
@@ -29,7 +32,7 @@ from reviewagent.git.diff_lines import (
 )
 from reviewagent.gitlab.client import GitLabError
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import OpencodeOutputError
+from reviewagent.opencode.client import OpencodeOutputError, client as opencode
 
 
 # Backward-compat re-exports
@@ -51,6 +54,166 @@ class ImproveCommand(BaseCommand):
         "   • 回复 `/dismiss [理由]`\n"
         "\n理由会被记录，用于改进后续建议。"
     )
+    # ---------- 并行分块调用 ----------
+    def _call_agent(self, ws) -> dict[str, Any]:
+        """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果."""
+        line_map = self._diff_line_map()
+        files = sorted(line_map.keys())
+
+        if len(files) <= 1:
+            return super()._call_agent(ws)  # 单文件走原路径
+
+        # 按文件拆分 diff
+        diff_by_file = self._split_diff_by_file(ws.diff_file, files)
+
+        # 并行调用
+        workers = min(len(files), config.improve_parallel_workers)
+        logger.info(
+            "improve.parallel project={} mr={} files={} workers={}",
+            self.project_id, self.mr_iid, len(files), workers,
+        )
+
+        chunk_results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {}
+            for fp in files:
+                file_diff = diff_by_file.get(fp, "")
+                valid_lines = line_map.get(fp, set())
+                prompt = self._build_chunk_prompt(fp, file_diff, valid_lines, ws)
+                fut = pool.submit(self._call_chunk, prompt, ws, fp)
+                futures[fut] = fp
+            for fut in as_completed(futures):
+                fp = futures[fut]
+                try:
+                    result = fut.result()
+                    chunk_results.append(result)
+                except Exception as e:
+                    logger.error(
+                        "improve.chunk_failed project={} mr={} file={} err={}",
+                        self.project_id, self.mr_iid, fp, e,
+                    )
+                    # 单个 chunk 失败不影响其他
+                    chunk_results.append({"summary_md": "", "suggestions": []})
+
+        return self._merge_chunks(chunk_results)
+
+    def _call_chunk(self, prompt: str, ws, file_path: str) -> dict[str, Any]:
+        """单个 chunk 的 opencode 调用."""
+        logger.info(
+            "improve.chunk_start project={} mr={} file={}",
+            self.project_id, self.mr_iid, file_path,
+        )
+        oc_result = opencode.run(
+            agent=self.DEFAULT_AGENT,
+            prompt=prompt,
+            workdir=ws.worktree,
+            files=[],  # 不内联文件，prompt 里已包含 diff
+            timeout=config.rq_worker_timeout,
+        )
+        # 记录最后一个成功的结果 (token 统计)
+        self._last_oc_result = oc_result
+        logger.info(
+            "improve.chunk_done project={} mr={} file={} tokens_in={} tokens_out={}",
+            self.project_id, self.mr_iid, file_path,
+            oc_result.prompt_tokens, oc_result.completion_tokens,
+        )
+        return oc_result.data
+
+    @staticmethod
+    def _split_diff_by_file(diff_file: Path, files: list[str]) -> dict[str, str]:
+        """解析 unified diff，按文件拆分. 返回 {file_path: diff_text}."""
+        try:
+            full_diff = diff_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {}
+
+        result: dict[str, str] = {}
+        # 按 "diff --git" 分割
+        parts = re.split(r"(?=^diff --git )", full_diff, flags=re.MULTILINE)
+        for part in parts:
+            if not part.strip():
+                continue
+            # 提取文件路径: "diff --git a/xxx b/xxx"
+            m = re.match(r"diff --git a/.+ b/(.+)", part)
+            if m:
+                fp = m.group(1).strip()
+                result[fp] = part
+        return result
+
+    def _build_chunk_prompt(
+        self, file_path: str, file_diff: str, valid_lines: set[int], ws
+    ) -> str:
+        """构建单文件的精简 prompt."""
+        wt = str(ws.worktree)
+
+        # 读取完整源码
+        lines = self._read_file_lines(file_path)
+        if lines:
+            numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
+            source_block = f"### 完整源码：`{file_path}`（共 {len(lines)} 行）\n```\n{numbered}\n```"
+        else:
+            source_block = f"### 完整源码\n(无法读取 {file_path})"
+
+        # VALID NEW LINES
+        vl_sorted = sorted(valid_lines)
+        vl_str = f"{file_path}: {vl_sorted}"
+
+        return (
+            f"## 仓库规则\n\n"
+            f"规则文件在 `{wt}/.rules/` 目录下，请先 read 规则文件再检视。\n\n"
+            f"## 本次检视文件: `{file_path}`\n\n"
+            f"### diff\n```diff\n{file_diff}\n```\n\n"
+            f"{source_block}\n\n"
+            f"### VALID NEW LINES（start_line 只能从此取）\n\n{vl_str}\n\n"
+            f"## 输出\n\n"
+            f"按 system prompt 输出 JSON（只含本文件的 suggestions）。"
+        )
+
+    @staticmethod
+    def _merge_chunks(results: list[dict[str, Any]]) -> dict[str, Any]:
+        """合并多个 chunk 的结果."""
+        all_suggestions: list[dict[str, Any]] = []
+        summaries: list[str] = []
+
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            suggs = r.get("suggestions") or []
+            if isinstance(suggs, list):
+                all_suggestions.extend(suggs)
+            sm = (r.get("summary_md") or "").strip()
+            if sm:
+                summaries.append(sm)
+
+        # 去重: 同 file + 同 start_line 只保留 severity 最高的
+        seen: dict[str, dict[str, Any]] = {}
+        sev_order = {"high": 3, "medium": 2, "low": 1}
+        for s in all_suggestions:
+            if not isinstance(s, dict):
+                continue
+            key = f"{s.get('file', '')}:{s.get('start_line', 0)}"
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = s
+            else:
+                new_sev = sev_order.get((s.get("severity") or "medium").lower(), 2)
+                old_sev = sev_order.get((existing.get("severity") or "medium").lower(), 2)
+                if new_sev > old_sev:
+                    seen[key] = s
+
+        merged_suggestions = list(seen.values())
+
+        # summary: 拼接所有 chunk 的摘要
+        if summaries:
+            merged_summary = "\n\n".join(summaries)
+        else:
+            merged_summary = "## 改进总览\n\n未发现问题。"
+
+        return {
+            "summary_md": merged_summary,
+            "suggestions": merged_suggestions,
+        }
+
     # ---------- helpers ----------
     def _get_mr_head_sha(self) -> str | None:
         """获取当前 MR 的 head_sha (用于 record_suggestion 时记录发布 SHA)."""

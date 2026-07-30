@@ -139,32 +139,26 @@ def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str
     return "\n".join(parts).strip()
 
 
-# ---------- 主入口 ----------
-def build_repo_context(gitlab_client: Any, project_id: int) -> str:
-    """从仓库默认分支读取规则文件 + 规则目录, 渲染为 instruction_files 块.
+# ---------- 规则文件获取 ----------
+# 缓存: {cache_key: {path: content}}
+_files_cache: dict[str, dict[str, str]] = {}
+_files_cache_ts: dict[str, float] = {}
 
-    读取顺序:
-        1. config.repo_context_files 中列出的文件 (如 AGENTS.md)
-        2. config.repo_context_rules_dir 目录下的所有 .md 文件 (如 .agents/rules/*.md)
 
-    Args:
-        gitlab_client: GitLabClient 实例
-        project_id: GitLab project ID
-
-    Returns:
-        渲染后的 instruction_files 文本 (空字符串表示无规则文件)
-    """
+def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]:
+    """从仓库默认分支读取所有规则文件 (AGENTS.md + rules_dir). 带 TTL 缓存."""
     context_files = config.repo_context_files
     rules_dir = config.repo_context_rules_dir
 
     if not context_files and not rules_dir:
-        return ""
+        return {}
 
-    # 缓存键: project_id + 文件列表 + 规则目录
     cache_key = f"{project_id}:{','.join(context_files)}:{rules_dir}"
-    cached = _cache.get(cache_key)
-    if cached is not None:
-        return cached
+
+    # TTL 缓存检查
+    ts = _files_cache_ts.get(cache_key, 0)
+    if cache_key in _files_cache and (time.monotonic() - ts) < _CACHE_TTL_SECONDS:
+        return _files_cache[cache_key]
 
     # 获取默认分支
     try:
@@ -172,10 +166,11 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
         default_branch = getattr(project, "default_branch", None) or "main"
     except Exception as e:
         logger.warning("repo_context.get_default_branch failed project={}: {}", project_id, e)
-        return ""
+        return {}
+
+    files: dict[str, str] = {}
 
     # 1. 读取配置中列出的文件 (AGENTS.md 等)
-    files: dict[str, str] = {}
     for file_path in context_files:
         file_path = file_path.strip()
         if not file_path:
@@ -202,7 +197,6 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
             path = item.get("path", "")
             if not path.endswith(".md"):
                 continue
-            # 跳过已读取的文件 (避免重复)
             if path in files:
                 continue
             try:
@@ -213,17 +207,39 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
             if content:
                 files[path] = content.rstrip()
 
+    # 更新缓存
+    _files_cache[cache_key] = files
+    _files_cache_ts[cache_key] = time.monotonic()
+
+    if files:
+        rule_keys = extract_rule_keys("\n".join(files.values()))
+        logger.info(
+            "repo_context.loaded project={} files={} rules={}",
+            project_id, list(files.keys()), rule_keys[:20],
+        )
+
+    return files
+
+
+def fetch_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]:
+    """返回 {path: content} 字典 (原文, 不渲染). 供写入 worktree 让 agent 自己 read."""
+    return _fetch_all_rule_files(gitlab_client, project_id)
+
+
+# ---------- 主入口 ----------
+def build_repo_context(gitlab_client: Any, project_id: int) -> str:
+    """从仓库默认分支读取规则文件 + 规则目录, 渲染为 instruction_files 块.
+
+    Args:
+        gitlab_client: GitLabClient 实例
+        project_id: GitLab project ID
+
+    Returns:
+        渲染后的 instruction_files 文本 (空字符串表示无规则文件)
+    """
+    files = _fetch_all_rule_files(gitlab_client, project_id)
     if not files:
-        _cache.set(cache_key, "")
         return ""
 
     result = render_instruction_files(files, config.repo_context_max_lines)
-    _cache.set(cache_key, result)
-
-    rule_keys = extract_rule_keys(result)
-    logger.info(
-        "repo_context.loaded project={} files={} rules={}",
-        project_id, list(files.keys()), rule_keys[:20],
-    )
-
     return result

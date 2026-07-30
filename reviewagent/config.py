@@ -65,6 +65,9 @@ class Config:
     rule_key_prefix: str = "SSD"             # 规则键前缀 (如 SSD-RULE-NO-LOG-EXC)
     repo_context_max_lines: int = 2000       # 规则文件最大行数 (超出截断)
 
+    # ---- improve 并行 ----
+    improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:
@@ -112,6 +115,7 @@ class Config:
             repo_context_rules_dir=_env("REPO_CONTEXT_RULES_DIR", ".agents/rules"),
             rule_key_prefix=_env("RULE_KEY_PREFIX", "SSD"),
             repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "2000")),
+            improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
         )
         # 确保目录存在
         cfg.data_dir.mkdir(parents=True, exist_ok=True)

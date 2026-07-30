@@ -38,7 +38,7 @@ from reviewagent.opencode.client import (
     client as opencode,
 )
 from reviewagent.prompts import loader
-from reviewagent.repo_context import build_repo_context
+from reviewagent.repo_context import build_repo_context, fetch_rule_files
 from reviewagent.telemetry import events
 from reviewagent.telemetry.models import MRRecord, ReviewRun
 
@@ -78,6 +78,7 @@ class BaseCommand:
         self.prompt_cfg = loader.load(self.COMMAND_NAME)
         self.model = config.opencode_model  # 已配置 minimax/MiniMax-M2.7
         self.repo_context: str = ""  # AGENTS.md 等仓库规则 (run() 中填充)
+        self._last_oc_result = None  # 最后一次 opencode 调用结果 (token 统计用)
 
     # ---------- 子类可覆盖 ----------
     def _build_user_prompt(self) -> str:
@@ -101,6 +102,38 @@ class BaseCommand:
         默认实现: 不跳过.
         """
         return None
+
+    def _call_agent(self, ws) -> dict[str, Any]:
+        """调 opencode agent，返回解析后的 dict. 子类可覆盖实现并行等策略."""
+        oc_result = opencode.run(
+            agent=self.DEFAULT_AGENT,
+            prompt=self._build_user_prompt(),
+            workdir=ws.worktree,
+            files=[ws.diff_file],
+            timeout=config.rq_worker_timeout,
+        )
+        self._last_oc_result = oc_result
+        return oc_result.data
+
+    def _prepare_rules_in_worktree(self, ws) -> None:
+        """把规则文件下载到 worktree/.rules/ 供 agent 用 read 工具读取."""
+        try:
+            rules = fetch_rule_files(self.gitlab, self.project_id)
+        except Exception as e:
+            logger.warning("{}.fetch_rules failed (non-fatal): {}", self.COMMAND_NAME, e)
+            return
+        if not rules:
+            return
+        from pathlib import Path as _Path
+        rules_dir = _Path(ws.worktree) / ".rules"
+        rules_dir.mkdir(exist_ok=True)
+        for path, content in rules.items():
+            filename = _Path(path).name
+            (rules_dir / filename).write_text(content, encoding="utf-8")
+        logger.info(
+            "{}.rules_to_worktree project={} mr={} count={}",
+            self.COMMAND_NAME, self.project_id, self.mr_iid, len(rules),
+        )
 
     # ---------- 主流程 ----------
     def run(self) -> dict[str, Any]:
@@ -210,18 +243,14 @@ class BaseCommand:
             )
             self.ws = ws  # 让 _publish 等子类方法能拿到 worktree 路径
 
-            # 4. 调 opencode agent
-            oc_result = opencode.run(
-                agent=self.DEFAULT_AGENT,
-                prompt=self._build_user_prompt(),
-                workdir=ws.worktree,
-                files=[ws.diff_file],
-                timeout=config.rq_worker_timeout,
-            )
-            agent_result = oc_result.data
-            prompt_tokens = oc_result.prompt_tokens
-            completion_tokens = oc_result.completion_tokens
-            model_used = oc_result.model or self.model
+            # 3.5. 预下载规则文件到 worktree/.rules/ (供 agent read)
+            self._prepare_rules_in_worktree(ws)
+
+            # 4. 调 opencode agent（子类可覆盖 _call_agent 实现并行等策略）
+            agent_result = self._call_agent(ws)
+            prompt_tokens = self._last_oc_result.prompt_tokens if self._last_oc_result else 0
+            completion_tokens = self._last_oc_result.completion_tokens if self._last_oc_result else 0
+            model_used = (self._last_oc_result.model if self._last_oc_result else "") or self.model
 
             if isinstance(agent_result, dict):
                 _preview = str(agent_result)
