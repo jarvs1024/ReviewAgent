@@ -59,6 +59,11 @@ class Config:
     max_diff_chars: int = 50000              # 超过则跳过检视并评论告知
     opencode_max_diff_chars: int = 20000     # opencode prompt 内联 diff 截断阈值
 
+    # ---- AGENTS.md 仓库规则 ----
+    repo_context_files: tuple[str, ...] = ("AGENTS.md",)  # 从仓库默认分支读取的规则文件
+    rule_key_prefix: str = "ZLG"             # 规则键前缀 (如 ZLG-RULE-NO-LOG-EXC)
+    repo_context_max_lines: int = 500        # 规则文件最大行数 (超出截断)
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:
@@ -102,6 +107,9 @@ class Config:
             max_review_calls_per_mr=int(_env("MAX_REVIEW_CALLS_PER_MR", "0")),
             max_diff_chars=int(_env("MAX_DIFF_CHARS", "50000")),
             opencode_max_diff_chars=int(_env("OPENCODE_MAX_DIFF_CHARS", "20000")),
+            repo_context_files=_env_tuple("REPO_CONTEXT_FILES", "AGENTS.md"),
+            rule_key_prefix=_env("RULE_KEY_PREFIX", "ZLG"),
+            repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "500")),
         )
         # 确保目录存在
         cfg.data_dir.mkdir(parents=True, exist_ok=True)

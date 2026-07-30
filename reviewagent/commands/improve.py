@@ -156,8 +156,21 @@ class ImproveCommand(BaseCommand):
         """把 diff 的 valid new_line 集合 + 完整文件源码喂给 agent —
         严格约束它的 start_line 取值，让模型能精确数出文件行号。"""
         line_map = self._diff_line_map()
+
+        # 仓库规则上下文 (AGENTS.md) — 优先遵循
+        repo_ctx_block = ""
+        if self.repo_context:
+            repo_ctx_block = (
+                "## 仓库规则 (AGENTS.md) — 优先遵循\n\n"
+                "以下是本仓库的编码规范 / 检视规则。"
+                "**你的建议必须优先覆盖这些规则**：如果 diff 中存在违反下列规则的地方，"
+                "必须给出对应的 inline suggestion。\n\n"
+                f"{self.repo_context}\n\n"
+            )
+
         if not line_map:
             return (
+                f"{repo_ctx_block}"
                 "请按你的 system prompt 处理当前 MR 的 diff"
                 "（变更内容见上方附件文件）。"
             )
@@ -176,6 +189,7 @@ class ImproveCommand(BaseCommand):
         files_text = "\n\n".join(file_blocks) if file_blocks else "(no files)"
 
         return (
+            f"{repo_ctx_block}"
             "请按你的 system prompt 处理当前 MR 的 diff\n"
             "（变更内容见上方附件文件）。\n\n"
             "## diff 有效新增行（VALID NEW LINES）\n\n"

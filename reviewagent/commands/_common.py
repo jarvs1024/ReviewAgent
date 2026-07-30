@@ -38,6 +38,7 @@ from reviewagent.opencode.client import (
     client as opencode,
 )
 from reviewagent.prompts import loader
+from reviewagent.repo_context import build_repo_context
 from reviewagent.telemetry import events
 from reviewagent.telemetry.models import MRRecord, ReviewRun
 
@@ -76,6 +77,7 @@ class BaseCommand:
         self.gitlab = GitLabClient()
         self.prompt_cfg = loader.load(self.COMMAND_NAME)
         self.model = config.opencode_model  # 已配置 minimax/MiniMax-M2.7
+        self.repo_context: str = ""  # AGENTS.md 等仓库规则 (run() 中填充)
 
     # ---------- 子类可覆盖 ----------
     def _build_user_prompt(self) -> str:
@@ -123,6 +125,13 @@ class BaseCommand:
             mr_dict = self.gitlab.get_mr(self.project_id, self.mr_iid)
             mr = MRRecord.from_gitlab(mr_dict)
             events.emit_mr_activity(mr)
+
+            # 1.1. 加载仓库规则上下文 (AGENTS.md 等)
+            try:
+                self.repo_context = build_repo_context(self.gitlab, self.project_id)
+            except Exception as e:
+                logger.warning("{}.repo_context failed (non-fatal): {}", self.COMMAND_NAME, e)
+                self.repo_context = ""
 
             # 1.5. 执行时状态校验 — MR 可能在排队等待期间已 merged/closed
             mr_state = mr_dict.get("state", "")

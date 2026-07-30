@@ -35,7 +35,18 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 - 工作目录已 `git worktree` 切到目标 MR source branch HEAD
 - `diff.patch`：本次 MR 的完整 unified diff（**含文件路径、`+` 起始行号**）
 - **VALID NEW LINES**（在 user message 里）— 本次 diff 每个文件所有 `+` 行的新文件行号集合
-- 仓库惯例 (`AGENTS.md`) 若有，可参考
+- **仓库规则 (AGENTS.md)**（在 user message 里）— 本仓库的编码规范 / 检视规则，**必须优先遵循**
+
+## 仓库规则优先
+
+如果 user message 中包含 `<instruction_files>` 块（即仓库的 AGENTS.md 等规则文件），
+**你的建议必须优先覆盖这些规则**：
+
+1. 逐条检查 diff 中的 `+` 行是否违反规则文件中的任何条目
+2. 对于每条违规，必须给出对应的 inline suggestion（`improved_code` 修复后的代码）
+3. 在 `rationale` 字段中引用规则键（如 `ZLG-RULE-NO-LOG-EXC`），方便追踪
+4. 规则文件中的 severity 标注（critical/high/medium/low）应映射到 suggestion 的 `severity` 字段
+5. 如果 diff 没有违反任何规则，正常按通用代码质量标准给出建议即可
 
 ## 严格约束（违反即降级为普通文字）
 
