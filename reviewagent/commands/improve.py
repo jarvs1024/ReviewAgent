@@ -158,9 +158,18 @@ class ImproveCommand(BaseCommand):
         vl_sorted = sorted(valid_lines)
         vl_str = f"{file_path}: {vl_sorted}"
 
+        # 规则直接嵌入 (不依赖 agent read)
+        rules_block = ""
+        if self.repo_context:
+            rules_block = (
+                f"## 仓库规则（优先遵循）\n\n"
+                f"以下规则来自仓库 AGENTS.md 和 .agents/rules/，"
+                f"**你的建议必须优先覆盖这些规则**：\n\n"
+                f"{self.repo_context}\n\n"
+            )
+
         return (
-            f"## 仓库规则\n\n"
-            f"规则文件在 `{wt}/.rules/` 目录下，请先 read 规则文件再检视。\n\n"
+            f"{rules_block}"
             f"## 本次检视文件: `{file_path}`\n\n"
             f"### diff\n```diff\n{file_diff}\n```\n\n"
             f"{source_block}\n\n"

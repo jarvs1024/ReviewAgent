@@ -38,7 +38,7 @@ from reviewagent.opencode.client import (
     client as opencode,
 )
 from reviewagent.prompts import loader
-from reviewagent.repo_context import build_repo_context, fetch_rule_files
+from reviewagent.repo_context import build_repo_context
 from reviewagent.telemetry import events
 from reviewagent.telemetry.models import MRRecord, ReviewRun
 
@@ -114,26 +114,6 @@ class BaseCommand:
         )
         self._last_oc_result = oc_result
         return oc_result.data
-
-    def _prepare_rules_in_worktree(self, ws) -> None:
-        """把规则文件下载到 worktree/.rules/ 供 agent 用 read 工具读取."""
-        try:
-            rules = fetch_rule_files(self.gitlab, self.project_id)
-        except Exception as e:
-            logger.warning("{}.fetch_rules failed (non-fatal): {}", self.COMMAND_NAME, e)
-            return
-        if not rules:
-            return
-        from pathlib import Path as _Path
-        rules_dir = _Path(ws.worktree) / ".rules"
-        rules_dir.mkdir(exist_ok=True)
-        for path, content in rules.items():
-            filename = _Path(path).name
-            (rules_dir / filename).write_text(content, encoding="utf-8")
-        logger.info(
-            "{}.rules_to_worktree project={} mr={} count={}",
-            self.COMMAND_NAME, self.project_id, self.mr_iid, len(rules),
-        )
 
     # ---------- 主流程 ----------
     def run(self) -> dict[str, Any]:
@@ -243,8 +223,21 @@ class BaseCommand:
             )
             self.ws = ws  # 让 _publish 等子类方法能拿到 worktree 路径
 
-            # 3.5. 预下载规则文件到 worktree/.rules/ (供 agent read)
-            self._prepare_rules_in_worktree(ws)
+            # 3.7. 执行前二次校验 — MR 可能在排队期间已 merged/closed
+            fresh_mr = self.gitlab.get_mr(self.project_id, self.mr_iid)
+            fresh_state = fresh_mr.get("state", "")
+            if fresh_state and fresh_state not in ("opened",):
+                logger.info(
+                    "{}.skip_state_late project={} mr={} state={}",
+                    self.COMMAND_NAME, self.project_id, self.mr_iid, fresh_state,
+                )
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                events.emit_run_finished(
+                    run_id, status="skipped", model=model_used,
+                    prompt_tokens=0, completion_tokens=0,
+                    duration_ms=duration_ms,
+                )
+                return {"status": "skipped", "reason": f"mr_state_late={fresh_state}"}
 
             # 4. 调 opencode agent（子类可覆盖 _call_agent 实现并行等策略）
             agent_result = self._call_agent(ws)
