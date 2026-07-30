@@ -85,3 +85,100 @@ def test_target_changed_multiline_region():
     posted = "def f():\n    x = 1\n    y = 2\n    return x + y\n"
     current = "def f():\n    x = 10\n    y = 20\n    return x + y\n"
     assert _target_region_changed(posted, current, line=2, line_end=3) is True
+
+
+# ---------- _maybe_enqueue_reimprove ----------
+
+class _FakeLockMgr:
+    """minimal locks shim — flip return value per call."""
+    def __init__(self, skip: bool = False):
+        self.skip = skip
+        self.calls = 0
+    def should_skip_cooldown(self, *a, **kw):
+        self.calls += 1
+        return self.skip
+
+
+class _FakeEnqueue:
+    """mock enqueue_improve — captures kwargs, returns fake job id."""
+    def __init__(self, fail: bool = False):
+        self.calls: list[tuple[int, int, str, str]] = []
+        self.fail = fail
+        self._counter = 0
+    def __call__(self, *, project_id, mr_iid, triggered_by, actor_username):
+        self.calls.append((project_id, mr_iid, triggered_by, actor_username))
+        if self.fail:
+            raise RuntimeError("simulated redis down")
+        self._counter += 1
+        return f"job-{self._counter}"
+
+
+def test_reimprove_enqueue_success(monkeypatch):
+    """Successful enqueue returns job_id, lock + enqueue both called."""
+    fake_enq = _FakeEnqueue()
+    fake_lock = _FakeLockMgr(skip=False)
+    # patch the lazy imports inside _maybe_enqueue_reimprove via sys.modules is overkill —
+    # instead patch the function-local import by stuffing into the module's namespace.
+    import reviewagent.commands.suggestion_actions as sa
+    # Add fake submodules so the inner `from reviewagent.workers.tasks import enqueue_improve`
+    # succeeds:
+    import types, sys
+    fake_tasks = types.ModuleType("reviewagent.workers.tasks")
+    fake_tasks.enqueue_improve = fake_enq  # type: ignore[attr-defined]
+    sys.modules["reviewagent.workers.tasks"] = fake_tasks
+    fake_locks_mod = types.ModuleType("reviewagent.webhook.locks")
+    fake_locks_mod.locks = fake_lock  # type: ignore[attr-defined]
+    sys.modules["reviewagent.webhook.locks"] = fake_locks_mod
+    # also need the real module importable for `from reviewagent.webhook.locks` etc.
+    # The function imports via `from reviewagent.workers.tasks import enqueue_improve`,
+    # which uses sys.modules; that works because sys.modules[name] is returned.
+    job = sa._maybe_enqueue_reimprove(
+        project_id=34, mr_iid=138, actor_username="jarvs"
+    )
+    assert job == "job-1"
+    assert fake_lock.calls == 1
+    assert fake_enq.calls == [(34, 138, "adopt", "jarvs")]
+
+
+def test_reimprove_enqueued_returns_quoted_job_id():
+    fake_enq = _FakeEnqueue()
+    fake_lock = _FakeLockMgr(skip=False)
+    import reviewagent.commands.suggestion_actions as sa
+    import types, sys
+    sys.modules["reviewagent.workers.tasks"] = types.ModuleType("reviewagent.workers.tasks")
+    sys.modules["reviewagent.workers.tasks"].enqueue_improve = fake_enq  # type: ignore[attr-defined]
+    sys.modules["reviewagent.webhook.locks"] = types.ModuleType("reviewagent.webhook.locks")
+    sys.modules["reviewagent.webhook.locks"].locks = fake_lock  # type: ignore[attr-defined]
+    job_id = sa._maybe_enqueue_reimprove(project_id=1, mr_iid=2, actor_username="x")
+    assert job_id and job_id.startswith("job-")
+
+
+def test_reimprove_skip_cooldown(monkeypatch):
+    """When cooldown is active, function returns None without enqueue."""
+    fake_enq = _FakeEnqueue()
+    fake_lock = _FakeLockMgr(skip=True)
+    import reviewagent.commands.suggestion_actions as sa
+    import types, sys
+    sys.modules["reviewagent.workers.tasks"] = types.ModuleType("reviewagent.workers.tasks")
+    sys.modules["reviewagent.workers.tasks"].enqueue_improve = fake_enq  # type: ignore[attr-defined]
+    sys.modules["reviewagent.webhook.locks"] = types.ModuleType("reviewagent.webhook.locks")
+    sys.modules["reviewagent.webhook.locks"].locks = fake_lock  # type: ignore[attr-defined]
+    job = sa._maybe_enqueue_reimprove(project_id=34, mr_iid=138, actor_username="jarvs")
+    assert job is None
+    assert fake_enq.calls == []  # cooldown blocked
+    assert fake_lock.calls == 1
+
+
+def test_reimprove_enqueue_failure_is_swallowed(monkeypatch):
+    """Enqueue raising should be logged + return None, not propagate."""
+    fake_enq = _FakeEnqueue(fail=True)
+    fake_lock = _FakeLockMgr(skip=False)
+    import reviewagent.commands.suggestion_actions as sa
+    import types, sys
+    sys.modules["reviewagent.workers.tasks"] = types.ModuleType("reviewagent.workers.tasks")
+    sys.modules["reviewagent.workers.tasks"].enqueue_improve = fake_enq  # type: ignore[attr-defined]
+    sys.modules["reviewagent.webhook.locks"] = types.ModuleType("reviewagent.webhook.locks")
+    sys.modules["reviewagent.webhook.locks"].locks = fake_lock  # type: ignore[attr-defined]
+    job = sa._maybe_enqueue_reimprove(project_id=34, mr_iid=138, actor_username="jarvs")
+    assert job is None
+    assert fake_enq.calls == [(34, 138, "adopt", "jarvs")]
