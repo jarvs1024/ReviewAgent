@@ -10,11 +10,11 @@ from pathlib import Path
 
 
 def _env(key: str, default: str | None = None, required: bool = False) -> str:
-    """读取环境变量；缺失且 required 则抛错."""
+    """读取环境变量；缺失且 required 则抛错. 自动 strip 首尾空白."""
     val = os.environ.get(key, default)
     if required and not val:
         raise RuntimeError(f"missing required env var: {key}")
-    return val or ""
+    return (val or "").strip()
 
 
 def _env_tuple(key: str, default: str) -> tuple[str, ...]:
