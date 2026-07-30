@@ -52,6 +52,18 @@ class TelemetryCollector:
                 enriched.append(r2)
 
             stats = self._aggregate(enriched)
+            stats["suggestions"] = store.suggestion_metrics(
+                project_id=ctx.target_project_id or None,
+                since=week_start.isoformat(), until=week_end.isoformat(),
+            )
+            dismissals = store.list_suggestion_actions(
+                project_id=ctx.target_project_id or None, action="dismissed",
+                since=week_start.isoformat(), until=week_end.isoformat(), limit=10000,
+            )
+            reasons: dict[str, int] = defaultdict(int)
+            for dismissal in dismissals:
+                reasons[(dismissal.get("reason") or "未填写原因").strip()] += 1
+            stats["dismissal_reasons"] = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
             return SectionResult(
                 status="ok",
                 data=stats,

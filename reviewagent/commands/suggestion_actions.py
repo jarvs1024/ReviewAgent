@@ -153,7 +153,9 @@ def process_dismiss(
         return {"action": "dismiss-failed", "reason": "resolve_failed"}
 
     # 3. 更新 suggestion state
-    store.update_suggestion_state(suggestion_note_id, "dismissed")
+    store.update_suggestion_state(
+        suggestion_note_id, "dismissed", actor_username=actor_username
+    )
 
     # 4. 记录 telemetry
     store.record_suggestion_action(
@@ -329,7 +331,9 @@ def process_adopt(
     if not ok:
         return {"action": "adopt-failed", "reason": "resolve_failed"}
 
-    store.update_suggestion_state(suggestion_note_id, "applied")
+    store.update_suggestion_state(
+        suggestion_note_id, "applied", actor_username=actor_username
+    )
     store.record_suggestion_action(
         project_id=project_id,
         mr_iid=mr_iid,

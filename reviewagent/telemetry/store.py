@@ -92,6 +92,9 @@ CREATE TABLE IF NOT EXISTS suggestions (
     severity            TEXT,
     head_sha            TEXT NOT NULL,         -- 发布时的 head_sha
     state               TEXT DEFAULT 'open',   -- open / applied / dismissed / superseded
+    applied_at          TIMESTAMP,
+    dismissed_at        TIMESTAMP,
+    dismissed_by        TEXT,
     created_at          TIMESTAMP NOT NULL,
     updated_at          TIMESTAMP
 );
@@ -124,6 +127,15 @@ class Store:
     def _init_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(_DDL)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(suggestions)")}
+            migrations = {
+                "applied_at": "ALTER TABLE suggestions ADD COLUMN applied_at TIMESTAMP",
+                "dismissed_at": "ALTER TABLE suggestions ADD COLUMN dismissed_at TIMESTAMP",
+                "dismissed_by": "ALTER TABLE suggestions ADD COLUMN dismissed_by TEXT",
+            }
+            for column, sql in migrations.items():
+                if column not in columns:
+                    conn.execute(sql)
 
     @contextmanager
     def _conn(self):
@@ -296,17 +308,92 @@ class Store:
         self,
         note_id: str,
         state: str,
+        *,
+        actor_username: str | None = None,
     ) -> None:
         """标记 suggestion 为 applied / dismissed / superseded."""
         with self._conn() as conn:
             conn.execute(
                 """
                 UPDATE suggestions
-                SET state = ?, updated_at = ?
+                SET state = ?, updated_at = ?,
+                    applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END,
+                    dismissed_at = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_at END,
+                    dismissed_by = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_by END
                 WHERE note_id = ?
                 """,
-                (state, _fmt_dt(_utcnow()), note_id),
+                (state, _fmt_dt(_utcnow()), state, _fmt_dt(_utcnow()),
+                 state, _fmt_dt(_utcnow()), state, actor_username, note_id),
             )
+
+    def list_suggestions(
+        self, *, project_id: int | None = None, mr_iid: int | None = None,
+        state: str | None = None, since: str | None = None,
+        until: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> list[dict]:
+        clauses, params = [], []
+        for field, value in (("project_id", project_id), ("mr_iid", mr_iid), ("state", state)):
+            if value is not None:
+                clauses.append(f"{field} = ?"); params.append(value)
+        if since:
+            clauses.append("created_at >= ?"); params.append(since)
+        if until:
+            clauses.append("created_at < ?"); params.append(until)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM suggestions{where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def suggestion_stats(self, project_id: int, mr_iid: int) -> dict:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT state, COUNT(*) AS n FROM suggestions WHERE project_id=? AND mr_iid=? GROUP BY state",
+                (project_id, mr_iid),
+            ).fetchall()
+            actions = conn.execute(
+                "SELECT action, COUNT(*) AS n FROM suggestion_actions WHERE project_id=? AND mr_iid=? GROUP BY action",
+                (project_id, mr_iid),
+            ).fetchall()
+            severities = conn.execute(
+                "SELECT COALESCE(NULLIF(severity,''),'unspecified') AS severity, COUNT(*) AS n "
+                "FROM suggestions WHERE project_id=? AND mr_iid=? GROUP BY severity",
+                (project_id, mr_iid),
+            ).fetchall()
+        states = {row["state"]: row["n"] for row in rows}
+        action_counts = {row["action"]: row["n"] for row in actions}
+        total = sum(states.values())
+        adopted = states.get("applied", 0)
+        dismissed = states.get("dismissed", 0)
+        return {
+            "total": total, "state_counts": states,
+            "action_counts": action_counts,
+            "severity_counts": {row["severity"]: row["n"] for row in severities},
+            "adopted": adopted, "dismissed": dismissed,
+            "open": states.get("open", 0),
+            "adoption_rate": round(adopted / (adopted + dismissed) * 100, 1) if adopted + dismissed else 0.0,
+        }
+
+    def suggestion_metrics(self, *, project_id: int | None = None,
+                           since: str | None = None, until: str | None = None) -> dict:
+        suggestions = self.list_suggestions(project_id=project_id, since=since, until=until, limit=100000)
+        by_state, by_severity = {}, {}
+        for row in suggestions:
+            by_state[row["state"]] = by_state.get(row["state"], 0) + 1
+            severity = row.get("severity") or "unspecified"
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+        actions = self.list_suggestion_actions(project_id=project_id, since=since, until=until, limit=100000)
+        by_action = {}
+        for row in actions:
+            by_action[row["action"]] = by_action.get(row["action"], 0) + 1
+        adopted = by_state.get("applied", 0)
+        dismissed = by_state.get("dismissed", 0)
+        return {"total": len(suggestions), "state_counts": by_state,
+                "severity_counts": by_severity, "action_counts": by_action,
+                "adopted": adopted, "dismissed": dismissed,
+                "adoption_rate": round(adopted / (adopted + dismissed) * 100, 1) if adopted + dismissed else 0.0}
 
     def record_suggestion_action(
         self,

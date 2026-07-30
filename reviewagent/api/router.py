@@ -77,6 +77,16 @@ async def list_runs(
     return {"total": len(runs), "limit": limit, "offset": offset, "runs": runs}
 
 
+@router.get("/runs/{run_id}")
+async def run_detail(run_id: int) -> dict[str, Any]:
+    s = get_store()
+    with s._conn() as conn:  # noqa: SLF001
+        row = conn.execute("SELECT * FROM review_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, f"run not found: {run_id}")
+    return {"run": dict(row)}
+
+
 @router.get("/mr/{project_id}/{mr_iid}")
 async def mr_detail(project_id: int, mr_iid: int) -> dict[str, Any]:
     s = get_store()
@@ -87,6 +97,71 @@ async def mr_detail(project_id: int, mr_iid: int) -> dict[str, Any]:
     return {"mr": mr, "recent_runs": runs}
 
 
+@router.get("/mr/{project_id}/{mr_iid}/suggestions")
+async def mr_suggestions(
+    project_id: int, mr_iid: int,
+    state: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    rows = get_store().list_suggestions(
+        project_id=project_id, mr_iid=mr_iid, state=state,
+        limit=limit, offset=offset,
+    )
+    return {"total": len(rows), "limit": limit, "offset": offset, "suggestions": rows}
+
+
+@router.get("/mr/{project_id}/{mr_iid}/runs")
+async def mr_runs(project_id: int, mr_iid: int, limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
+    return {"runs": get_store().list_runs(project_id=project_id, mr_iid=mr_iid, limit=limit)}
+
+
+@router.get("/mr/{project_id}/{mr_iid}/stats")
+async def mr_stats(project_id: int, mr_iid: int) -> dict[str, Any]:
+    return get_store().suggestion_stats(project_id, mr_iid)
+
+
+@router.get("/mr/{project_id}/{mr_iid}/timeline")
+async def mr_timeline(project_id: int, mr_iid: int, limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+    s = get_store()
+    with s._conn() as conn:  # noqa: SLF001
+        rows = conn.execute(
+            "SELECT started_at AS at, 'run' AS event_type, id AS event_id, command AS detail, status AS state "
+            "FROM review_runs WHERE project_id=? AND mr_iid=? "
+            "UNION ALL SELECT created_at, 'suggestion_action', id, action, validation_status "
+            "FROM suggestion_actions WHERE project_id=? AND mr_iid=? "
+            "UNION ALL SELECT created_at, 'suggestion_posted', id, file_path, state "
+            "FROM suggestions WHERE project_id=? AND mr_iid=? "
+            "ORDER BY at DESC LIMIT ?",
+            (project_id, mr_iid, project_id, mr_iid, project_id, mr_iid, limit),
+        ).fetchall()
+    return {"events": [dict(row) for row in rows]}
+
+
+@router.get("/mrs")
+async def list_mrs(
+    project_id: int | None = Query(None), state: str | None = Query(None),
+    since: str | None = Query(None), limit: int = Query(100, ge=1, le=1000),
+) -> dict[str, Any]:
+    s = get_store()
+    clauses, params = [], []
+    if project_id is not None:
+        clauses.append("project_id = ?"); params.append(project_id)
+    if state:
+        clauses.append("state = ?"); params.append(state)
+    if since:
+        clauses.append("updated_at >= ?"); params.append(_parse_iso(since))
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    with s._conn() as conn:  # noqa: SLF001
+        rows = conn.execute(f"SELECT * FROM mr_activity{where} ORDER BY updated_at DESC LIMIT ?", (*params, limit)).fetchall()
+    return {"total": len(rows), "mrs": [dict(row) for row in rows]}
+
+
+@router.get("/mrs/{project_id}/{mr_iid}")
+async def mr_detail_alias(project_id: int, mr_iid: int) -> dict[str, Any]:
+    return await mr_detail(project_id, mr_iid)
+
+
 @router.get("/summary")
 async def summary(
     since: str | None = Query(None, description="起始 ISO 时间"),
@@ -94,3 +169,56 @@ async def summary(
 ) -> dict[str, Any]:
     s = get_store()
     return s.summary(since=_parse_iso(since), until=_parse_iso(until))
+
+
+@router.get("/metrics/overview")
+async def metrics_overview(
+    project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None),
+) -> dict[str, Any]:
+    s = get_store()
+    result = s.summary(since=_parse_iso(since), until=_parse_iso(until))
+    result["suggestions"] = s.suggestion_metrics(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))
+    return result
+
+
+@router.get("/metrics/severity")
+async def metrics_severity(project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None)) -> dict[str, Any]:
+    return {"severity_counts": get_store().suggestion_metrics(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))["severity_counts"]}
+
+
+@router.get("/metrics/rules")
+async def metrics_rules(project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None)) -> dict[str, Any]:
+    # 当前 suggestion schema 没有 rule_key；按 severity 返回稳定的前端兼容分组。
+    metrics = get_store().suggestion_metrics(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))
+    return {"rules": [{"rule_key": key, "count": count} for key, count in metrics["severity_counts"].items()]}
+
+
+@router.get("/metrics/authors")
+async def metrics_authors(project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None)) -> dict[str, Any]:
+    s = get_store()
+    clauses, params = ["1=1"], []
+    if project_id is not None:
+        clauses.append("project_id = ?"); params.append(project_id)
+    if since:
+        clauses.append("updated_at >= ?"); params.append(_parse_iso(since))
+    if until:
+        clauses.append("updated_at < ?"); params.append(_parse_iso(until))
+    with s._conn() as conn:  # noqa: SLF001
+        rows = conn.execute(
+            f"SELECT COALESCE(NULLIF(author_sticky,''),'unknown') AS author, COUNT(*) AS runs "
+            f"FROM mr_activity WHERE {' AND '.join(clauses)} GROUP BY author ORDER BY runs DESC",
+            params,
+        ).fetchall()
+    return {"authors": [dict(row) for row in rows]}
+
+
+@router.get("/dismissals")
+async def dismissals(
+    project_id: int | None = Query(None), mr_iid: int | None = Query(None), rule_key: str | None = Query(None),
+    since: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    # rule_key is accepted for pr-agent dashboard compatibility; ReviewAgent stores severity instead.
+    rows = get_store().list_suggestion_actions(project_id=project_id, mr_iid=mr_iid, action="dismissed", since=_parse_iso(since), limit=limit)
+    if rule_key:
+        rows = [r for r in rows if r.get("file_path") == rule_key or r.get("reason") == rule_key]
+    return {"total": len(rows), "dismissals": rows}

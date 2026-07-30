@@ -54,6 +54,22 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     lines.append(f"- 平均耗时: **{avg_ms/1000:.1f}s**")
     lines.append("")
 
+    suggestions = d.get("suggestions") or {}
+    if suggestions.get("total", 0):
+        lines.append("**建议采纳情况:**")
+        lines.append("")
+        lines.append(
+            f"- 建议数: **{suggestions['total']}**  •  已采纳: **{suggestions.get('adopted', 0)}**  •  "
+            f"已 dismiss: **{suggestions.get('dismissed', 0)}**  •  采纳率: **{suggestions.get('adoption_rate', 0)}%**"
+        )
+        severity_counts = suggestions.get("severity_counts") or {}
+        if severity_counts:
+            lines.append("- 严重级别: " + "、".join(f"{key} {value}" for key, value in severity_counts.items()))
+        reasons = d.get("dismissal_reasons") or {}
+        if reasons:
+            lines.append("- Dismiss 原因: " + "、".join(f"{key} {value}" for key, value in reasons.items()))
+        lines.append("")
+
     # by_command
     by_command = d.get("by_command") or {}
     if by_command:
