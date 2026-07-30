@@ -141,7 +141,11 @@ def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str
 
 # ---------- 主入口 ----------
 def build_repo_context(gitlab_client: Any, project_id: int) -> str:
-    """从仓库默认分支读取规则文件, 渲染为 instruction_files 块.
+    """从仓库默认分支读取规则文件 + 规则目录, 渲染为 instruction_files 块.
+
+    读取顺序:
+        1. config.repo_context_files 中列出的文件 (如 AGENTS.md)
+        2. config.repo_context_rules_dir 目录下的所有 .md 文件 (如 .agents/rules/*.md)
 
     Args:
         gitlab_client: GitLabClient 实例
@@ -151,11 +155,13 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
         渲染后的 instruction_files 文本 (空字符串表示无规则文件)
     """
     context_files = config.repo_context_files
-    if not context_files:
+    rules_dir = config.repo_context_rules_dir
+
+    if not context_files and not rules_dir:
         return ""
 
-    # 缓存键: project_id + 文件列表
-    cache_key = f"{project_id}:{','.join(context_files)}"
+    # 缓存键: project_id + 文件列表 + 规则目录
+    cache_key = f"{project_id}:{','.join(context_files)}:{rules_dir}"
     cached = _cache.get(cache_key)
     if cached is not None:
         return cached
@@ -168,7 +174,7 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
         logger.warning("repo_context.get_default_branch failed project={}: {}", project_id, e)
         return ""
 
-    # 读取每个文件
+    # 1. 读取配置中列出的文件 (AGENTS.md 等)
     files: dict[str, str] = {}
     for file_path in context_files:
         file_path = file_path.strip()
@@ -182,6 +188,31 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
         if content:
             files[file_path] = content.rstrip()
 
+    # 2. 读取规则目录下的所有 .md 文件
+    if rules_dir:
+        try:
+            tree = gitlab_client.list_repository_tree(project_id, rules_dir, default_branch)
+        except Exception as e:
+            logger.warning("repo_context.list_rules_dir failed project={} dir={}: {}", project_id, rules_dir, e)
+            tree = []
+
+        for item in tree:
+            if item.get("type") != "blob":
+                continue
+            path = item.get("path", "")
+            if not path.endswith(".md"):
+                continue
+            # 跳过已读取的文件 (避免重复)
+            if path in files:
+                continue
+            try:
+                content = gitlab_client.get_file_at_sha(project_id, path, default_branch)
+            except Exception as e:
+                logger.warning("repo_context.read_rule failed project={} file={}: {}", project_id, path, e)
+                continue
+            if content:
+                files[path] = content.rstrip()
+
     if not files:
         _cache.set(cache_key, "")
         return ""
@@ -190,10 +221,9 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
     _cache.set(cache_key, result)
 
     rule_keys = extract_rule_keys(result)
-    if rule_keys:
-        logger.info(
-            "repo_context.loaded project={} files={} rules={}",
-            project_id, list(files.keys()), rule_keys[:10],
-        )
+    logger.info(
+        "repo_context.loaded project={} files={} rules={}",
+        project_id, list(files.keys()), rule_keys[:20],
+    )
 
     return result

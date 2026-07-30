@@ -262,6 +262,20 @@ class GitLabClient:
             )
             return []
 
+    def list_repository_tree(
+        self, project_id: int, path: str, ref: str
+    ) -> list[dict[str, Any]]:
+        """列出某 ref 下指定目录的文件树 (recursive)."""
+        try:
+            project = self._get_project(project_id)
+            return project.repository_tree(path=path, ref=ref, all=True)
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.list_repository_tree failed project={} path={} ref={}: {}",
+                project_id, path, ref, e,
+            )
+            return []
+
     def get_file_at_sha(
         self, project_id: int, file_path: str, ref: str
     ) -> str | None:
