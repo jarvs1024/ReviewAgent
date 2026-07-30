@@ -258,6 +258,24 @@ class Store:
                 ),
             )
 
+    def save_agent_output_fail(self, text: str, agent: str) -> None:
+        """保存 agent 失败时的输出前 500 字符到 agent_failures 表（用于调试）."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    agent TEXT,
+                    text_preview TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO agent_failures (agent, text_preview) VALUES (?, ?)",
+                (agent, text[:500]),
+            )
+
     # ---------- Suggestions (/adopt /dismiss 数据采集) ----------
     def record_suggestion(
         self,

@@ -234,6 +234,11 @@ class OpencodeClient:
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
+            # 失败时落 SQLite（head 500 chars）便于调试
+            try:
+                from reviewagent.telemetry.store import get_store
+                get_store().save_agent_output_fail(text, agent)
+            except Exception: pass
             raise OpencodeOutputError(
                 f"opencode assistant text not JSON: {e}; text={text[:500]}"
             ) from e
