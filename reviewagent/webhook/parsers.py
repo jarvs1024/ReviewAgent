@@ -54,6 +54,9 @@ class NoteHookPayload:
     note_id: int
     note_body: str
     actor_username: str
+    note_type: str = ""           # "" / "DiscussionNote" / "DiffNote"
+    discussion_id: str = ""        # 关联的 discussion (用于 /adopt /dismiss)
+    noteable_type: str = ""        # "MergeRequest" 等
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "NoteHookPayload | None":
@@ -74,6 +77,9 @@ class NoteHookPayload:
             note_id=obj.get("id", 0),
             note_body=obj.get("note", ""),
             actor_username=author.get("username", ""),
+            note_type=obj.get("type", ""),
+            discussion_id=str(obj.get("discussion_id", "") or ""),
+            noteable_type=noteable_type,
         )
 
 

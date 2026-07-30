@@ -56,6 +56,49 @@ CREATE TABLE IF NOT EXISTS review_runs (
 CREATE INDEX IF NOT EXISTS idx_runs_project_mr ON review_runs(project_id, mr_iid);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON review_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_mr_state ON mr_activity(state);
+
+-- suggestion_actions: /adopt /dismiss 事件追踪
+CREATE TABLE IF NOT EXISTS suggestion_actions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id          INTEGER NOT NULL,
+    mr_iid              INTEGER NOT NULL,
+    suggestion_note_id  TEXT NOT NULL,         -- GitLab discussion/note id (字符串)
+    file_path           TEXT,
+    target_line         INTEGER,
+    action              TEXT NOT NULL,         -- 'adopted' | 'dismissed'
+    actor_username      TEXT,
+    reason              TEXT,
+    validation_status   TEXT,                  -- /adopt: ok / target-unchanged / content-unavailable etc.
+    head_sha_posted     TEXT,                  -- /adopt: suggestion 发布时的 head_sha
+    head_sha_current    TEXT,                  -- /adopt: 当前 head_sha
+    created_at          TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_actions_project_mr ON suggestion_actions(project_id, mr_iid);
+CREATE INDEX IF NOT EXISTS idx_actions_suggestion ON suggestion_actions(suggestion_note_id);
+
+-- suggestions: 记录 improve 发布的每条 suggestion (用于 /adopt 验证)
+CREATE TABLE IF NOT EXISTS suggestions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id          INTEGER NOT NULL,
+    mr_iid              INTEGER NOT NULL,
+    note_id             TEXT NOT NULL,         -- GitLab discussion/note id (字符串)
+    file_path           TEXT NOT NULL,
+    target_line         INTEGER NOT NULL,
+    target_line_end     INTEGER,               -- 多行替换时的结束行
+    existing_code       TEXT,                  -- 原文 (用于 /adopt 验证匹配)
+    improved_code       TEXT,
+    header              TEXT,
+    severity            TEXT,
+    head_sha            TEXT NOT NULL,         -- 发布时的 head_sha
+    state               TEXT DEFAULT 'open',   -- open / applied / dismissed / superseded
+    created_at          TIMESTAMP NOT NULL,
+    updated_at          TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sug_project_mr ON suggestions(project_id, mr_iid);
+CREATE INDEX IF NOT EXISTS idx_sug_note_id ON suggestions(note_id);
+CREATE INDEX IF NOT EXISTS idx_sug_state ON suggestions(state);
 """
 
 
@@ -203,6 +246,139 @@ class Store:
                 ),
             )
 
+    # ---------- Suggestions (/adopt /dismiss 数据采集) ----------
+    def record_suggestion(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+        note_id: str,
+        file_path: str,
+        target_line: int,
+        target_line_end: int | None = None,
+        existing_code: str | None = None,
+        improved_code: str | None = None,
+        header: str | None = None,
+        severity: str | None = None,
+        head_sha: str,
+    ) -> int:
+        """记录 improve 发布的一条 inline suggestion (用于后续 /adopt 验证)."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO suggestions (
+                    project_id, mr_iid, note_id, file_path,
+                    target_line, target_line_end,
+                    existing_code, improved_code,
+                    header, severity, head_sha,
+                    state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                """,
+                (
+                    project_id, mr_iid, note_id, file_path,
+                    target_line, target_line_end,
+                    existing_code, improved_code,
+                    header, severity, head_sha,
+                    _fmt_dt(_utcnow()),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def get_suggestion_by_note_id(self, note_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM suggestions WHERE note_id = ? ORDER BY id DESC LIMIT 1",
+                (note_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_suggestion_state(
+        self,
+        note_id: str,
+        state: str,
+    ) -> None:
+        """标记 suggestion 为 applied / dismissed / superseded."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE suggestions
+                SET state = ?, updated_at = ?
+                WHERE note_id = ?
+                """,
+                (state, _fmt_dt(_utcnow()), note_id),
+            )
+
+    def record_suggestion_action(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+        suggestion_note_id: str,
+        file_path: str | None = None,
+        target_line: int | None = None,
+        action: str,
+        actor_username: str | None = None,
+        reason: str | None = None,
+        validation_status: str | None = None,
+        head_sha_posted: str | None = None,
+        head_sha_current: str | None = None,
+    ) -> int:
+        """记录 /adopt /dismiss 事件."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO suggestion_actions (
+                    project_id, mr_iid, suggestion_note_id, file_path, target_line,
+                    action, actor_username, reason,
+                    validation_status, head_sha_posted, head_sha_current,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, mr_iid, suggestion_note_id, file_path, target_line,
+                    action, actor_username, reason,
+                    validation_status, head_sha_posted, head_sha_current,
+                    _fmt_dt(_utcnow()),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_suggestion_actions(
+        self,
+        *,
+        project_id: int | None = None,
+        mr_iid: int | None = None,
+        action: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """列出 suggestion action 事件 (用于周报/dashboard)."""
+        clauses: list[str] = []
+        params: list = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if mr_iid is not None:
+            clauses.append("mr_iid = ?")
+            params.append(mr_iid)
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("created_at < ?")
+            params.append(until)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM suggestion_actions {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---------- 查询 (Phase 3 数据采集用) ----------
     def list_runs(

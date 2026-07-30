@@ -42,7 +42,25 @@ class ImproveCommand(BaseCommand):
     COMMAND_NAME = "improve"
     DEFAULT_AGENT = "improve"
 
+    # 每条 suggestion 末尾追加 /adopt /dismiss 帮助文本 (与 pr-agent 一致)
+    HELP_TEXT_FOOTER = (
+        "\n\n✅ 接受建议\n"
+        "   • 直接用：点上方「应用建议」按钮\n"
+        "   • 自己改：请先提交修改，再回复 `/adopt [理由]`\n"
+        "\n❌ 关闭建议\n"
+        "   • 回复 `/dismiss [理由]`\n"
+        "\n理由会被记录，用于改进后续建议。"
+    )
     # ---------- helpers ----------
+    def _get_mr_head_sha(self) -> str | None:
+        """获取当前 MR 的 head_sha (用于 record_suggestion 时记录发布 SHA)."""
+        try:
+            refs = self.gitlab.get_mr_diff_refs(self.project_id, self.mr_iid)
+            return refs.get("head_sha") or refs.get("start_sha")
+        except Exception as e:
+            logger.warning("improve.get_mr_head_sha failed: {}", e)
+            return None
+
     def _diff_line_map(self) -> dict[str, set[int]]:
         """读 self.ws.diff_file 解析每个文件的 valid new_line 集合."""
         if not self.ws or not self.ws.diff_file:
@@ -224,18 +242,19 @@ class ImproveCommand(BaseCommand):
             )
             if decision["action"] == "post":
                 body_to_post = normalised["body"]
-                nc = decision.get("normalised_code")
-                if nc and nc != normalised["improved_code"]:
+                nc = decision.get("normalised_code") or normalised["improved_code"]
+                n_lines = len(nc.split("\n"))
+                if nc != normalised["improved_code"]:
                     logger.info(
                         "improve.fix_indent project={} mr={} file={} line={}",
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
-                    n_lines = len(nc.split("\n"))
                     sev = normalised.get("severity", "medium").upper()
                     body_to_post = (
                         f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
                         f"{normalised['rationale']}\n\n"
                         f"```suggestion:-0+{n_lines}\n{nc}\n```"
+                        + self.HELP_TEXT_FOOTER
                     )
                 note_id = self.gitlab.post_mr_discussion(
                     self.project_id,
@@ -250,6 +269,26 @@ class ImproveCommand(BaseCommand):
                         "improve.post_inline project={} mr={} file={} line={}",
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
+                    # 记录 suggestion 到 telemetry (用于后续 /adopt 验证)
+                    try:
+                        from reviewagent.telemetry.store import get_store
+                        head_sha = self._get_mr_head_sha() or ""
+                        existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                        get_store().record_suggestion(
+                            project_id=self.project_id,
+                            mr_iid=self.mr_iid,
+                            note_id=note_id,
+                            file_path=file_path,
+                            target_line=decision["new_line"],
+                            target_line_end=(decision["new_line"] + n_lines - 1) if n_lines > 1 else decision["new_line"],
+                            existing_code=existing,
+                            improved_code=nc,
+                            header=normalised.get("header"),
+                            severity=normalised.get("severity"),
+                            head_sha=head_sha,
+                        )
+                    except Exception as e:
+                        logger.warning("improve.record_suggestion failed: {}", e)
                 else:
                     inline_skipped.append({"suggestion": raw, "reason": "gitlab_rejected"})
             elif decision["action"] == "general":
@@ -449,6 +488,7 @@ class ImproveCommand(BaseCommand):
             f"**[{severity.upper()}]** **{header}** — {label}\n\n"
             f"{rationale}\n\n"
             f"```suggestion:-0+{range_n}\n{improved}\n```"
+            + ImproveCommand.HELP_TEXT_FOOTER
         )
         return {
             "file": file_path,

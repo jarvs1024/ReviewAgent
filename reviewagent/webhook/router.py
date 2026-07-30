@@ -160,6 +160,32 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
     if locks.is_bot(note.actor_username):
         return {"status": "skipped", "reason": "bot_self_trigger"}
 
+    # /adopt /dismiss 走专门路径 (不是 MR 命令链, 而是针对 inline suggestion 的回复)
+    from reviewagent.commands.suggestion_actions import extract_action
+    action_info = extract_action(note.note_body)
+    if action_info:
+        action, reason = action_info
+        # /adopt /dismiss 必须是对 inline suggestion 的回复 (DiffNote + 有 discussion_id)
+        if note.note_type != "DiffNote" or not note.discussion_id:
+            return {"status": "ignored", "reason": f"{action}_requires_diffnote"}
+        if locks.should_skip_cooldown(note.project_id, note.mr_iid, action):
+            return {"status": "skipped", "reason": "cooldown"}
+        # 入队
+        from reviewagent.workers.tasks import enqueue_suggestion_action
+        job_id = enqueue_suggestion_action(
+            action=action,
+            project_id=note.project_id,
+            mr_iid=note.mr_iid,
+            suggestion_note_id=note.discussion_id,
+            actor_username=note.actor_username,
+            reason=reason,
+        )
+        logger.info(
+            "webhook.queued action={} project={} mr={} discussion={} job={}",
+            action, note.project_id, note.mr_iid, note.discussion_id, job_id,
+        )
+        return {"status": "queued", "action": action, "job_id": job_id}
+
     cmd = extract_command(note.note_body)
     if not cmd:
         return {"status": "ignored", "reason": "no_command"}

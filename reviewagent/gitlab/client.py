@@ -195,6 +195,97 @@ class GitLabClient:
             )
             return None
 
+    # ---------- /adopt & /dismiss 配套方法 ----------
+    def resolve_discussion(self, project_id: int, mr_iid: int, discussion_id: str) -> bool:
+        """Resolve 一个 discussion (用于 /adopt 和 /dismiss).
+
+        discussion_id 是 GitLab 返回的字符串 ID (mr.discussions.get(id)).
+        """
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            discussion = mr.discussions.get(discussion_id)
+            discussion.resolved = True
+            discussion.save()
+            logger.info(
+                "gitlab.resolve_discussion project={} mr={} discussion={}",
+                project_id, mr_iid, discussion_id,
+            )
+            return True
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.resolve_discussion failed project={} mr={} discussion={}: {}",
+                project_id, mr_iid, discussion_id, e,
+            )
+            return False
+
+    def reply_to_discussion(
+        self,
+        project_id: int,
+        mr_iid: int,
+        discussion_id: str,
+        body: str,
+    ) -> int | None:
+        """在 discussion 下发回复评论 (用于 /adopt 验证失败时的友好提示)."""
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            discussion = mr.discussions.get(discussion_id)
+            reply = discussion.notes.create({"body": body})
+            note_id = reply.id if hasattr(reply, "id") else reply.attributes.get("id")
+            logger.info(
+                "gitlab.reply_discussion project={} mr={} discussion={} note={}",
+                project_id, mr_iid, discussion_id, note_id,
+            )
+            return int(note_id) if note_id is not None else None
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.reply_discussion failed project={} mr={} discussion={}: {}",
+                project_id, mr_iid, discussion_id, e,
+            )
+            return None
+
+    def get_discussion_notes(
+        self, project_id: int, mr_iid: int, discussion_id: str
+    ) -> list[dict[str, Any]]:
+        """获取一个 discussion 下所有 notes (用于 /adopt 找原 suggestion)."""
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            discussion = mr.discussions.get(discussion_id)
+            notes = discussion.attributes.get("notes", []) or []
+            return [dict(n) if not isinstance(n, dict) else n for n in notes]
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.get_discussion_notes failed project={} mr={} discussion={}: {}",
+                project_id, mr_iid, discussion_id, e,
+            )
+            return []
+
+    def get_file_at_sha(
+        self, project_id: int, file_path: str, ref: str
+    ) -> str | None:
+        """取某 ref 下的文件 raw 内容 (用于 /adopt 验证目标行是否被修改)."""
+        from urllib.parse import quote
+        try:
+            project = self._get_project(project_id)
+            f = project.files.get(file_path=file_path, ref=ref)
+            # python-gitlab 返回 .content 是 base64
+            import base64
+            return base64.b64decode(f.content).decode("utf-8", errors="replace")
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.get_file_at_sha failed project={} file={} ref={}: {}",
+                project_id, file_path, ref, e,
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                "gitlab.get_file_at_sha decode failed project={} file={} ref={}: {}",
+                project_id, file_path, ref, e,
+            )
+            return None
+
     # ---------- description ----------
     def update_mr_description(self, project_id: int, mr_iid: int, description: str) -> None:
         """覆盖 MR description（不修改 title，由调用方决定）."""

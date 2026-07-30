@@ -90,6 +90,35 @@ COMMAND_ENQUEUERS = {
 }
 
 
+def enqueue_suggestion_action(
+    *,
+    action: str,
+    project_id: int,
+    mr_iid: int,
+    suggestion_note_id: str,
+    actor_username: str,
+    reason: str,
+) -> str:
+    """入队 /adopt 或 /dismiss 命令 (针对单个 inline suggestion)."""
+    if action not in ("adopt", "dismiss"):
+        raise ValueError(f"unsupported action: {action}")
+    q = get_queue()
+    job = q.enqueue(
+        "reviewagent.workers.tasks.run_suggestion_action",
+        action=action,
+        project_id=project_id,
+        mr_iid=mr_iid,
+        suggestion_note_id=suggestion_note_id,
+        actor_username=actor_username,
+        reason=reason,
+        job_timeout=120,
+        result_ttl=3600,
+        failure_ttl=86400,
+        retry=Retry(max=2, interval=10),
+    )
+    return job.id
+
+
 # ---------- MR 命令链 ----------
 def enqueue_mr_chain(
     *,
@@ -189,6 +218,41 @@ def run_describe(**kw) -> dict[str, Any]:
 
 def run_improve(**kw) -> dict[str, Any]:
     return _run_command("improve", **kw)
+
+
+def run_suggestion_action(
+    *,
+    action: str,
+    project_id: int,
+    mr_iid: int,
+    suggestion_note_id: str,
+    actor_username: str,
+    reason: str,
+) -> dict[str, Any]:
+    """处理 /adopt 或 /dismiss — 不调用 opencode, 直接 resolve discussion + record telemetry."""
+    from reviewagent.commands.suggestion_actions import process_adopt, process_dismiss
+    logger.info(
+        "worker.run_suggestion_action action={} project={} mr={} discussion={} actor={}",
+        action, project_id, mr_iid, suggestion_note_id, actor_username,
+    )
+    if action == "adopt":
+        return process_adopt(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            suggestion_note_id=suggestion_note_id,
+            actor_username=actor_username,
+            reason=reason,
+        )
+    elif action == "dismiss":
+        return process_dismiss(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            suggestion_note_id=suggestion_note_id,
+            actor_username=actor_username,
+            reason=reason,
+        )
+    else:
+        raise NotImplementedError(f"unsupported action: {action}")
 
 
 def run_mr_chain(
