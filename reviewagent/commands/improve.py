@@ -650,10 +650,9 @@ class ImproveCommand(BaseCommand):
                     "normalised_code": normalised_code}
 
         # 4b. 正常的对齐检查 (1→1 或 N→N 等行数替换)
-        # 如果 existing_code 反查成功 (actual_line is not None), 信任 agent
-        # 它已经通过反查证明自己知道该行真实内容, 不应再被 first-line match 限制
-        # (典型场景: 安全修复 — 把有问题的代码行替换为 bash 注释, 如 cat 含密码 → # 避免泄漏)
-        if actual_line is None and not _code_first_line_matches(target_line, imp_first):
+        # existing_code 反查只负责校正行号，不能替代 improved_code 的语义对齐校验。
+        # 否则模型只要给出任意存在的 existing_code，就可能把无关代码发布到该行。
+        if not _code_first_line_matches(target_line, imp_first):
             return {"action": "general", "new_line": start_line,
                     "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
 
