@@ -152,9 +152,10 @@ def process_dismiss(
         )
         return {"action": "dismiss-failed", "reason": "resolve_failed"}
 
-    # 3. 更新 suggestion state
+    # 3. 更新 suggestion state (dismissed + 写入 reason)
     store.update_suggestion_state(
-        suggestion_note_id, "dismissed", actor_username=actor_username
+        suggestion_note_id, "dismissed",
+        actor_username=actor_username, dismissed_reason=reason or None,
     )
 
     # 4. 记录 telemetry

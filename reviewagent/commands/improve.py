@@ -491,6 +491,10 @@ class ImproveCommand(BaseCommand):
                             header=normalised.get("header"),
                             severity=normalised.get("severity"),
                             head_sha=head_sha,
+                            label=normalised.get("label"),
+                            rule_keys=(raw.get("rule_keys") if isinstance(raw, dict) else None),
+                            one_sentence_summary=(raw.get("one_sentence_summary") or normalised.get("rationale")) if isinstance(raw, dict) else None,
+                            importance=raw.get("importance") if isinstance(raw, dict) else None,
                         )
                     except Exception as e:
                         logger.warning("improve.record_suggestion failed: {}", e)

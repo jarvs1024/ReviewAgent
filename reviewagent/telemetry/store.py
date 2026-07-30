@@ -132,10 +132,31 @@ class Store:
                 "applied_at": "ALTER TABLE suggestions ADD COLUMN applied_at TIMESTAMP",
                 "dismissed_at": "ALTER TABLE suggestions ADD COLUMN dismissed_at TIMESTAMP",
                 "dismissed_by": "ALTER TABLE suggestions ADD COLUMN dismissed_by TEXT",
+                "dismissed_reason": "ALTER TABLE suggestions ADD COLUMN dismissed_reason TEXT",
+                "rule_keys": "ALTER TABLE suggestions ADD COLUMN rule_keys TEXT",
+                "one_sentence_summary": "ALTER TABLE suggestions ADD COLUMN one_sentence_summary TEXT",
+                "importance": "ALTER TABLE suggestions ADD COLUMN importance INTEGER",
+                "score": "ALTER TABLE suggestions ADD COLUMN score INTEGER",
+                "fingerprint": "ALTER TABLE suggestions ADD COLUMN fingerprint TEXT",
+                "cohort_key": "ALTER TABLE suggestions ADD COLUMN cohort_key TEXT",
+                "severity_source": "ALTER TABLE suggestions ADD COLUMN severity_source TEXT",
+                "label": "ALTER TABLE suggestions ADD COLUMN label TEXT",
+                "posted_at": "ALTER TABLE suggestions ADD COLUMN posted_at TIMESTAMP",
             }
             for column, sql in migrations.items():
                 if column not in columns:
                     conn.execute(sql)
+            run_columns = {row[1] for row in conn.execute("PRAGMA table_info(review_runs)")}
+            for column, sql in {
+                "triggered_by": "ALTER TABLE review_runs ADD COLUMN triggered_by TEXT",
+                "rule_keys_cited": "ALTER TABLE review_runs ADD COLUMN rule_keys_cited TEXT",
+                "suggestion_count": "ALTER TABLE review_runs ADD COLUMN suggestion_count INTEGER DEFAULT 0",
+            }.items():
+                if column not in run_columns:
+                    conn.execute(sql)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sug_cohort ON suggestions(mr_iid, cohort_key)"
+            )
 
     @contextmanager
     def _conn(self):
@@ -291,6 +312,13 @@ class Store:
         header: str | None = None,
         severity: str | None = None,
         head_sha: str,
+        rule_keys: list[str] | None = None,
+        one_sentence_summary: str | None = None,
+        importance: int | None = None,
+        label: str | None = None,
+        fingerprint: str | None = None,
+        cohort_key: str | None = None,
+        severity_source: str | None = None,
     ) -> int:
         """记录 improve 发布的一条 inline suggestion (用于后续 /adopt 验证)."""
         with self._conn() as conn:
@@ -301,14 +329,24 @@ class Store:
                     target_line, target_line_end,
                     existing_code, improved_code,
                     header, severity, head_sha,
+                    rule_keys, one_sentence_summary, importance, label,
+                    fingerprint, cohort_key, severity_source, posted_at,
                     state, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
                 """,
                 (
                     project_id, mr_iid, note_id, file_path,
                     target_line, target_line_end,
                     existing_code, improved_code,
                     header, severity, head_sha,
+                    ",".join(rule_keys or []),
+                    one_sentence_summary,
+                    importance,
+                    label,
+                    fingerprint,
+                    cohort_key,
+                    severity_source,
+                    _fmt_dt(_utcnow()),
                     _fmt_dt(_utcnow()),
                 ),
             )
@@ -328,6 +366,7 @@ class Store:
         state: str,
         *,
         actor_username: str | None = None,
+        dismissed_reason: str | None = None,
     ) -> None:
         """标记 suggestion 为 applied / dismissed / superseded."""
         with self._conn() as conn:
@@ -337,11 +376,17 @@ class Store:
                 SET state = ?, updated_at = ?,
                     applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END,
                     dismissed_at = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_at END,
-                    dismissed_by = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_by END
+                    dismissed_by = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_by END,
+                    dismissed_reason = CASE WHEN ? = 'dismissed' AND ? IS NOT NULL
+                                            THEN ? ELSE dismissed_reason END
                 WHERE note_id = ?
                 """,
-                (state, _fmt_dt(_utcnow()), state, _fmt_dt(_utcnow()),
-                 state, _fmt_dt(_utcnow()), state, actor_username, note_id),
+                (state, _fmt_dt(_utcnow()),
+                 state, _fmt_dt(_utcnow()),
+                 state, _fmt_dt(_utcnow()),
+                 state, actor_username,
+                 state, dismissed_reason, dismissed_reason,
+                 note_id),
             )
 
     def list_suggestions(
@@ -412,6 +457,59 @@ class Store:
                 "severity_counts": by_severity, "action_counts": by_action,
                 "adopted": adopted, "dismissed": dismissed,
                 "adoption_rate": round(adopted / (adopted + dismissed) * 100, 1) if adopted + dismissed else 0.0}
+
+    def list_dismissals(
+        self, *, project_id=None, mr_iid=None, since=None, until=None,
+        rule_key=None, limit=200,
+    ):
+        clauses = ["s.state = 'dismissed'"]
+        params = []
+        if project_id is not None: clauses.append("s.project_id = ?"); params.append(project_id)
+        if mr_iid is not None: clauses.append("s.mr_iid = ?"); params.append(mr_iid)
+        if since: clauses.append("s.dismissed_at >= ?"); params.append(since)
+        if until: clauses.append("s.dismissed_at < ?"); params.append(until)
+        if rule_key:
+            clauses.append("(',' || COALESCE(s.rule_keys,'') || ',') LIKE ?")
+            params.append(f"%,{rule_key},%")
+        where = " WHERE " + " AND ".join(clauses)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT s.* FROM suggestions s{where} ORDER BY s.dismissed_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def dismissals_by_rule(self, *, project_id=None, since=None):
+        rows = self.list_dismissals(project_id=project_id, since=since, limit=10000)
+        bucket = {}
+        for row in rows:
+            keys = [k.strip() for k in (row.get('rule_keys') or '').split(',') if k.strip()]
+            if not keys: keys = ['(no_rule_key)']
+            reason = (row.get('dismissed_reason') or '（未填写原因）').strip() or '（未填写原因）'
+            for key in keys:
+                slot = bucket.setdefault(key, {'rule_key': key, 'dismissal_count': 0, 'reasons': []})
+                slot['dismissal_count'] += 1
+                rs = next((r for r in slot['reasons'] if r['reason'] == reason), None)
+                if rs: rs['count'] += 1
+                else: slot['reasons'].append({'reason': reason, 'count': 1})
+        for slot in bucket.values(): slot['reasons'].sort(key=lambda r: -r['count'])
+        return sorted(bucket.values(), key=lambda r: -r['dismissal_count'])
+
+    def distinct_rule_keys(self, *, project_id=None, mr_iid=None):
+        with self._conn() as conn:
+            clauses, params = [], []
+            if project_id is not None: clauses.append('project_id = ?'); params.append(project_id)
+            if mr_iid is not None: clauses.append('mr_iid = ?'); params.append(mr_iid)
+            where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+            rows = conn.execute(
+                f'SELECT rule_keys FROM suggestions{where} ORDER BY created_at DESC', params,
+            ).fetchall()
+        out = set()
+        for r in rows:
+            for k in (r['rule_keys'] or '').split(','):
+                k = k.strip()
+                if k: out.add(k)
+        return sorted(out)
 
     def record_suggestion_action(
         self,
