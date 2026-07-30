@@ -117,13 +117,19 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
     if not project_id:
         return {"status": "ignored", "reason": "no_project_id"}
 
-    # 查该 branch 关联的 open MR（可能多个？通常是 1 个）
-    try:
-        mrs = gl.list_project_mrs(project_id, state="opened", source_branch=branch)
-    except GitLabError as e:
-        logger.warning("push.lookup_mr failed: {}", e)
-        return {"status": "error", "reason": str(e)[:200]}
-
+    # 查该 branch 关联的 MR (opened + merged)
+    # merged MR 的 branch 仍可能被继续 push (squash-merge + 继续开发), 也要触发一次 re-review
+    mrs = []
+    for st in ("opened", "merged"):
+        try:
+            chunk = gl.list_project_mrs(project_id, state=st, source_branch=branch)
+        except GitLabError as e:
+            logger.warning("push.lookup_mr state={} failed: {}", st, e)
+            return {"status": "error", "reason": str(e)[:200]}
+        # 加 state 标记, 后续逻辑可区分 (merged MR 的 re-review 不强制 describe)
+        for m in chunk:
+            m.setdefault("_state", st)
+            mrs.append(m)
     if not mrs:
         logger.info("push.no_mr project={} branch={}", project_id, branch)
         return {"status": "ignored", "reason": "no_mr_for_branch"}

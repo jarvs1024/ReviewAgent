@@ -360,4 +360,49 @@ def process_adopt(
         project_id, mr_iid, suggestion_note_id, reason[:50] if reason else "",
     )
 
+    reimprove_job = _maybe_enqueue_reimprove(
+        project_id=project_id, mr_iid=mr_iid, actor_username=actor_username,
+    )
+    if reimprove_job:
+        return {"action": "adopted", "reason": reason, "validation": "ok", "reimprove_job": reimprove_job}
     return {"action": "adopted", "reason": reason, "validation": "ok"}
+
+
+# ---------- /adopt 自动重检 ----------
+# 在 /adopt 通过验证后, 用同样的 MR head 触发一次 /improve,
+# 这样 reviewer 采纳一条建议后能立刻看到 diff 的最新状态, 不必手动 @reviewagent。
+# cooldown 由 `locks.should_skip_cooldown` 控制: 用户连续 /adopt 不会无限循环。
+def _maybe_enqueue_reimprove(
+    *, project_id: int, mr_iid: int, actor_username: str,
+) -> str | None:
+    """成功 /adopt 后入队一次 re-improve。返回 job_id 或 None (cooldown 内跳过 / 入队失败)."""
+    try:
+        from reviewagent.workers.tasks import enqueue_improve
+        from reviewagent.webhook.locks import locks
+    except Exception as e:  # pragma: no cover
+        logger.warning("/adopt.reimprove import failed (non-fatal): {}", e)
+        return None
+    try:
+        if locks.should_skip_cooldown(project_id, mr_iid, "improve"):
+            logger.info(
+                "/adopt.reimprove skip cooldown project={} mr={}",
+                project_id, mr_iid,
+            )
+            return None
+    except Exception as e:
+        logger.warning("/adopt.reimprove cooldown check failed (fail-open): {}", e)
+    try:
+        job_id = enqueue_improve(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            triggered_by="adopt",
+            actor_username=actor_username,
+        )
+        logger.info(
+            "/adopt.reimprove queued project={} mr={} job={}",
+            project_id, mr_iid, job_id,
+        )
+        return job_id
+    except Exception as e:
+        logger.warning("/adopt.reimprove enqueue failed (non-fatal): {}", e)
+        return None
