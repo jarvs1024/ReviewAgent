@@ -63,9 +63,11 @@ def _week_bounds(
 def _build_collector(name: str) -> Collector | None:
     # Local imports 避免启动期循环引用
     from .collectors.merged_mrs import MergedMrsCollector
+    from .collectors.repo_scan import RepoScanCollector
     table: dict[str, type] = {
         "telemetry": TelemetryCollector,
         "merged_mrs": MergedMrsCollector,
+        "repo_scan": RepoScanCollector,
     }
     cls = table.get(name)
     if cls is None:
