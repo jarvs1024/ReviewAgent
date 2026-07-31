@@ -35,8 +35,12 @@ class TelemetryCollector:
         try:
             store = get_store()
             pid = ctx.target_project_id or None
-            since_iso = week_start.isoformat()
-            until_iso = week_end.isoformat()
+            # SQLite 比较 created_at (UTC ISO 字符串) 用字典序, 传非 UTC 字符串会被
+            # 时区后缀打乱顺序 (如 "2026-07-30T16:00:00+00:00" < "2026-07-27T00:00:00+08:00"
+            # 因为 0<7 字典序). 统一转 UTC 再传.
+            from datetime import timezone as _tz
+            since_iso = week_start.astimezone(_tz.utc).isoformat()
+            until_iso = week_end.astimezone(_tz.utc).isoformat()
 
             # ---- MR 窗口 + 累计 ----
             mr_overview_window = store.mr_overview(
@@ -163,14 +167,6 @@ class TelemetryCollector:
             elif status == "skipped":
                 b["skipped"] += 1; skipped_count += 1
             by_status[status] += 1
-            if status == "success":
-                success_count += 1
-            elif status in ("failed", "timeout"):
-                failed_count += 1
-            elif status == "running":
-                running_count += 1
-            elif status == "skipped":
-                skipped_count += 1
 
             day = (r.get("started_at") or "")[:10]
             if day:

@@ -105,6 +105,25 @@ CREATE INDEX IF NOT EXISTS idx_sug_state ON suggestions(state);
 """
 
 
+
+def _norm_iso(s: str | None) -> str | None:
+    """归一化 ISO 时间字符串 — DB created_at 是 UTC "+00:00" 格式, SQLite 字符串
+    比较走字典序, 跟 "+08:00" 等格式混用会错位. 统一转 UTC 后给 SQLite datetime() 比较."""
+    if not s:
+        return s
+    try:
+        from datetime import datetime, timezone as _tz
+        norm = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        dt = datetime.fromisoformat(norm)
+        if dt.tzinfo is None:
+            # naive 当作 UTC (DB 写入路径都是 UTC)
+            dt = dt.replace(tzinfo=_tz.utc)
+        # 输出 SQLite datetime() 兼容的 "YYYY-MM-DD HH:MM:SS" UTC
+        return dt.astimezone(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return s  # 解析失败就原样返回, 不让边界失效
+
+
 # ---------- 单例 ----------
 _store: "Store | None" = None
 
@@ -242,9 +261,9 @@ class Store:
         if project_id is not None:
             clauses.append("project_id = ?"); params.append(project_id)
         if since:
-            clauses.append("created_at >= ?"); params.append(since)
+            clauses.append("datetime(created_at) >= datetime(?)"); params.append(_norm_iso(since))
         if until:
-            clauses.append("created_at < ?"); params.append(until)
+            clauses.append("datetime(created_at) < datetime(?)"); params.append(_norm_iso(until))
         if state:
             clauses.append("state = ?"); params.append(state)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -262,9 +281,9 @@ class Store:
         if project_id is not None:
             clauses.append("project_id = ?"); params.append(project_id)
         if since:
-            clauses.append("created_at >= ?"); params.append(since)
+            clauses.append("datetime(created_at) >= datetime(?)"); params.append(_norm_iso(since))
         if until:
-            clauses.append("created_at < ?"); params.append(until)
+            clauses.append("datetime(created_at) < datetime(?)"); params.append(_norm_iso(until))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._conn() as conn:
             rows = conn.execute(
@@ -285,9 +304,9 @@ class Store:
         if project_id is not None:
             clauses.append("s.project_id = ?"); params.append(project_id)
         if since:
-            clauses.append("s.created_at >= ?"); params.append(since)
+            clauses.append("datetime(s.created_at) >= datetime(?)"); params.append(_norm_iso(since))
         if until:
-            clauses.append("s.created_at < ?"); params.append(until)
+            clauses.append("datetime(s.created_at) < datetime(?)"); params.append(_norm_iso(until))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._conn() as conn:
             rows = conn.execute(
@@ -467,9 +486,9 @@ class Store:
             if value is not None:
                 clauses.append(f"{field} = ?"); params.append(value)
         if since:
-            clauses.append("created_at >= ?"); params.append(since)
+            clauses.append("datetime(created_at) >= datetime(?)"); params.append(_norm_iso(since))
         if until:
-            clauses.append("created_at < ?"); params.append(until)
+            clauses.append("datetime(created_at) < datetime(?)"); params.append(_norm_iso(until))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._conn() as conn:
             rows = conn.execute(
@@ -534,8 +553,8 @@ class Store:
         params = []
         if project_id is not None: clauses.append("s.project_id = ?"); params.append(project_id)
         if mr_iid is not None: clauses.append("s.mr_iid = ?"); params.append(mr_iid)
-        if since: clauses.append("s.dismissed_at >= ?"); params.append(since)
-        if until: clauses.append("s.dismissed_at < ?"); params.append(until)
+        if since: clauses.append("datetime(s.dismissed_at) >= datetime(?)"); params.append(_norm_iso(since))
+        if until: clauses.append("datetime(s.dismissed_at) < datetime(?)"); params.append(_norm_iso(until))
         if rule_key:
             clauses.append("(',' || COALESCE(s.rule_keys,'') || ',') LIKE ?")
             params.append(f"%,{rule_key},%")
@@ -685,11 +704,11 @@ class Store:
             clauses.append("mr_iid = ?")
             params.append(mr_iid)
         if since:
-            clauses.append("started_at >= ?")
-            params.append(since)
+            clauses.append("datetime(started_at) >= datetime(?)")
+            params.append(_norm_iso(since))
         if until:
-            clauses.append("started_at < ?")
-            params.append(until)
+            clauses.append("datetime(started_at) < datetime(?)")
+            params.append(_norm_iso(until))
         if command:
             clauses.append("command = ?")
             params.append(command)
@@ -727,11 +746,11 @@ class Store:
         clauses: list[str] = []
         params: list = []
         if since:
-            clauses.append("started_at >= ?")
-            params.append(since)
+            clauses.append("datetime(started_at) >= datetime(?)")
+            params.append(_norm_iso(since))
         if until:
-            clauses.append("started_at < ?")
-            params.append(until)
+            clauses.append("datetime(started_at) < datetime(?)")
+            params.append(_norm_iso(until))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 
         with self._conn() as conn:

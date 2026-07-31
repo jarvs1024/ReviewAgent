@@ -175,7 +175,7 @@ class RepoScanCollector:
                 "target_branch": target_branch,
                 "diff_stats": {
                     "commits": len(in_window),
-                    "files_changed": files_changed if False else files_count,
+                    "files_changed": files_count,
                     "additions": added, "deletions": deleted,
                     "mr_count": len(in_window),
                 },
