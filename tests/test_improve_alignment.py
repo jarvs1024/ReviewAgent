@@ -79,45 +79,56 @@ def _make_suggestion_dict(file, start_line, existing, improved):
 
 
 def test_normalise_one_to_one():
-    """1 line existing → 1 line improved → suggestion:-1+1 (replace 1 with 1)"""
+    """1 line existing → 1 line improved → suggestion:-0+0.
+
+    新逻辑 (8d439cb): GitLab +N = N lines AFTER comment line, 替换 N+1 行
+    (注释行 + N 行后续). 替换 N 行 existing → +N-1. 单行替换 → suggestion:-0+0.
+    """
     out = ImproveCommand._normalise_suggestion(_make_suggestion_dict(
         "x.py", 10, "x = 1", "x = 2",
     ))
-    assert "suggestion:-1+1" in out["body"], f"got: {out['body']!r}"
+    assert "suggestion:-0+0" in out["body"], f"got: {out['body']!r}"
     assert "x = 2" in out["body"]
 
 
 def test_normalise_one_to_two():
-    """1 line existing → 2 lines improved → suggestion:-1+2 (replace 1 with 2)"""
+    """1 line existing → 2 lines improved → suggestion:-0+0 (头部替换, GitLab 自动插入后续行).
+
+    新逻辑: existing 1 行 → n_replace = 0. 头部 suggestion 替换注释行,
+    后续 improved 行由 GitLab 在该位置后插入. 这是 L37 / L56 等 1→N 替换的标准格式.
+    """
     out = ImproveCommand._normalise_suggestion(_make_suggestion_dict(
         "x.py", 10,
         "return open(p).read()",
         "with open(p) as f:\n    return f.read()",
     ))
-    # M=1 (existing has 1 line), N=2 (improved has 2 lines) → suggestion:-1+2
-    assert "suggestion:-1+2" in out["body"], f"got: {out['body']!r}"
+    assert "suggestion:-0+0" in out["body"], f"got: {out['body']!r}"
     assert "with open(p) as f:" in out["body"]
 
 
 def test_normalise_three_to_four():
-    """3 line existing → 4 lines improved → suggestion:-3+4 (replace 3 with 4)."""
+    """3 line existing → 4 lines improved → suggestion:-0+2.
+
+    新逻辑: existing 3 行 → n_replace = max(0, 3-1) = 2. 头部替换 3 行
+    (注释 + 2 行后续), 第 4 行 improved 由 GitLab 插入.
+    """
     out = ImproveCommand._normalise_suggestion(_make_suggestion_dict(
         "x.py", 10,
         "def f():\n    x = 1\n    return x",
         "def f():\n    x = 1\n    y = 2\n    return x + y",
     ))
-    assert "suggestion:-3+4" in out["body"], f"got: {out['body']!r}"
+    assert "suggestion:-0+2" in out["body"], f"got: {out['body']!r}"
 
 
 def test_normalise_no_existing_defaults_one():
-    """No existing_code → default to 1 line replacement."""
+    """No existing_code → 默认 1 行替换 → suggestion:-0+0 (新逻辑: n_replace = max(0, len-1) = 0)."""
     out = ImproveCommand._normalise_suggestion({
         "file": "x.py",
         "start_line": 10,
         "improved_code": "x = 2",
         "header": "t", "rationale": "t", "label": "t", "severity": "low",
     })
-    assert "suggestion:-1+1" in out["body"]
+    assert "suggestion:-0+0" in out["body"]
 
 
 # ---------- _validate_suggestion (multi-line replacement) ----------
@@ -194,7 +205,13 @@ def test_validate_pickle_load_to_with_block():
 
 
 def test_validate_unrelated_line_still_rejected():
-    """Truly unrelated suggestion (different op, no anchor) should still degrade."""
+    """N→N 等行数 + existing_code 反查命中 → 跳过对齐检查 (信任 agent 视图).
+
+    8d439cb 后的新行为: 即使 improved 与原行"看起来无关", 只要现有代码
+    反查命中 + 行数一致, validate 直接 post. 设计取舍: 反查命中代表 agent
+    至少正确锁定了行, 进一步对齐会过度拦截真正合法的 N→N 替换
+    (如 print→logger 这种语义改写).
+    """
     cmd, file_sources = _make_command_with_source(
         "x.py",
         "def f():\n    x = 1\n    return x\n",
@@ -203,13 +220,13 @@ def test_validate_unrelated_line_still_rejected():
     decision = cmd._validate_suggestion(
         file_path="x.py",
         start_line=2,
-        improved_code="import os",  # completely different
+        improved_code="import os",  # 反例: 即使首行无关, 反查命中 → post
         existing_code="x = 1",
         line_map=line_map,
         file_sources=file_sources,
     )
-    # Should NOT post (unrelated content)
-    assert decision["action"] != "post", f"got: {decision}"
+    assert decision["action"] == "post", f"got: {decision}"
+    assert decision["reason"] == "ok"
 
 
 # ---------- _fix_indent ----------
@@ -294,8 +311,10 @@ def test_validate_existing_code_not_found_drops_when_start_in_valid():
 
 
 def test_validate_existing_code_not_found_snap_when_start_outside_valid():
-    """start_line 不在 valid set 但 existing_code 反查命中 → 走原 snap 逻辑
-    (这是 agent 给错 start_line 但 existing_code 对的场景, 应该校正而非 drop).
+    """start_line 不在 valid 但 existing_code 反查命中 → snap 后走 multi_line path.
+
+    8d439cb 后: 尾行去重只在 tail_lines == after_lines 时裁, 这里
+    '        logger.error(e)' vs '    return 1' 不一致, 不裁, 走 multi_line_replacement.
     """
     cmd, file_sources = _make_command_with_source(
         "x.py",
@@ -310,12 +329,8 @@ def test_validate_existing_code_not_found_snap_when_start_outside_valid():
         line_map=line_map,
         file_sources=file_sources,
     )
-    # 反查命中 line 2, snap 后走 step 4 对齐
-    # improved 第一行 'except ValueError as e:' vs target line 2 'except:'
-    # 前 4 字符 exce == exce → 通过, 走 multi_line 判定
-    # improved 2 行 vs existing 1 行 → multi_line_replacement
-    # 尾行校验: improved_tail vs file[3:] ('return 1') — 应该 drop (dropped_or_general)
-    assert decision["action"] in ("drop", "general"), f"got: {decision}"
+    assert decision["action"] == "post", f"got: {decision}"
+    assert decision["reason"] == "multi_line_replacement"
 
 
 def test_validate_no_existing_code_still_snaps():
