@@ -534,6 +534,28 @@ class ImproveCommand(BaseCommand):
                         f"```suggestion:-0+{n_replace}\n{nc}\n```"
                         + self.HELP_TEXT_FOOTER
                     )
+                # === A. 跨次去重: 算 fingerprint (existing_code 标准化) ===
+                # 同一 (file, line, normalized existing_code) 视为同建议, 不再发
+                import hashlib as _dedup_hl
+                _dedup_existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                _dedup_fingerprint = _dedup_hl.sha256(
+                    _dedup_existing.strip().encode("utf-8")
+                ).hexdigest()[:24]
+                try:
+                    from reviewagent.telemetry.store import get_store as _dedup_store
+                    if _dedup_store().suggestion_exists_by_fingerprint(
+                        self.project_id, self.mr_iid, _dedup_fingerprint
+                    ):
+                        logger.info(
+                            "improve.skip_duplicate project={} mr={} file={} line={} fingerprint={}",
+                            self.project_id, self.mr_iid, file_path,
+                            decision["new_line"], _dedup_fingerprint,
+                        )
+                        inline_skipped.append({"suggestion": raw, "reason": "duplicate_fingerprint"})
+                        continue
+                except Exception as _e:
+                    logger.warning("improve.dedup_check failed (non-fatal): {}", _e)
+
                 note_id = self.gitlab.post_mr_discussion(
                     self.project_id,
                     self.mr_iid,
@@ -547,11 +569,20 @@ class ImproveCommand(BaseCommand):
                         "improve.post_inline project={} mr={} file={} line={}",
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
-                    # 记录 suggestion 到 telemetry (用于后续 /adopt 验证)
+                    # 记录 suggestion 到 telemetry (用于后续 /adopt 验证 + 跨次去重)
                     try:
                         from reviewagent.telemetry.store import get_store
                         head_sha = self._get_mr_head_sha() or ""
                         existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                        # === 跨次去重: file+line+existing_code 的指纹 ===
+                        import hashlib as _hl
+                        rule_keys = (raw.get("rule_keys") if isinstance(raw, dict) else None) or []
+                        fingerprint = _hl.sha256(
+                            (existing or "").strip().encode("utf-8")
+                        ).hexdigest()[:24]
+                        cohort_key = _hl.sha256(
+                            f"{file_path}:{decision['new_line']}:{','.join(rule_keys)}".encode("utf-8")
+                        ).hexdigest()[:24]
                         get_store().record_suggestion(
                             project_id=self.project_id,
                             mr_iid=self.mr_iid,
@@ -565,9 +596,11 @@ class ImproveCommand(BaseCommand):
                             severity=normalised.get("severity"),
                             head_sha=head_sha,
                             label=normalised.get("label"),
-                            rule_keys=(raw.get("rule_keys") if isinstance(raw, dict) else None),
+                            rule_keys=rule_keys,
                             one_sentence_summary=(raw.get("one_sentence_summary") or normalised.get("rationale")) if isinstance(raw, dict) else None,
                             importance=raw.get("importance") if isinstance(raw, dict) else None,
+                            fingerprint=fingerprint,
+                            cohort_key=cohort_key,
                         )
                     except Exception as e:
                         logger.warning("improve.record_suggestion failed: {}", e)

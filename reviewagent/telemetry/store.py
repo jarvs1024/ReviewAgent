@@ -439,6 +439,20 @@ class Store:
             )
             return int(cur.lastrowid or 0)
 
+    def suggestion_exists_by_fingerprint(
+        self, project_id: int, mr_iid: int, fingerprint: str
+    ) -> bool:
+        """跨次去重: 同一 (project, mr, fingerprint) 已发布则返回 True."""
+        if not fingerprint:
+            return False
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? AND fingerprint=? LIMIT 1",
+                (project_id, mr_iid, fingerprint),
+            ).fetchone()
+            return row is not None
+
     def get_suggestion_by_note_id(self, note_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute(
