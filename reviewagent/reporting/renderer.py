@@ -17,6 +17,7 @@ from .collectors.base import SectionResult
 # 节名 -> 中文标题
 SECTION_TITLES: dict[str, str] = {
     "telemetry": "本周检视概况",
+    "merged_mrs": "本周合并到目标分支的 MR",
 }
 
 
@@ -32,8 +33,34 @@ def render_section(name: str, sr: SectionResult) -> str:
 
     if name == "telemetry":
         return _render_telemetry(sr.data or {})
+    if name == "merged_mrs":
+        return _render_merged_mrs(sr.data or {})
     # 兜底
     return "```json\n" + str(sr.data)[:1000] + "\n```"
+
+
+def _render_merged_mrs(d: dict[str, Any]) -> str:
+    """merged_mrs section markdown 渲染."""
+    items = d.get("items") or []
+    total = d.get("total", 0)
+    target_branch = d.get("target_branch", "main")
+    if not items:
+        return f"本周无合并到 `{target_branch}` 的 MR。\n"
+    lines: list[str] = []
+    lines.append(f"共合并 **{total}** 个 MR 到 `{target_branch}`:\n")
+    lines.append("| MR | 标题 | 作者 | 合并人 | 源分支 | 变更行数 | 合并时间 |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for m in items:
+        iid = m.get("iid")
+        title = (m.get("title") or "").replace("|", "\\|")[:60]
+        author = m.get("author", "")
+        merged_by = m.get("merged_by", "") or "—"
+        src = (m.get("source_branch") or "").replace("|", "\\|")
+        changes = f"+{m.get('additions', 0)}/-{m.get('deletions', 0)}"
+        merged_at = (m.get("merged_at") or "")[:16].replace("T", " ")
+        mr_link = f"[!{iid}]({m.get('web_url', '#')})" if m.get("web_url") else f"!{iid}"
+        lines.append(f"| {mr_link} | {title} | `{author}` | `{merged_by}` | `{src}` | {changes} | {merged_at} |")
+    return "\n".join(lines) + "\n"
 
 
 def _render_telemetry(d: dict[str, Any]) -> str:

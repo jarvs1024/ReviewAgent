@@ -79,34 +79,34 @@ def _make_suggestion_dict(file, start_line, existing, improved):
 
 
 def test_normalise_one_to_one():
-    """1 line existing → 1 line improved → suggestion:-0+1"""
+    """1 line existing → 1 line improved → suggestion:-1+1 (replace 1 with 1)"""
     out = ImproveCommand._normalise_suggestion(_make_suggestion_dict(
         "x.py", 10, "x = 1", "x = 2",
     ))
-    assert "suggestion:-0+1" in out["body"], f"got: {out['body']!r}"
+    assert "suggestion:-1+1" in out["body"], f"got: {out['body']!r}"
     assert "x = 2" in out["body"]
 
 
 def test_normalise_one_to_two():
-    """1 line existing → 2 lines improved → suggestion:-0+1 (still 1 line to replace)."""
+    """1 line existing → 2 lines improved → suggestion:-1+2 (replace 1 with 2)"""
     out = ImproveCommand._normalise_suggestion(_make_suggestion_dict(
         "x.py", 10,
         "return open(p).read()",
         "with open(p) as f:\n    return f.read()",
     ))
-    # 1 line to replace, so +1 (suggestion block content > original by 1)
-    assert "suggestion:-0+1" in out["body"], f"got: {out['body']!r}"
+    # M=1 (existing has 1 line), N=2 (improved has 2 lines) → suggestion:-1+2
+    assert "suggestion:-1+2" in out["body"], f"got: {out['body']!r}"
     assert "with open(p) as f:" in out["body"]
 
 
 def test_normalise_three_to_four():
-    """3 line existing → 4 lines improved → suggestion:-0+3."""
+    """3 line existing → 4 lines improved → suggestion:-3+4 (replace 3 with 4)."""
     out = ImproveCommand._normalise_suggestion(_make_suggestion_dict(
         "x.py", 10,
         "def f():\n    x = 1\n    return x",
         "def f():\n    x = 1\n    y = 2\n    return x + y",
     ))
-    assert "suggestion:-0+3" in out["body"], f"got: {out['body']!r}"
+    assert "suggestion:-3+4" in out["body"], f"got: {out['body']!r}"
 
 
 def test_normalise_no_existing_defaults_one():
@@ -117,7 +117,7 @@ def test_normalise_no_existing_defaults_one():
         "improved_code": "x = 2",
         "header": "t", "rationale": "t", "label": "t", "severity": "low",
     })
-    assert "suggestion:-0+1" in out["body"]
+    assert "suggestion:-1+1" in out["body"]
 
 
 # ---------- _validate_suggestion (multi-line replacement) ----------
