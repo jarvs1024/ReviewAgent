@@ -35,11 +35,14 @@ class MRRecord:
     def from_gitlab(cls, mr: dict) -> "MRRecord":
         """从 GitLab API 返回的 MR dict 构造."""
         author = mr.get("author") or {}
+        name = (author.get("name") or "").strip()
+        username = author.get("username", "unknown")
+        author_display = f"{name}@{username}" if name else username
         return cls(
             project_id=mr["project_id"],
             mr_iid=mr["iid"],
             title=mr.get("title", ""),
-            author_username=author.get("username", "unknown"),
+            author_username=author_display,
             source_branch=mr.get("source_branch", ""),
             target_branch=mr.get("target_branch", ""),
             state=mr.get("state", "opened"),

@@ -141,6 +141,9 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
         actor = (payload.get("user_username") or payload.get("user", {}).get("username", ""))
         if locks.is_bot(actor):
             continue
+        # 格式化为 "名字@工号"
+        actor_name = (payload.get("user_name") or "").strip()
+        actor = f"{actor_name}@{actor}" if actor_name and actor else actor
         if locks.should_skip_cooldown(project_id, mr_iid, config.push_commands[0]):
             continue
         job_ids = enqueue_mr_chain(

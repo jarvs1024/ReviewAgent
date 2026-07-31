@@ -6,6 +6,15 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _display_name(user: dict) -> str:
+    """从 GitLab user 对象生成 '中文名字@工号' 格式."""
+    name = (user.get("name") or "").strip()
+    username = (user.get("username") or "").strip()
+    if name and username:
+        return f"{name}@{username}"
+    return username or name or ""
+
+
 # ---------- MR Hook ----------
 @dataclass
 class MRHookPayload:
@@ -36,7 +45,7 @@ class MRHookPayload:
             project_id=proj.get("id", 0),
             mr_iid=obj.get("iid", 0),
             action=obj.get("action", ""),
-            actor_username=author.get("username", ""),
+            actor_username=_display_name(author),
             title=obj.get("title", ""),
             source_branch=obj.get("source_branch", ""),
             target_branch=obj.get("target_branch", ""),
@@ -76,7 +85,7 @@ class NoteHookPayload:
             mr_iid=mr.get("iid", 0),
             note_id=obj.get("id", 0),
             note_body=obj.get("note", ""),
-            actor_username=author.get("username", ""),
+            actor_username=_display_name(author),
             note_type=obj.get("type", ""),
             discussion_id=str(obj.get("discussion_id", "") or ""),
             noteable_type=noteable_type,

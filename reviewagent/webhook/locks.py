@@ -56,10 +56,12 @@ class MRLockManager:
             return True
 
     def is_bot(self, username: str) -> bool:
-        """判断是否为 bot 自己（防回环）."""
+        """判断是否为 bot 自己（防回环）. 支持 '名字@工号' 格式."""
         if not username:
             return False
-        return username.lower() == config.gitlab_bot_username.lower()
+        # 兼容 "中文名字@工号" 格式: 取 @ 后的部分比较
+        bare = username.rsplit("@", 1)[-1] if "@" in username else username
+        return bare.lower() == config.gitlab_bot_username.lower()
 
     def should_skip_cooldown(
         self,
