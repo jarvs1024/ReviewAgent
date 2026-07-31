@@ -63,6 +63,21 @@ class ImproveCommand(BaseCommand):
         line_map = self._diff_line_map()
         all_files = sorted(line_map.keys())
 
+        # 文件扩展名过滤: 跳过 .md/.doc/.png 等非代码文件
+        excluded_ext = set(config.review_exclude_extensions)
+        if excluded_ext:
+            code_files = [f for f in all_files if not any(f.lower().endswith(ext) for ext in excluded_ext)]
+            if len(code_files) < len(all_files):
+                skipped_ext = set(all_files) - set(code_files)
+                logger.info(
+                    "improve.file_filter project={} mr={} skipped={}",
+                    self.project_id, self.mr_iid, sorted(skipped_ext),
+                )
+            all_files = code_files
+
+        if not all_files:
+            return {"summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。", "suggestions": []}
+
         # 文件数限流: 超出上限的文件跳过，在总览中注明
         max_files = config.improve_max_files
         if max_files > 0 and len(all_files) > max_files:

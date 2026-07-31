@@ -71,6 +71,9 @@ class Config:
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
     improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
 
+    # ---- 检视文件过滤 ----
+    review_exclude_extensions: tuple[str, ...] = (".md", ".doc", ".docx", ".txt", ".rst", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:
@@ -122,6 +125,8 @@ class Config:
             improve_max_files=int(_env("IMPROVE_MAX_FILES", "10")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
             improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
+            review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",
+                ".md,.doc,.docx,.txt,.rst,.csv,.png,.jpg,.jpeg,.gif,.svg,.ico"),
         )
         # 确保目录存在
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
