@@ -429,9 +429,42 @@ class ImproveCommand(BaseCommand):
                 f"{self.repo_context}\n\n"
             )
 
+        # === C. 已发过的建议列表 — 让 agent 知道自己说过了 ===
+        # 这样 agent 看到 diff 时, 如果是同样问题就 skip, 不会重复发
+        already_suggested_block = ""
+        try:
+            from reviewagent.telemetry.store import get_store
+            existing = get_store().list_suggestion_headers(
+                self.project_id, self.mr_iid
+            )
+            if existing:
+                items = []
+                for s in existing[:50]:  # 限制 50 条避免 prompt 过长
+                    fp = s.get("fp_short", "?")
+                    sev = (s.get("severity") or "?").upper()
+                    st = (s.get("status") or "?").upper()
+                    fp_path = s.get("file_path", "?")
+                    line = s.get("target_line", "?")
+                    hdr = (s.get("header") or "?").strip()[:30]
+                    items.append(
+                        f"- `{fp_path}` L{line} — {hdr} [{sev}/{st}] (fp={fp})"
+                    )
+                already_suggested_block = (
+                    "## ⚠️ 已发过的建议（不要重复）\n\n"
+                    f"本 MR 已发布 **{len(existing)}** 条 suggestion. "
+                    "**绝对不要重复这些**，即使代码再次出现也一样.\n"
+                    "如果你认为某条已 applied / 关闭但应该重新评估，"
+                    "**只在 summary_md 里文字描述**，不要发新 suggestion。\n\n"
+                    + "\n".join(items)
+                    + "\n\n"
+                )
+        except Exception as e:
+            logger.warning("improve.list_existing failed (non-fatal): {}", e)
+
         if not line_map:
             return (
                 f"{repo_ctx_block}"
+                f"{already_suggested_block}"
                 "请按你的 system prompt 处理当前 MR 的 diff"
                 "（变更内容见上方附件文件）。"
             )

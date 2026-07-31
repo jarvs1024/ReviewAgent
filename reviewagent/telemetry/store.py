@@ -453,6 +453,30 @@ class Store:
             ).fetchone()
             return row is not None
 
+    def list_suggestion_headers(
+        self, project_id: int, mr_iid: int
+    ) -> list[dict[str, Any]]:
+        """给 agent 看的"已发过建议"列表 (用于 prompt 注入, 避免 agent 重复提).
+
+        只返回轻量级字段 (不返回完整 diff) 节省 token:
+          - file, line (用于 agent 判断是否已覆盖)
+          - header (用于 agent 判断是否是同类问题)
+          - severity / status
+          - existing_code_hash (fingerprint 前 8 位, 用于完全匹配判定)
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT file_path, target_line, header, severity, status,
+                       substr(fingerprint, 1, 8) AS fp_short
+                FROM suggestions
+                WHERE project_id = ? AND mr_iid = ?
+                ORDER BY target_line, file_path
+                """,
+                (project_id, mr_iid),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_suggestion_by_note_id(self, note_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute(
