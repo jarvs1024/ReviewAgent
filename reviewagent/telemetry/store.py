@@ -486,8 +486,8 @@ class Store:
         导致纯 fingerprint dedup 命中率低. 用 (file, line, severity) 做兜底:
         同一行同一严重度的重复建议大概率是同一 bug, 直接跳过.
 
-        - 状态过滤: open / applied / superseded 都视为"已存在", 只在 dismissed
-          时允许重发 (用户明确说不要, 但 LLM 再次看到了应当允许).
+        - 状态过滤: 任何状态都视为"已存在" — dismissed 也算, 用户已经明确
+          拒绝过这条建议, 不应该重复推送骚扰.
         """
         with self._conn() as conn:
             row = conn.execute(
@@ -495,7 +495,6 @@ class Store:
                 SELECT 1 FROM suggestions
                 WHERE project_id=? AND mr_iid=?
                   AND file_path=? AND target_line=? AND severity=?
-                  AND state IN ('open','applied','superseded')
                 LIMIT 1
                 """,
                 (project_id, mr_iid, file_path, target_line, severity or ''),
