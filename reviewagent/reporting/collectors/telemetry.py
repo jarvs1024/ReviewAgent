@@ -1,16 +1,19 @@
-"""Telemetry collector — 从 reviewagent telemetry.db 拉本周 run 统计.
+"""Telemetry collector — pr_agent 风格的检视概况采集.
 
 输出 SectionResult.data 含:
-    total / success / failed / success_rate
-    by_command / by_status / by_day
-    top_mrs
-    failed_runs
+    mr_count          : 本周窗口内的 MR 数 (来自 mr_activity OVERVIEW)
+    mr_total          : 项目累计 MR 数
+    suggestion_count  : 本周窗口 suggestion 数
+    suggestion_total  : 项目累计 suggestion 数
+    adoption_rate     : 已采纳 / (已采纳 + 已关闭), 0~1
+    severity_breakdown: {high: N, medium: M, ...}
+    top_rules         : [(rule_key, count), ...] 前 5 名
+
+也保留向后兼容字段 (success / failed / by_command / top_mrs) 用于旧实现。
 """
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from reviewagent.logging_setup import logger
@@ -31,20 +34,50 @@ class TelemetryCollector:
     ) -> SectionResult:
         try:
             store = get_store()
-            rows = store.list_runs(
-                project_id=ctx.target_project_id or None,
-                since=week_start.isoformat(),
-                until=week_end.isoformat(),
-                limit=1000,
+            pid = ctx.target_project_id or None
+            since_iso = week_start.isoformat()
+            until_iso = week_end.isoformat()
+
+            # ---- MR 窗口 + 累计 ----
+            mr_overview_window = store.mr_overview(
+                project_id=pid, since=since_iso, until=until_iso,
             )
-            # 关联 MR title
+            mr_overview_total = store.mr_overview(project_id=pid)
+            # window 含 merged/closed/opened, 但 PR-Agent 模板用 merge_count 概念
+            # 这里 mr_count 报"窗口内出现过的不同 MR" — 由 window_count 提供
+            mr_count = mr_overview_window["window_count"]
+
+            # ---- suggestion 窗口 + 累计 ----
+            win_metrics = store.suggestion_metrics(
+                project_id=pid, since=since_iso, until=until_iso,
+            )
+            all_metrics = store.suggestion_metrics(project_id=pid)
+            suggestion_count = win_metrics["total"]
+            suggestion_total = all_metrics["total"]
+            adoption_rate = (win_metrics["adoption_rate"] or 0.0) / 100.0
+
+            # severity 重整: severity_counts -> severity_breakdown (按 high/medium/low/critical)
+            sev = win_metrics.get("severity_counts") or {}
+            # 兼容 'unspecified' 标签
+            severity_breakdown = {k: v for k, v in sev.items() if k != "unspecified"}
+            if "unspecified" in sev:
+                severity_breakdown["other"] = sev["unspecified"]
+
+            # ---- 触发最多规则 (窗口期) ----
+            top_rules = store.rule_key_counts(
+                project_id=pid, since=since_iso, until=until_iso, top_n=5,
+            )
+
+            # ---- 兼容原实现 ----
+            rows = store.list_runs(
+                project_id=pid, since=since_iso, until=until_iso, limit=1000,
+            )
             mr_cache: dict[tuple[int, int], dict] = {}
             enriched: list[dict] = []
             for r in rows:
                 key = (r["project_id"], r["mr_iid"])
                 if key not in mr_cache:
-                    mr = store.get_mr(*key) or {}
-                    mr_cache[key] = mr
+                    mr_cache[key] = store.get_mr(*key) or {}
                 r2 = dict(r)
                 mr_meta = mr_cache[key]
                 r2["mr_title"] = mr_meta.get("title", "")
@@ -52,95 +85,163 @@ class TelemetryCollector:
                 enriched.append(r2)
 
             stats = self._aggregate(enriched)
-            stats["suggestions"] = store.suggestion_metrics(
-                project_id=ctx.target_project_id or None,
-                since=week_start.isoformat(), until=week_end.isoformat(),
-            )
+            stats["suggestions"] = {
+                "total": suggestion_count,
+                "state_counts": win_metrics.get("state_counts", {}),
+                "severity_counts": win_metrics.get("severity_counts", {}),
+                "action_counts": win_metrics.get("action_counts", {}),
+                "adoption_rate": win_metrics.get("adoption_rate", 0.0),
+                "adopted": win_metrics.get("adopted", 0),
+                "dismissed": win_metrics.get("dismissed", 0),
+            }
+
             dismissals = store.list_suggestion_actions(
-                project_id=ctx.target_project_id or None, action="dismissed",
-                since=week_start.isoformat(), until=week_end.isoformat(), limit=10000,
+                project_id=pid, action="dismissed",
+                since=since_iso, until=until_iso, limit=10000,
             )
+            from collections import defaultdict
             reasons: dict[str, int] = defaultdict(int)
             for dismissal in dismissals:
                 reasons[(dismissal.get("reason") or "未填写原因").strip()] += 1
             stats["dismissal_reasons"] = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+
+            # ---- 新增 pr_agent 风格字段 (放在 data 顶层) ----
+            stats.update({
+                "mr_count": mr_count,
+                "mr_total": mr_overview_total["total"],
+                "suggestion_count": suggestion_count,
+                "suggestion_total": suggestion_total,
+                "adoption_rate": adoption_rate,
+                "severity_breakdown": severity_breakdown,
+                "top_rules": top_rules,
+            })
+
             return SectionResult(
                 status="ok",
                 data=stats,
-                meta={"rows": len(rows), "week_start": week_start.isoformat(),
-                      "week_end": week_end.isoformat()},
+                meta={"rows": len(rows), "week_start": since_iso, "week_end": until_iso,
+                      "mr_window": mr_overview_window, "mr_total": mr_overview_total["total"]},
             )
         except Exception as e:
             logger.exception("telemetry collector failed: {}", e)
-            return SectionResult(
-                status="failed", error=str(e), data=None, meta={}
-            )
+            return SectionResult(status="failed", error=str(e), data=None, meta={})
 
     @staticmethod
     def _aggregate(rows: list[dict]) -> dict[str, Any]:
-        total = len(rows)
+        from collections import defaultdict
+        if not rows:
+            return {
+                "total": 0, "success": 0, "failed": 0, "running": 0,
+                "skipped": 0, "success_rate": 0.0, "avg_duration_ms": 0,
+                "by_command": {}, "by_status": {}, "by_day": {},
+                "top_mrs": [], "failed_runs": [],
+            }
+
+        # by_command: {command: {"count": N, "success": N, "failed": N, "running": N, "avg_duration_ms": int, "max_duration_ms": int}}
         by_command: dict[str, dict] = {}
         by_status: dict[str, int] = defaultdict(int)
         by_day: dict[str, int] = defaultdict(int)
         by_mr: dict[tuple[int, int], dict] = {}
         failed_runs: list[dict] = []
-
+        success_count = failed_count = running_count = skipped_count = 0
+        duration_total = 0
         for r in rows:
-            cmd = r["command"]
-            st = r["status"]
+            cmd = r.get("command") or "?"
+            status = r.get("status") or "?"
             dur = r.get("duration_ms") or 0
-            day = (r.get("started_at") or "")[:10]
-            bc = by_command.setdefault(cmd, {
-                "count": 0, "success": 0, "failed": 0, "timeout": 0, "running": 0,
-                "total_duration_ms": 0, "max_duration_ms": 0,
-            })
-            bc["count"] += 1
-            if st in bc:
-                bc[st] += 1
-            bc["total_duration_ms"] += dur
-            bc["max_duration_ms"] = max(bc["max_duration_ms"], dur)
-            by_status[st] += 1
-            by_day[day] += 1
-            key = (r["project_id"], r["mr_iid"])
-            bm = by_mr.setdefault(key, {
-                "title": r.get("mr_title") or "?",
-                "author": r.get("mr_author") or "?",
-                "runs": 0, "success": 0, "failed": 0,
-            })
-            bm["runs"] += 1
-            if st == "success":
-                bm["success"] += 1
-            elif st in ("failed", "timeout"):
-                bm["failed"] += 1
-            if st in ("failed", "timeout"):
-                failed_runs.append(r)
+            b = by_command.setdefault(cmd, {"count": 0, "success": 0, "failed": 0, "running": 0, "skipped": 0,
+                                            "duration_total": 0, "max_duration_ms": 0, "avg_duration_ms": 0})
+            b["count"] += 1
+            b["duration_total"] += dur
+            b["max_duration_ms"] = max(b["max_duration_ms"], dur)
+            if status == "success":
+                b["success"] += 1; success_count += 1
+            elif status in ("failed", "timeout"):
+                b["failed"] += 1; failed_count += 1
+            elif status == "running":
+                b["running"] += 1; running_count += 1
+            elif status == "skipped":
+                b["skipped"] += 1; skipped_count += 1
+            by_status[status] += 1
+            if status == "success":
+                success_count += 1
+            elif status in ("failed", "timeout"):
+                failed_count += 1
+            elif status == "running":
+                running_count += 1
+            elif status == "skipped":
+                skipped_count += 1
 
-        for bc in by_command.values():
-            bc["avg_duration_ms"] = int(bc["total_duration_ms"] / bc["count"]) if bc["count"] else 0
-        success = by_status.get("success", 0)
-        fail = by_status.get("failed", 0) + by_status.get("timeout", 0)
-        success_rate = (success / total * 100) if total else 0.0
-        avg_duration = (
-            int(sum(r.get("duration_ms") or 0 for r in rows) / total) if total else 0
-        )
-        top_mrs = [
-            {"project_id": k[0], "mr_iid": k[1], **v}
-            for k, v in sorted(by_mr.items(), key=lambda kv: kv[1]["runs"], reverse=True)
-        ][:10]
+            day = (r.get("started_at") or "")[:10]
+            if day:
+                by_day[day] += 1
+
+            dur = r.get("duration_ms") or 0
+            duration_total += dur
+
+            key = (r["project_id"], r["mr_iid"])
+            cur = by_mr.get(key)
+            if cur is None or (r.get("started_at") or "") > (cur.get("started_at") or ""):
+                by_mr[key] = r
+
+            if status in ("failed", "timeout"):
+                failed_runs.append({
+                    "project_id": r["project_id"], "mr_iid": r["mr_iid"],
+                    "command": cmd, "started_at": r.get("started_at"),
+                    "duration_ms": dur, "error": (r.get("error") or "")[:200],
+                    "mr_title": r.get("mr_title", ""),
+                })
+
+        total = len(rows)
+        avg_ms = duration_total // total if total else 0
+        success_rate = round(success_count / total * 100, 1) if total else 0.0
+        for cmd, b in by_command.items():
+            if b["count"] > 0:
+                b["avg_duration_ms"] = b["duration_total"] // b["count"]
+            del b["duration_total"]
+        # 转换 by_status 为正常 dict (不 defaultdict)
+        by_status_plain = dict(by_status)
+        # ---- 在按 MR 聚合时也累计 success / failed / runs ----
+        per_mr_stats: dict[tuple[int, int], dict] = {}
+        for r in rows:
+            key = (r["project_id"], r["mr_iid"])
+            s_mr = per_mr_stats.setdefault(key, {"runs": 0, "success": 0, "failed": 0})
+            s_mr["runs"] += 1
+            st = r.get("status", "")
+            if st == "success":
+                s_mr["success"] += 1
+            elif st in ("failed", "timeout"):
+                s_mr["failed"] += 1
+        per_mr_top = sorted(per_mr_stats.items(), key=lambda kv: -kv[1]["runs"])[:5]
+
+        top_mrs_block = []
+        for (pid, iid), st in per_mr_top:
+            sample = by_mr.get((pid, iid), {})
+            top_mrs_block.append({
+                "project_id": pid, "mr_iid": iid,
+                "title": sample.get("mr_title", ""),
+                "author": sample.get("mr_author", ""),
+                "runs": st["runs"], "success": st["success"], "failed": st["failed"],
+            })
 
         return {
             "total": total,
-            "success": success,
-            "failed": fail,
-            "running": by_status.get("running", 0),
-            "success_rate": round(success_rate, 1),
-            "avg_duration_ms": avg_duration,
-            "by_command": by_command,
-            "by_status": dict(by_status),
+            "success": success_count,
+            "failed": failed_count,
+            "running": running_count,
+            "skipped": skipped_count,
+            "success_rate": success_rate,
+            "avg_duration_ms": avg_ms,
+            "by_command": dict(sorted(by_command.items())),
+            "by_status": by_status_plain,
             "by_day": dict(sorted(by_day.items())),
-            "top_mrs": top_mrs,
-            "failed_runs": failed_runs[:20],
+            "top_mrs": top_mrs_block,
+            "failed_runs": failed_runs[:5],
         }
 
 
-__all__ = ["TelemetryCollector"]
+def by_mr_count(by_mr: dict[tuple[int, int], dict], rec: dict) -> int:
+    """返 key 总 run 数 (用于 top_mrs)."""
+    target = (rec["project_id"], rec["mr_iid"])
+    return sum(1 for r in by_mr.values()
+               if (r["project_id"], r["mr_iid"]) == target)

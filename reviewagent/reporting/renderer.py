@@ -1,9 +1,23 @@
-"""Render WeeklyArtifact -> Markdown + split into chunks (按 ## 标题切).
+"""周报 markdown 渲染 — pr-agent 风格 3 段布局.
 
-参考 pr-agent: pr_agent/reporting/renderer.py
-    - 每节渲染为 ## <title>
-    - status='failed' 的 section 渲染为警告行
-    - markdown 总长超 chunk_limit 时按 ## 切分 (避免单条 IM 消息超限)
+参考: pr_agent/reporting/renderer.py
+
+布局:
+    # TITLE
+    > 生成时间 / 数据范围
+
+    ## 一、本周检视概况                (telemetry section)
+        | 指标 | 数值 | 表格 ...
+
+    ## 二、本周 {branch} 变更汇总      (merged_mrs section)
+        head_line (总览) +
+        变更摘要 (LLM 或本系统拼接) +
+        涉及 MR 列表
+
+    ## 三、本周代码质量扫描            (repo_scan section)
+        高风险模块 / 新增坏味道 / 测试覆盖与可靠性 / 建议跟进
+
+每段标题用 `##` 而 LLM 可能产出 `#` — 渲染前 demote.
 """
 from __future__ import annotations
 
@@ -14,15 +28,61 @@ from .artifact import WeeklyArtifact
 from .collectors.base import SectionResult
 
 
-# 节名 -> 中文标题
 SECTION_TITLES: dict[str, str] = {
-    "telemetry": "本周检视概况",
-    "merged_mrs": "本周合并到目标分支的 MR",
+    "telemetry":   "一、本周检视概况",
+    "merged_mrs":  "二、本周 {branch} 变更汇总",
+    "repo_scan":   "三、本周代码质量扫描",
 }
+
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 
 
 def section_title(name: str, fallback: str | None = None) -> str:
     return SECTION_TITLES.get(name, fallback or name)
+
+
+def _demote_llm_headings(md: str | None) -> str:
+    """LLM 输出里 `#` / `##` 标题降级为 `**粗体**`, DingTalk 渲染时不会被放大."""
+    if not md:
+        return md or ""
+    out: list[str] = []
+    for line in md.splitlines():
+        m = _HEADING_RE.match(line.rstrip())
+        if not m:
+            out.append(line)
+            continue
+        title = m.group(1).strip()
+        out.append(f"**{title}**")
+    return "\n".join(out)
+
+
+def _wrap(s: str, width: int = 22) -> str:
+    """长字符串按 word boundary 切, 用 `<br>` 拼回去 — DingTalk 单元格不会自动 wrap."""
+    if not s:
+        return ""
+    s = s.replace("|", "\\|").replace("\n", " ")
+    if len(s) <= width:
+        return s
+    words = s.split(" ")
+    out: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for w in words:
+        if not cur:
+            cur = [w]
+            cur_len = len(w)
+            continue
+        if cur_len + 1 + len(w) > width:
+            out.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += 1 + len(w)
+    if cur:
+        out.append(" ".join(cur))
+    return "<br>".join(out)
 
 
 def render_section(name: str, sr: SectionResult) -> str:
@@ -35,196 +95,179 @@ def render_section(name: str, sr: SectionResult) -> str:
         return _render_telemetry(sr.data or {})
     if name == "merged_mrs":
         return _render_merged_mrs(sr.data or {})
+    if name == "repo_scan":
+        return _render_repo_scan(sr.data or {}, sr.markdown)
     # 兜底
     return "```json\n" + str(sr.data)[:1000] + "\n```"
 
 
-def _render_merged_mrs(d: dict[str, Any]) -> str:
-    """merged_mrs section markdown 渲染."""
-    items = d.get("items") or []
-    total = d.get("total", 0)
-    target_branch = d.get("target_branch", "main")
-    if not items:
-        return f"本周无合并到 `{target_branch}` 的 MR。\n"
-    lines: list[str] = []
-    lines.append(f"共合并 **{total}** 个 MR 到 `{target_branch}`:\n")
-    lines.append("| MR | 标题 | 作者 | 合并人 | 源分支 | 变更行数 | 合并时间 |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for m in items:
-        iid = m.get("iid")
-        title = (m.get("title") or "").replace("|", "\\|")[:60]
-        author = m.get("author", "")
-        merged_by = m.get("merged_by", "") or "—"
-        src = (m.get("source_branch") or "").replace("|", "\\|")
-        changes = f"+{m.get('additions', 0)}/-{m.get('deletions', 0)}"
-        merged_at = (m.get("merged_at") or "")[:16].replace("T", " ")
-        mr_link = f"[!{iid}]({m.get('web_url', '#')})" if m.get("web_url") else f"!{iid}"
-        lines.append(f"| {mr_link} | {title} | `{author}` | `{merged_by}` | `{src}` | {changes} | {merged_at} |")
+def _render_telemetry(d: dict[str, Any]) -> str:
+    """检视概况: 2 列 6 行指标表."""
+    mr_count = d.get("mr_count", 0)
+    mr_total = d.get("mr_total", 0)
+    suggestion_count = d.get("suggestion_count", 0)
+    suggestion_total = d.get("suggestion_total", suggestion_count)
+    adoption_rate = round(float(d.get("adoption_rate", 0)) * 100, 1)
+    sev = d.get("severity_breakdown") or {}
+    rules = d.get("top_rules") or []
+
+    sev_value = "<br>".join(f"{k}={v}" for k, v in sev.items()) if sev else "(无)"
+    if rules:
+        rules_value = "<br>".join(f"{rk} ×{n}" for rk, n in rules[:5])
+    else:
+        rules_value = "(无)"
+
+    rows: list[tuple[str, str]] = [
+        ("本周窗口 MR 数", str(mr_count)),
+        ("项目累计 MR 数", str(mr_total)),
+        ("累计 suggestion 数", str(suggestion_total)),
+        ("本周采纳率", f"{adoption_rate}%"),
+        ("severity 分布", sev_value),
+        ("触发最多规则", rules_value),
+    ]
+    lines: list[str] = [
+        "| 指标 | 数值 |",
+        "|---|---|",
+    ]
+    for label, value in rows:
+        lines.append(f"| {label} | {value} |")
     return "\n".join(lines) + "\n"
 
 
-def _render_telemetry(d: dict[str, Any]) -> str:
-    """telemetry section markdown 渲染."""
-    total = d.get("total", 0)
-    success = d.get("success", 0)
-    failed = d.get("failed", 0)
-    running = d.get("running", 0)
-    rate = d.get("success_rate", 0.0)
-    avg_ms = d.get("avg_duration_ms", 0)
-    if total == 0:
-        return "本周无任何检视 run 记录。\n"
+def _render_merged_mrs(d: dict[str, Any]) -> str:
+    """变更汇总: head_line + 变更摘要 + MR 列表 (PR-Agent 同款)."""
+    merge_count = int(d.get("merge_count", 0))
+    target_branch = d.get("target_branch", "?")
+    if merge_count == 0:
+        return f"目标分支 `{target_branch}` 本周窗口内无 MR 合并。\n"
 
-    lines: list[str] = []
-    lines.append(f"- 总 run 数: **{total}**")
-    lines.append(f"- 成功: **{success}**  •  失败/超时: **{failed}**  •  运行中: {running}")
-    lines.append(f"- 成功率: **{rate}%**")
-    lines.append(f"- 平均耗时: **{avg_ms/1000:.1f}s**")
+    additions = d.get("additions", 0)
+    deletions = d.get("deletions", 0)
+    author_count = d.get("author_count", 0)
+    mr_list = d.get("mr_list") or []
+    summary = _demote_llm_headings(d.get("llm_description_markdown", ""))
+
+    head_line = (
+        f"本周合并到 `{target_branch}` 的 MR 共 **{merge_count}** 个, "
+        f"涉及作者 **{author_count}** 位, "
+        f"新增代码 **{additions}** 行, 删除 **{deletions}** 行。"
+    )
+
+    lines: list[str] = [head_line, ""]
+    if summary:
+        lines.append("**变更摘要**")
+        lines.append("")
+        lines.append(summary.strip())
+        lines.append("")
+
+    lines.append("**涉及 MR 列表**")
     lines.append("")
+    lines.append("| MR | 标题 | 作者 | 合并时间 |")
+    lines.append("|---|---|---|---|")
+    for mr in mr_list[:50]:
+        iid = mr.get("iid", "?")
+        title = (mr.get("title") or "").replace("|", "\\|").replace("\n", " ")
+        author = mr.get("author") or "?"
+        merged_at = (mr.get("merged_at") or "")[:10].replace("-", "/") or "?"
+        url = mr.get("url") or mr.get("web_url") or ""
+        cell = f"[!{iid}]({url})" if url else f"!{iid}"
+        lines.append(f"| {cell} | {_wrap(title, width=22)} | {author} | {merged_at} |")
+    return "\n".join(lines) + "\n"
 
-    suggestions = d.get("suggestions") or {}
-    if suggestions.get("total", 0):
-        lines.append("**建议采纳情况:**")
-        lines.append("")
-        lines.append(
-            f"- 建议数: **{suggestions['total']}**  •  已采纳: **{suggestions.get('adopted', 0)}**  •  "
-            f"已 dismiss: **{suggestions.get('dismissed', 0)}**  •  采纳率: **{suggestions.get('adoption_rate', 0)}%**"
-        )
-        severity_counts = suggestions.get("severity_counts") or {}
-        if severity_counts:
-            lines.append("- 严重级别: " + "、".join(f"{key} {value}" for key, value in severity_counts.items()))
-        reasons = d.get("dismissal_reasons") or {}
-        if reasons:
-            lines.append("- Dismiss 原因: " + "、".join(f"{key} {value}" for key, value in reasons.items()))
-        lines.append("")
 
-    # by_command
-    by_command = d.get("by_command") or {}
-    if by_command:
-        lines.append("**按命令维度:**")
-        lines.append("")
-        lines.append("| 命令 | 次数 | 成功 | 失败 | 平均耗时 | 最长耗时 |")
-        lines.append("|---|---|---|---|---|---|")
-        for cmd, bc in by_command.items():
-            lines.append(
-                f"| `{cmd}` | {bc['count']} | {bc['success']} | {bc['failed']} | "
-                f"{bc['avg_duration_ms']/1000:.1f}s | {bc['max_duration_ms']/1000:.1f}s |"
-            )
-        lines.append("")
-
-    # by_day
-    by_day = d.get("by_day") or {}
-    if by_day:
-        lines.append("**按日趋势:**")
-        lines.append("")
-        for day, n in by_day.items():
-            bar = "█" * min(n, 30)
-            lines.append(f"- `{day}`: {n} {bar}")
-        lines.append("")
-
-    # top_mrs
-    top_mrs = d.get("top_mrs") or []
-    if top_mrs:
-        lines.append("**活跃 MR Top 5:**")
-        lines.append("")
-        lines.append("| Project | MR | 标题 | 作者 | run | 成功 | 失败 |")
-        lines.append("|---|---|---|---|---|---|---|")
-        for mr in top_mrs[:5]:
-            title = (mr.get("title") or "").replace("|", "/")
-            if len(title) > 40:
-                title = title[:38] + "…"
-            lines.append(
-                f"| {mr['project_id']} | !{mr['mr_iid']} | {title} | "
-                f"`{mr.get('author','')}` | {mr['runs']} | {mr['success']} | {mr['failed']} |"
-            )
-        lines.append("")
-
-    # failed runs
-    failed_runs = d.get("failed_runs") or []
-    if failed_runs:
-        lines.append(f"**失败 run 详情 (最近 {min(10, len(failed_runs))} 条):**")
-        lines.append("")
-        for r in failed_runs[:10]:
-            t = (r.get("started_at") or "")[:19]
-            err = (r.get("error") or "")[:80].replace("|", "/").replace("\n", " ")
-            lines.append(f"- `{t}` {r.get('command','')} proj={r.get('project_id')} mr={r.get('mr_iid')} actor=`{r.get('actor_username','')}` — {err}")
-        lines.append("")
-
-    return "\n".join(lines)
+def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
+    """代码质量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
+    if pre_rendered:
+        return pre_rendered
+    # 兜底: 由 data 合成 markdown
+    target_branch = d.get("target_branch", "?")
+    stats = d.get("diff_stats", {})
+    high_risk = d.get("high_risk_files", [])
+    top_rules = d.get("top_rules", [])
+    severity = d.get("severity", {})
+    lines = [
+        f"目标分支 `{target_branch}` 本周 {stats.get('mr_count', 0)} 个合并 MR, "
+        f"覆盖 {stats.get('files_changed', 0)} 个文件, +{stats.get('additions', 0)}/-"
+        f"{stats.get('deletions', 0)} 行。\n",
+        "**高风险模块**",
+    ]
+    if high_risk:
+        for f in high_risk[:5]:
+            lines.append(f"- `{f.get('path')}` (变更 +{f.get('additions', 0)}/-{f.get('deletions', 0)})")
+    else:
+        lines.append("- (无)")
+    lines.append("\n**新增坏味道**")
+    if top_rules:
+        for rk, n in top_rules[:5]:
+            lines.append(f"- `{rk}` × **{n}**")
+    else:
+        lines.append("- (无)")
+    return "\n".join(lines) + "\n"
 
 
 def render_markdown(artifact: WeeklyArtifact) -> str:
-    """整个 artifact -> markdown 字符串."""
-    lines: list[str] = []
-    title_line = f"# {artifact.report_emoji} {artifact.report_title} ({artifact.week_label})"
-    lines.append(title_line)
-    lines.append("")
-    s = artifact.week_start
-    e = artifact.week_end
-    # 减 1 秒表示 inclusive
-    e_disp = e
-    lines.append(
-        f"> 周期: **{s.strftime('%Y-%m-%d %H:%M')}** ~ **{e_disp.strftime('%Y-%m-%d %H:%M')}** "
-        f"({artifact.timezone})"
+    """组装完整周报 markdown."""
+    parts: list[str] = []
+    emoji = artifact.report_emoji or "📊"
+    title = f"# {emoji} {artifact.report_title} — {artifact.week_label}\n"
+    parts.append(title)
+    parts.append(
+        f"> 生成时间: {(artifact.generated_at or '').isoformat()[:16].replace('T', ' ')}"
+        f"<br>数据范围: {artifact.week_start.isoformat()[:10].replace('-', '/')} "
+        f"~ {artifact.week_end.isoformat()[:10].replace('-', '/')}\n"
     )
-    lines.append(f"> 生成时间: {artifact.generated_at.isoformat() if artifact.generated_at else '?'}")
-    lines.append(f"> Project ID: `{artifact.project_id}`")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
 
-    for name, sr in artifact.sections.items():
-        title = section_title(name)
-        lines.append(f"## {title}")
-        lines.append("")
-        body = sr.markdown or render_section(name, sr)
-        lines.append(body)
-        lines.append("")
+    # 按 pr_agent 顺序拼装
+    ordered = ("telemetry", "merged_mrs", "repo_scan")
+    failures: list[str] = []
+    for name in ordered:
+        section = artifact.sections.get(name)
+        if section is None:
+            parts.append(f"\n## {SECTION_TITLES.get(name, name)}\n\n> 本节未启用\n")
+            continue
 
-    lines.append("---")
-    lines.append("")
-    lines.append("_Generated by ReviewAgent reporting · "
-                 "source: `telemetry.db` · "
-                 "sections: " + ", ".join(artifact.sections.keys()) + "_")
-    return "\n".join(lines)
+        title = SECTION_TITLES.get(name, name)
+        if name == "merged_mrs" and section.data:
+            branch = (section.data.get("target_branch") or "main")
+            title = title.format(branch=branch)
+
+        parts.append(f"\n## {title}\n")
+
+        if section.status != "ok":
+            failures.append(name)
+            parts.append(f"\n⚠️ 数据缺失: {section.error or '未知原因'}\n")
+            continue
+
+        body = render_section(name, section)
+        parts.append("\n" + body + "\n")
+
+    if failures:
+        parts.append("\n---\n⚠️ 本次报告部分数据缺失: " + ", ".join(failures) + "\n")
+
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def split_markdown(md: str, chunk_limit: int = 18000) -> list[str]:
-    """按 ## 切 markdown, 每片 <= chunk_limit.
-
-    策略:
-      1. 找所有 ## 位置
-      2. 在最后一个 ## 处切, 使前片 <= chunk_limit
-      3. 反复直到全部切完
-      4. 单片也超 limit 时, 强制按 chunk_limit 字节切
-    """
-    if len(md.encode("utf-8")) <= chunk_limit:
+    """超长 markdown 按 ## 切块, 防单条 IM 消息超限."""
+    if len(md) <= chunk_limit:
         return [md]
-
-    parts: list[str] = []
-    rest = md
-    while len(rest.encode("utf-8")) > chunk_limit:
-        # 找所有 ## 位置
-        positions = [m.start() for m in re.finditer(r"^## ", rest, re.MULTILINE)]
-        if not positions:
-            # 没有 ##, 硬切
-            cut = chunk_limit
-            parts.append(rest[:cut])
-            rest = rest[cut:]
-            continue
-        # 找最后一个 < chunk_limit 的 ##
-        cut = 0
-        for p in positions[1:]:  # skip 第一个 ## (顶层标题)
-            if p < chunk_limit:
-                cut = p
-            else:
-                break
-        if cut == 0:
-            cut = chunk_limit
-        parts.append(rest[:cut])
-        rest = rest[cut:]
-    if rest.strip():
-        parts.append(rest)
-    return parts
+    chunks: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for line in md.splitlines(keepends=True):
+        if line.startswith("## ") and current_bytes + len(line) > chunk_limit and current:
+            chunks.append("".join(current))
+            current = [line]
+            current_bytes = len(line)
+        else:
+            current.append(line)
+            current_bytes += len(line)
+    if current:
+        chunks.append("".join(current))
+    return chunks
 
 
-__all__ = ["render_markdown", "render_section", "split_markdown", "SECTION_TITLES"]
+__all__ = [
+    "render_section", "render_markdown", "split_markdown",
+    "section_title", "SECTION_TITLES",
+]

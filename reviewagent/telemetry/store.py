@@ -234,6 +234,74 @@ class Store:
             ).fetchone()
             return dict(row) if row else None
 
+    def list_mrs(self, *, project_id: int | None = None, since: str | None = None,
+                 until: str | None = None, state: str | None = None,
+                 limit: int = 100) -> list[dict]:
+        """列出 MR (按 project/时间/state 筛选), 用于周报窗口统计."""
+        clauses, params = [], []
+        if project_id is not None:
+            clauses.append("project_id = ?"); params.append(project_id)
+        if since:
+            clauses.append("created_at >= ?"); params.append(since)
+        if until:
+            clauses.append("created_at < ?"); params.append(until)
+        if state:
+            clauses.append("state = ?"); params.append(state)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM mr_activity{where} ORDER BY created_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mr_overview(self, *, project_id: int | None = None, since: str | None = None,
+                    until: str | None = None) -> dict:
+        """PR-Agent 风格的 MR 概览: {total, opened, closed, merged, window_count}."""
+        clauses, params = [], []
+        if project_id is not None:
+            clauses.append("project_id = ?"); params.append(project_id)
+        if since:
+            clauses.append("created_at >= ?"); params.append(since)
+        if until:
+            clauses.append("created_at < ?"); params.append(until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT state, COUNT(*) AS n FROM mr_activity{where} GROUP BY state", params
+            ).fetchall()
+        counts = {"total": 0, "opened": 0, "closed": 0, "merged": 0}
+        for r in rows:
+            st = r["state"] or ""
+            counts[st] = counts.get(st, 0) + r["n"]
+            counts["total"] += r["n"]
+        window_count = counts.get("opened", 0) + counts.get("closed", 0) + counts.get("merged", 0)
+        return {**counts, "window_count": window_count}
+
+    def rule_key_counts(self, *, project_id: int | None = None, since: str | None = None,
+                       until: str | None = None, top_n: int = 5) -> list[tuple[str, int]]:
+        """统计 suggestion 触发最多的规则 (按 rule_keys 拆分后计数)."""
+        clauses, params = [], []
+        if project_id is not None:
+            clauses.append("s.project_id = ?"); params.append(project_id)
+        if since:
+            clauses.append("s.created_at >= ?"); params.append(since)
+        if until:
+            clauses.append("s.created_at < ?"); params.append(until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT rule_keys FROM suggestions s{where}", params,
+            ).fetchall()
+        bucket: dict[str, int] = {}
+        for r in rows:
+            for k in (r["rule_keys"] or "").split(","):
+                k = k.strip()
+                if k:
+                    bucket[k] = bucket.get(k, 0) + 1
+        ranked = sorted(bucket.items(), key=lambda x: (-x[1], x[0]))
+        return ranked[:top_n]
+
     # ---------- Review Run ----------
     def insert_run(self, run: ReviewRun) -> int:
         with self._conn() as conn:
