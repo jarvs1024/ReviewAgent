@@ -471,6 +471,37 @@ class Store:
             ).fetchone()
             return row is not None
 
+    def suggestion_exists_at_line(
+        self,
+        project_id: int,
+        mr_iid: int,
+        file_path: str,
+        target_line: int,
+        severity: str,
+    ) -> bool:
+        """跨次去重 (heuristic): 同 (file, line, severity) 已发布则返回 True.
+
+        Why: LLM 每次返回的 existing_code 范围不一致 (有时 1 行签名, 有时
+        整段函数体), 同一 bug 在不同次 improve 跑出来的 fingerprint 不一样,
+        导致纯 fingerprint dedup 命中率低. 用 (file, line, severity) 做兜底:
+        同一行同一严重度的重复建议大概率是同一 bug, 直接跳过.
+
+        - 状态过滤: open / applied / superseded 都视为"已存在", 只在 dismissed
+          时允许重发 (用户明确说不要, 但 LLM 再次看到了应当允许).
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM suggestions
+                WHERE project_id=? AND mr_iid=?
+                  AND file_path=? AND target_line=? AND severity=?
+                  AND state IN ('open','applied','superseded')
+                LIMIT 1
+                """,
+                (project_id, mr_iid, file_path, target_line, severity or ''),
+            ).fetchone()
+            return row is not None
+
     def list_suggestion_headers(
         self, project_id: int, mr_iid: int
     ) -> list[dict[str, Any]]:

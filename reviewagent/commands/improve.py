@@ -569,16 +569,32 @@ class ImproveCommand(BaseCommand):
                         f"```suggestion:-0+{n_replace}\n{nc}\n```"
                         + self.HELP_TEXT_FOOTER
                     )
-                # === A. 跨次去重: 算 fingerprint (existing_code 标准化) ===
-                # 同一 (file, line, normalized existing_code) 视为同建议, 不再发
-                import hashlib as _dedup_hl
-                _dedup_existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
-                _dedup_fingerprint = _dedup_hl.sha256(
-                    _dedup_existing.strip().encode("utf-8")
-                ).hexdigest()[:24]
+                # === A. 跨次去重 — 两层防御 ===
+                # Layer 1: (file, line, severity) heuristic — 防 LLM 每次 existing_code
+                #          范围不一致导致的 fingerprint 漂移 (同一 bug 被多次发布).
+                # Layer 2: fingerprint (existing_code sha256) — 严格相等, 兜底 layer 1.
+                # 任意一层命中即跳过, 并写 inline_skipped, 最终计入 improve.ok 的 summary.
+                _sev = (normalised.get("severity") or "medium").lower()
                 try:
                     from reviewagent.telemetry.store import get_store as _dedup_store
-                    if _dedup_store().suggestion_exists_by_fingerprint(
+                    _dedup_db = _dedup_store()
+                    if _dedup_db.suggestion_exists_at_line(
+                        self.project_id, self.mr_iid, file_path,
+                        decision["new_line"], _sev,
+                    ):
+                        logger.info(
+                            "improve.skip_at_line project={} mr={} file={} line={} severity={}",
+                            self.project_id, self.mr_iid, file_path,
+                            decision["new_line"], _sev,
+                        )
+                        inline_skipped.append({"suggestion": raw, "reason": "duplicate_at_line"})
+                        continue
+                    import hashlib as _dedup_hl
+                    _dedup_existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                    _dedup_fingerprint = _dedup_hl.sha256(
+                        _dedup_existing.strip().encode("utf-8")
+                    ).hexdigest()[:24]
+                    if _dedup_db.suggestion_exists_by_fingerprint(
                         self.project_id, self.mr_iid, _dedup_fingerprint
                     ):
                         logger.info(
