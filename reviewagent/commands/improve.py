@@ -454,14 +454,14 @@ class ImproveCommand(BaseCommand):
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
                     sev = normalised.get("severity", "medium").upper()
-                    # 使用 same M count as _normalise_suggestion — existing 行数
+                    # suggestion:-0+N: N = existing 行数 (从 new_line 起替换 N 行)
                     existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
                     existing_lines = existing.split("\n") if existing else []
-                    m_remove = max(1, len(existing_lines))
+                    n_replace = max(1, len(existing_lines))
                     body_to_post = (
                         f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
                         f"{normalised['rationale']}\n\n"
-                        f"```suggestion:-{m_remove}+{n_lines}\n{nc}\n```"
+                        f"```suggestion:-0+{n_replace}\n{nc}\n```"
                         + self.HELP_TEXT_FOOTER
                     )
                 note_id = self.gitlab.post_mr_discussion(
@@ -501,6 +501,31 @@ class ImproveCommand(BaseCommand):
                         )
                     except Exception as e:
                         logger.warning("improve.record_suggestion failed: {}", e)
+                else:
+                    inline_skipped.append({"suggestion": raw, "reason": "gitlab_rejected"})
+            elif decision["action"] == "general":
+                # 收缩建议: 发普通评论（无 Apply 按钮），让用户看到建议但不能一键删除代码
+                sev = normalised.get("severity", "medium").upper()
+                general_body = (
+                    f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
+                    f"{normalised['rationale']}\n\n"
+                    f"> ⚠️ 该建议涉及代码收缩（删除行），请人工评估后手动修改"
+                    + self.HELP_TEXT_FOOTER
+                )
+                note_id = self.gitlab.post_mr_discussion(
+                    self.project_id,
+                    self.mr_iid,
+                    general_body,
+                    file_path=file_path,
+                    new_line=decision["new_line"],
+                )
+                if note_id:
+                    inline_posted.append(note_id)
+                    logger.info(
+                        "improve.post_general project={} mr={} file={} line={} reason={}",
+                        self.project_id, self.mr_iid, file_path, decision["new_line"],
+                        decision["reason"],
+                    )
                 else:
                     inline_skipped.append({"suggestion": raw, "reason": "gitlab_rejected"})
             else:
@@ -604,33 +629,29 @@ class ImproveCommand(BaseCommand):
         )
 
         if is_multi_line_replacement:
-            n_added = len(improved_lines) - len(existing_lines)
+            # 信任模型: existing_code 已通过反查定位 + suggestion:-0+{existing_lines}
+            # 只替换 existing 范围, 后续行由 GitLab 保留
 
-            # 尾行校验: improved 末尾新增行必须保留 original 中 existing 之后的代码
-            # 防止 agent 只写新 docstring 丢掉 return 行
-            orig_after = file_lines[start_line - 1 + len(existing_lines):]
-            if n_added > 0 and orig_after:
-                n_check = min(n_added, len(orig_after), len(improved_lines))
-                improved_tail = improved_lines[-n_check:]
-                orig_tail = [l.strip() for l in orig_after[:n_check]]
-                match = all(
-                    it.strip() == ot for it, ot in zip(improved_tail, orig_tail)
-                )
-                if not match:
+            # 尾部去重: agent 有时把 existing 之后的文件行也写进 improved_code,
+            # 但 -0+N 不会删除那些行, 导致 Apply 后出现重复行.
+            # 检测: improved 末尾的 (improved-existing) 行是否与文件后续行一致, 是则裁掉.
+            n_added = len(improved_lines) - len(existing_lines)
+            if n_added > 0:
+                after_start = start_line - 1 + len(existing_lines)  # 0-based
+                after_lines = file_lines[after_start:after_start + n_added]
+                tail_lines = improved_lines[-n_added:]
+                if len(after_lines) == n_added and all(
+                    t.strip() == a.strip() for t, a in zip(tail_lines, after_lines)
+                ):
+                    improved_lines = improved_lines[:-n_added]
+                    improved_code = "\n".join(improved_lines)
                     logger.info(
-                        "improve.multiline_tail_mismatch project={} mr={} file={} "
-                        "line={} n_added={}",
+                        "improve.trim_trailing_dup project={} mr={} file={} "
+                        "line={} trimmed={}",
                         self.project_id, self.mr_iid, file_path,
                         start_line, n_added,
                     )
-                    return {"action": "drop", "new_line": start_line,
-                            "reason": "multi-line replacement trailing lines "
-                                       "don't match source — agent dropped "
-                                       "original code"}
 
-            # 信任模型: existing_code 已通过 snap 校验 + improved 行数 > existing 行数
-            # 说明模型在把单行展开成多行(如 with... + return...)
-            # 但仍要校验: improved 第一行缩进 == target_line 缩进, 否则自动补齐
             normalised_code = self._fix_indent(target_line_raw, improved_code)
             logger.info(
                 "improve.multiline_replace project={} mr={} file={} line={} existing_lines={} improved_lines={}",
@@ -641,32 +662,28 @@ class ImproveCommand(BaseCommand):
             return {"action": "post", "new_line": start_line, "reason": "multi_line_replacement",
                     "normalised_code": normalised_code}
 
-        # 4b. 正常的对齐检查 (1→1 或 N→N 等行数替换)
-        # existing_code 反查只负责校正行号，不能替代 improved_code 的语义对齐校验。
-        # 否则模型只要给出任意存在的 existing_code，就可能把无关代码发布到该行。
-        if not _code_first_line_matches(target_line, imp_first):
-            return {"action": "drop", "new_line": start_line,
-                    "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
+        # 4b. 对齐检查
+        # N→N 等行数替换: existing_code 已在文件中定位 (actual_line 非 None),
+        #   agent 有意改写代码 (e.g. print→logger.info), 第一行不需要匹配.
+        # 1→1 且 existing_code 未找到: 仍需校验第一行对齐, 防止模型乱发.
+        is_same_line_count = bool(existing_lines) and len(improved_lines) == len(existing_lines)
+        if not (is_same_line_count and actual_line is not None):
+            if not _code_first_line_matches(target_line, imp_first):
+                return {"action": "drop", "new_line": start_line,
+                        "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
 
-        # 4c. 收缩检查: M < N 时，被多删的 existing 行不能是现有代码（context）
-        #     防止 agent 把 unchanged context 包进 existing_code 导致 GitLab 丢弃
+        # 4c. 收缩检查: M < N 时一律降级为普通评论（无 Apply 按钮）
+        #     收缩建议移除代码的风险太高 — agent 经常把不该删的行包进 existing_code
+        #     导致 Apply 后丢失关键逻辑。降级后用户仍能看到建议文本，但不能一键应用。
         if len(improved_lines) < len(existing_lines):
-            n_extra = len(existing_lines) - len(improved_lines)
-            extra_start = start_line - 1 + len(improved_lines)
-            for i in range(n_extra):
-                fp = extra_start + i  # 0-based
-                if fp < len(file_lines):
-                    extra_line = existing_lines[len(improved_lines) + i].strip()
-                    if extra_line == file_lines[fp].strip():
-                        # 被删行在新文件里仍然存在 — 是不该删的 context
-                        logger.info(
-                            "improve.shrink_drops_context project={} mr={} file={} "
-                            "line={} extra_line={!r}",
-                            self.project_id, self.mr_iid, file_path,
-                            start_line, extra_line,
-                        )
-                        return {"action": "drop", "new_line": start_line,
-                                "reason": f"shrinking suggestion drops existing context line {fp+1}"}
+            logger.info(
+                "improve.shrink_to_general project={} mr={} file={} "
+                "line={} existing={} improved={}",
+                self.project_id, self.mr_iid, file_path,
+                start_line, len(existing_lines), len(improved_lines),
+            )
+            return {"action": "general", "new_line": start_line,
+                    "reason": f"shrinking suggestion ({len(existing_lines)} -> {len(improved_lines)} lines)"}
 
         # 4d. 缩进修正: 若 improved_code 第一行缺缩进, 自动补齐
         normalised_code = self._fix_indent(target_line_raw, improved_code)
@@ -720,25 +737,17 @@ class ImproveCommand(BaseCommand):
         severity = (s.get("severity") or "medium").strip().lower()
 
         # GitLab suggestion 格式: ```suggestion:-A+B
-        # - A (默认 0, 负数表示从 new_line 往下删除 A 行)
-        # - B (正数) = 替换 B 行(包含 new_line 那行), 建议块内容填这里
-        # pr-agent 用法: range = existing_lines_end - existing_lines_start + 1
-        # 我们没有 end_line, 但有 existing_code 行数 → range = existing 行数(最少 1)
-        # GitLab suggestion 格式: ```suggestion:-M+N
-        # - M = 从 new_line 起删除的行数 (existing_lines.len, 最少 1)
-        # - N = 在同位置新增的行数 (improved_lines.len, 最少 1)
-        # 之前的 -0+N 把 existing_lines 错标成 "插入", 导致 GitLab UI 把上下文行
-        # (如 `return open(path).read()`) 当作要删除, Apply 后函数只剩签名。
-        # 修成 -M+N: 显式标记 M 行被替换 → UI 不再误删上下文。
+        # - A = 从 new_line 往上删除的行数 (0 = 不删上方行)
+        # - B = 从 new_line 起替换的行数 (existing_code 行数)
+        # 例: 替换 line 32~34 (3行) → suggestion:-0+3
+        # 注意: -M 会删除 new_line 上方的 M 行，绝对不能用 existing 行数做 M!
         existing_lines = existing.split("\n") if existing else []
-        improved_lines = improved.split("\n") if improved else []
-        m_remove = max(1, len(existing_lines))
-        n_add = max(1, len(improved_lines))
+        n_replace = max(1, len(existing_lines))
 
         body = (
             f"**[{severity.upper()}]** **{header}** — {label}\n\n"
             f"{rationale}\n\n"
-            f"```suggestion:-{m_remove}+{n_add}\n{improved}\n```"
+            f"```suggestion:-0+{n_replace}\n{improved}\n```"
             + ImproveCommand.HELP_TEXT_FOOTER
         )
         return {
