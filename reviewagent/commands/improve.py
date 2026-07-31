@@ -557,10 +557,12 @@ class ImproveCommand(BaseCommand):
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
                     sev = normalised.get("severity", "medium").upper()
-                    # suggestion:-0+N: N = existing 行数 (从 new_line 起替换 N 行)
+                    # suggestion:-0+N: +N = N lines AFTER comment line
+                    # 替换 N+1 行 (注释行 + N 行后续行)
+                    # 要替换 len(existing_lines) 行 → N = len - 1
                     existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
                     existing_lines = existing.split("\n") if existing else []
-                    n_replace = max(1, len(existing_lines))
+                    n_replace = max(0, len(existing_lines) - 1)
                     body_to_post = (
                         f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
                         f"{normalised['rationale']}\n\n"
@@ -765,8 +767,8 @@ class ImproveCommand(BaseCommand):
         )
 
         if is_multi_line_replacement:
-            # 信任模型: existing_code 已通过反查定位 + suggestion:-0+{existing_lines}
-            # 只替换 existing 范围, 后续行由 GitLab 保留
+            # 信任模型: existing_code 已通过反查定位
+            # suggestion:-0+{len(existing_lines)-1} 精确替换 existing 范围
 
             # 尾部去重: agent 有时把 existing 之后的文件行也写进 improved_code,
             # 但 -0+N 不会删除那些行, 导致 Apply 后出现重复行.
@@ -903,12 +905,15 @@ class ImproveCommand(BaseCommand):
         severity = (s.get("severity") or "medium").strip().lower()
 
         # GitLab suggestion 格式: ```suggestion:-A+B
-        # - A = 从 new_line 往上删除的行数 (0 = 不删上方行)
-        # - B = 从 new_line 起替换的行数 (existing_code 行数)
-        # 例: 替换 line 32~34 (3行) → suggestion:-0+3
+        # - A = 注释行往上删除的行数 (0 = 不删上方行)
+        # - B = 注释行往下 (含注释行自身) 替换的行数
+        #   GitLab 语义: +B = B lines AFTER the commented line
+        #   总替换 = A + 1 (注释行) + B = A + B + 1
+        #   要替换 N 行 existing → B = N - 1
+        # 例: 替换 line 59~62 (4行) → suggestion:-0+3
         # 注意: -M 会删除 new_line 上方的 M 行，绝对不能用 existing 行数做 M!
         existing_lines = existing.split("\n") if existing else []
-        n_replace = max(1, len(existing_lines))
+        n_replace = max(0, len(existing_lines) - 1)
 
         body = (
             f"**[{severity.upper()}]** **{header}** — {label}\n\n"

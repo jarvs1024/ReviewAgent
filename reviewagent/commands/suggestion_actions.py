@@ -250,7 +250,7 @@ def process_adopt(
         return {"action": "adopt-failed", "reason": "refs_empty"}
 
     if head_sha_current == head_sha_posted:
-        # 没有新 commit → 用户还没改代码
+        # 没有新 commit → 用户还没改代码, 不算采纳
         reply = (
             "未检测到这条建议对应位置的代码修改，暂不能标记为手工采纳。"
             "请先提交修改，再回复 `/adopt [说明]`。"
