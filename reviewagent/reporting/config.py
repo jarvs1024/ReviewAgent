@@ -57,11 +57,16 @@ class WeeklyReportConfig:
             target_project_id=_env_int("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", 0),
             timezone=_env_str("REVIEWAGENT_WEEKLY_TIMEZONE", "Asia/Shanghai"),
             collectors=tuple(
-                _env_str("REVIEWAGENT_WEEKLY_COLLECTORS", "telemetry")
+                # 默认全 3 段 (对齐 pr_agent), 用户可通过 env 覆盖
+                _env_str("REVIEWAGENT_WEEKLY_COLLECTORS", "telemetry,merged_mrs,repo_scan")
                 .replace(",", " ").split()
             ),
             notifier=_env_str("REVIEWAGENT_WEEKLY_NOTIFIER", "dingtalk"),
-            dingtalk_webhook_url=_env_str("REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL", ""),
+            # 兼容两种 env 命名: 命名空间前缀 vs 短名 (向后兼容 .env 老配置)
+            dingtalk_webhook_url=(
+                _env_str("REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL", "")
+                or _env_str("DINGTALK_WEBHOOK", "")
+            ),
             dingtalk_secret=_env_str("REVIEWAGENT_WEEKLY_DINGTALK_SECRET", ""),
             dingtalk_dry_run=_env_bool("REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN", True),
             dingtalk_retry_attempts=_env_int("REVIEWAGENT_WEEKLY_DINGTALK_RETRY", 3),
