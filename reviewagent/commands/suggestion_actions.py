@@ -406,3 +406,63 @@ def _maybe_enqueue_reimprove(
     except Exception as e:
         logger.warning("/adopt.reimprove enqueue failed (non-fatal): {}", e)
         return None
+
+
+# ---------- GitLab UI "Apply suggestion" 自动同步 ----------
+def mark_suggestion_applied_by_diff(
+    *,
+    project_id: int,
+    mr_iid: int,
+    file_path: str,
+    target_line: int,
+    actor_username: str,
+    source_note_id: int | None = None,
+) -> int | None:
+    """把 file:line 处仍 open 的 suggestion 标记为 applied.
+
+    Trigger: 用户在 GitLab UI 点击 "Apply suggestion" — GitLab 会发系统 DiffNote
+    "changed this line in version N of the diff", position 指向具体 file:line.
+    这里直接命中 DB 里同 file:line 的 open suggestion, 把它转成 applied,
+    不再依赖 /adopt 命令, 也不再触发 re-improve (因为 push webhook 已经触发过了).
+
+    Returns: 被更新的 suggestion id, 或 None (没有 open suggestion 匹配).
+    """
+    store = get_store()
+    try:
+        sug = store.find_open_suggestion_by_line(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            file_path=file_path,
+            target_line=target_line,
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning("system_applied lookup failed: {}", e)
+        return None
+    if sug is None:
+        return None
+    note_id = sug.get("note_id")
+    if not note_id:
+        return None
+    try:
+        store.update_suggestion_state(
+            note_id, "applied", actor_username=actor_username
+        )
+        store.record_suggestion_action(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            suggestion_note_id=note_id,
+            file_path=file_path,
+            target_line=target_line,
+            action="applied",
+            actor_username=actor_username,
+            reason="applied via GitLab UI",
+            validation_status="gitlab-ui-apply",
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning("system_applied update failed: {}", e)
+        return None
+    logger.info(
+        "system_applied project={} mr={} file={} line={} suggestion={} via_note={}",
+        project_id, mr_iid, file_path, target_line, sug.get("id"), source_note_id,
+    )
+    return sug.get("id")

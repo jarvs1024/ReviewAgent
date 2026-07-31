@@ -503,6 +503,37 @@ class Store:
             ).fetchone()
             return dict(row) if row else None
 
+    def find_open_suggestion_by_line(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+        file_path: str,
+        target_line: int,
+        window: int = 3,
+    ) -> dict | None:
+        """找同 file:line 处 state='open' 的 suggestion, 容忍 ±window 行偏移.
+
+        GitLab UI "Apply suggestion" 的 system DiffNote 报的行号偶尔会因 diff
+        重排轻微偏移几行, 严格相等匹配容易漏掉; 加 window=3 兜底.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM suggestions
+                WHERE project_id = ? AND mr_iid = ?
+                  AND file_path = ?
+                  AND state = 'open'
+                  AND target_line BETWEEN ? AND ?
+                ORDER BY ABS(target_line - ?) ASC, id DESC
+                LIMIT 1
+                """,
+                (project_id, mr_iid, file_path,
+                 target_line - window, target_line + window,
+                 target_line),
+            ).fetchone()
+            return dict(row) if row else None
+
     def update_suggestion_state(
         self,
         note_id: str,

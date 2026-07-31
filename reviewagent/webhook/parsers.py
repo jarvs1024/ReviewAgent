@@ -66,6 +66,9 @@ class NoteHookPayload:
     note_type: str = ""           # "" / "DiscussionNote" / "DiffNote"
     discussion_id: str = ""        # 关联的 discussion (用于 /adopt /dismiss)
     noteable_type: str = ""        # "MergeRequest" 等
+    is_system: bool = False        # GitLab 系统提示 (e.g. "changed this line")
+    diff_file: str = ""            # DiffNote 指向的文件 (用于 system apply 匹配)
+    diff_line: int = 0             # DiffNote 指向的行号
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "NoteHookPayload | None":
@@ -80,15 +83,19 @@ class NoteHookPayload:
             return None
         proj = payload.get("project", {})
         author = payload.get("user", {})
+        position = obj.get("position") or obj.get("original_position") or {}
         return cls(
             project_id=proj.get("id", 0),
             mr_iid=mr.get("iid", 0),
             note_id=obj.get("id", 0),
-            note_body=obj.get("note", ""),
+            note_body=obj.get("note", "") or "",
             actor_username=_display_name(author),
             note_type=obj.get("type", ""),
             discussion_id=str(obj.get("discussion_id", "") or ""),
             noteable_type=noteable_type,
+            is_system=bool(obj.get("system", False)),
+            diff_file=position.get("new_path", "") or position.get("old_path", "") or "",
+            diff_line=int(position.get("new_line") or position.get("old_line") or 0),
         )
 
 

@@ -169,6 +169,32 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
     if locks.is_bot(note.actor_username):
         return {"status": "skipped", "reason": "bot_self_trigger"}
 
+    # GitLab system DiffNote: 用户在 UI 点击 "Apply suggestion" 时, GitLab 会发一条
+    # type=DiffNote / system=true / body="changed this line in version N of the diff"
+    # 的系统提示 (note 4037/4039/4041 风格). 这里直接匹配 DB 里同 file:line 的
+    # suggestion 并标记为 applied, 不需要 LLM, 也不需要再走一次 /adopt 验证.
+    if note.is_system and note.note_type == "DiffNote" and note.diff_file and note.diff_line > 0:
+        # 仅匹配 "changed this line" (apply suggestion) / "added line" (新行) 这类行级 diff 提示
+        if "changed this line" in (note.note_body or "") or "added line" in (note.note_body or ""):
+            from reviewagent.commands.suggestion_actions import mark_suggestion_applied_by_diff
+            marked = mark_suggestion_applied_by_diff(
+                project_id=note.project_id,
+                mr_iid=note.mr_iid,
+                file_path=note.diff_file,
+                target_line=note.diff_line,
+                actor_username=note.actor_username,
+                source_note_id=note.note_id,
+            )
+            if marked:
+                logger.info(
+                    "webhook.system_applied project={} mr={} file={} line={} note_id={}",
+                    note.project_id, note.mr_iid, note.diff_file, note.diff_line, note.note_id,
+                )
+                return {"status": "applied", "via": "gitlab_ui", "suggestion_id": marked}
+            # 没有匹配到 open suggestion (可能已被 /adopt/dismiss 处理) → 静默跳过,
+            # 不需要让 push_commands 再跑一次
+            return {"status": "ignored", "reason": "no_open_suggestion_at_line"}
+
     # /adopt /dismiss 走专门路径 (不是 MR 命令链, 而是针对 inline suggestion 的回复)
     from reviewagent.commands.suggestion_actions import extract_action
     action_info = extract_action(note.note_body)
