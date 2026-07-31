@@ -64,6 +64,20 @@ class GitLabClient:
         host = base[len(f"{scheme}://"):]
         return f"{scheme}://oauth2:{self._gl.private_token}@{host}/{path}.git"
 
+    def get_mr_web_url(self, project_id: int, mr_iid: int) -> str | None:
+        """返回 GitLab MR 的 web URL (浏览器可访问的链接).
+
+        失败时返回 None (调网络异常/项目无权限等), 不抛错 — caller 可选忽略.
+        """
+        try:
+            project = self._get_project(project_id)
+        except GitLabError as e:
+            logger.debug("gitlab.get_mr_web_url get_project failed: {}", e)
+            return None
+        path = getattr(project, "path_with_namespace", None) or str(project_id)
+        base = self._gl.url.rstrip("/")
+        return f"{base}/{path}/-/merge_requests/{mr_iid}"
+
     # ---------- MR diff ----------
     def get_mr_diff(self, project_id: int, mr_iid: int) -> str:
         """拉取 MR 的 unified diff（Python 端不解析，原文返回给 agent）.

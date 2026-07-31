@@ -12,8 +12,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from reviewagent.config import config
+from reviewagent.gitlab.client import client as _gl
 from reviewagent.logging_setup import logger
 from reviewagent.telemetry.models import MRRecord, ReviewRun
+
+
+def _enrich_web_url(row: dict) -> dict:
+    """给 MR dict 加 web_url 字段 (调 GitLab API 拿 path_with_namespace).
+
+    失败时静默跳过 (不影响主体查询). 项目级缓存, 同一项目内多次调只打一次 API.
+    """
+    try:
+        url = _gl.get_mr_web_url(row["project_id"], row["mr_iid"])
+    except Exception as e:  # noqa: BLE001 — 不让 enrich 失败影响主路径
+        logger.debug("store._enrich_web_url failed: {}", e)
+        url = None
+    if url:
+        row["web_url"] = url
+    return row
 
 
 # ---------- DDL ----------
@@ -251,7 +267,9 @@ class Store:
                 "SELECT * FROM mr_activity WHERE project_id = ? AND mr_iid = ?",
                 (project_id, mr_iid),
             ).fetchone()
-            return dict(row) if row else None
+        if not row:
+            return None
+        return _enrich_web_url(dict(row))
 
     def list_mrs(self, *, project_id: int | None = None, since: str | None = None,
                  until: str | None = None, state: str | None = None,
@@ -272,7 +290,7 @@ class Store:
                 f"SELECT * FROM mr_activity{where} ORDER BY created_at DESC LIMIT ?",
                 (*params, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [_enrich_web_url(dict(r)) for r in rows]
 
     def mr_overview(self, *, project_id: int | None = None, since: str | None = None,
                     until: str | None = None) -> dict:
