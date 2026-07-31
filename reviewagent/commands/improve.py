@@ -38,6 +38,9 @@ from reviewagent.opencode.client import OpencodeOutputError, client as opencode
 # Backward-compat re-exports
 ImproveError = BaseCommandError
 
+# 规则引用正则: 匹配 SSD-RULE-XXX 形式 (rule_key_prefix 可配)
+_RULE_REF_REGEX = re.compile(rf"\b{re.escape(config.rule_key_prefix)}-RULE-\w+\b")
+
 
 
 
@@ -225,6 +228,25 @@ class ImproveCommand(BaseCommand):
                     seen[key] = s
 
         merged_suggestions = list(seen.values())
+
+        # 评分过滤: 低于 min_score 的建议不发布 (SSD-RULE 引用豁免)
+        min_score = config.improve_min_score
+        if min_score > 0:
+            kept = []
+            for s in merged_suggestions:
+                rationale = (s.get("rationale") or "")
+                if _RULE_REF_REGEX.search(rationale):
+                    kept.append(s)
+                    continue
+                sc = ImproveCommand._score_suggestion(s)
+                if sc >= min_score:
+                    kept.append(s)
+                else:
+                    logger.info(
+                        "improve.score_filter file={} line={} score={} header={!r}",
+                        s.get("file"), s.get("start_line"), sc, s.get("header"),
+                    )
+            merged_suggestions = kept
 
         # 建议数限流: 按 severity 排序，保留前 N 条，超出只写总览
         max_suggestions = config.improve_max_suggestions
@@ -723,6 +745,36 @@ class ImproveCommand(BaseCommand):
 
         return {"action": "post", "new_line": start_line, "reason": "ok",
                 "normalised_code": normalised_code}
+
+    @staticmethod
+    def _score_suggestion(s: dict) -> int:
+        """对单条建议评分 (0~100), 用于过滤低质量建议."""
+        score = 0
+        # severity (0~35)
+        sev_map = {"critical": 35, "high": 30, "medium": 20, "low": 10}
+        score += sev_map.get((s.get("severity") or "medium").lower(), 20)
+        # label (0~30)
+        label_map = {
+            "security": 30, "potential bug": 25, "performance": 20,
+            "enhancement": 15, "code quality": 12, "style": 5,
+        }
+        score += label_map.get((s.get("label") or "").lower(), 10)
+        # rationale 长度 (0~20)
+        rationale = (s.get("rationale") or "")
+        if len(rationale) > 200:
+            score += 20
+        elif len(rationale) > 100:
+            score += 15
+        elif len(rationale) > 50:
+            score += 8
+        # 规则引用 (+10)
+        if _RULE_REF_REGEX.search(rationale):
+            score += 10
+        # header 质量 (+5)
+        header = (s.get("header") or "").strip()
+        if len(header) >= 4 and header != "建议改进":
+            score += 5
+        return min(100, score)
 
     @staticmethod
     def _fix_indent(target_line: str, improved_code: str) -> str:

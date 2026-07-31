@@ -69,6 +69,7 @@ class Config:
     improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
     improve_max_files: int = 10              # 单次检视最大文件数 (0=不限, 超出跳过)
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
+    improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
 
     # ---------- 派生路径 ----------
     @property
@@ -120,6 +121,7 @@ class Config:
             improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
             improve_max_files=int(_env("IMPROVE_MAX_FILES", "10")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
+            improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
         )
         # 确保目录存在
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
