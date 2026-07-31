@@ -454,10 +454,14 @@ class ImproveCommand(BaseCommand):
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
                     sev = normalised.get("severity", "medium").upper()
+                    # 使用 same M count as _normalise_suggestion — existing 行数
+                    existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                    existing_lines = existing.split("\n") if existing else []
+                    m_remove = max(1, len(existing_lines))
                     body_to_post = (
                         f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
                         f"{normalised['rationale']}\n\n"
-                        f"```suggestion:-0+{n_lines}\n{nc}\n```"
+                        f"```suggestion:-{m_remove}+{n_lines}\n{nc}\n```"
                         + self.HELP_TEXT_FOOTER
                     )
                 note_id = self.gitlab.post_mr_discussion(
@@ -720,13 +724,21 @@ class ImproveCommand(BaseCommand):
         # - B (正数) = 替换 B 行(包含 new_line 那行), 建议块内容填这里
         # pr-agent 用法: range = existing_lines_end - existing_lines_start + 1
         # 我们没有 end_line, 但有 existing_code 行数 → range = existing 行数(最少 1)
+        # GitLab suggestion 格式: ```suggestion:-M+N
+        # - M = 从 new_line 起删除的行数 (existing_lines.len, 最少 1)
+        # - N = 在同位置新增的行数 (improved_lines.len, 最少 1)
+        # 之前的 -0+N 把 existing_lines 错标成 "插入", 导致 GitLab UI 把上下文行
+        # (如 `return open(path).read()`) 当作要删除, Apply 后函数只剩签名。
+        # 修成 -M+N: 显式标记 M 行被替换 → UI 不再误删上下文。
         existing_lines = existing.split("\n") if existing else []
-        range_n = max(1, len(existing_lines))
+        improved_lines = improved.split("\n") if improved else []
+        m_remove = max(1, len(existing_lines))
+        n_add = max(1, len(improved_lines))
 
         body = (
             f"**[{severity.upper()}]** **{header}** — {label}\n\n"
             f"{rationale}\n\n"
-            f"```suggestion:-0+{range_n}\n{improved}\n```"
+            f"```suggestion:-{m_remove}+{n_add}\n{improved}\n```"
             + ImproveCommand.HELP_TEXT_FOOTER
         )
         return {
