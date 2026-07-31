@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from reviewagent.logging_setup import logger
-from reviewagent.telemetry.store import get_store
+from reviewagent.telemetry.store import get_store, _enrich_web_url
 
 
 router = APIRouter(prefix="/api/v1/telemetry", tags=["telemetry"])
@@ -155,7 +155,9 @@ async def list_mrs(
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with s._conn() as conn:  # noqa: SLF001
         rows = conn.execute(f"SELECT * FROM mr_activity{where} ORDER BY updated_at DESC LIMIT ?", (*params, limit)).fetchall()
-    return {"total": len(rows), "mrs": [dict(row) for row in rows]}
+    # 给每条 MR 加 web_url (调 GitLab API 查 path_with_namespace), 同一项目内只打一次 API.
+    # _enrich_web_url 失败静默, 缺失字段不影响主查询结果.
+    return {"total": len(rows), "mrs": [_enrich_web_url(dict(r)) for r in rows]}
 
 
 @router.get("/mrs/{project_id}/{mr_iid}")
