@@ -65,8 +65,10 @@ class Config:
     rule_key_prefix: str = "SSD"             # 规则键前缀 (如 SSD-RULE-NO-LOG-EXC)
     repo_context_max_lines: int = 2000       # 规则文件最大行数 (超出截断)
 
-    # ---- improve 并行 ----
+    # ---- improve 并行 + 限流 ----
     improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
+    improve_max_files: int = 10              # 单次检视最大文件数 (0=不限, 超出跳过)
+    improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
 
     # ---------- 派生路径 ----------
     @property
@@ -116,6 +118,8 @@ class Config:
             rule_key_prefix=_env("RULE_KEY_PREFIX", "SSD"),
             repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "2000")),
             improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
+            improve_max_files=int(_env("IMPROVE_MAX_FILES", "10")),
+            improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
         )
         # 确保目录存在
         cfg.data_dir.mkdir(parents=True, exist_ok=True)

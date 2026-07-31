@@ -58,9 +58,22 @@ class ImproveCommand(BaseCommand):
     def _call_agent(self, ws) -> dict[str, Any]:
         """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果."""
         line_map = self._diff_line_map()
-        files = sorted(line_map.keys())
+        all_files = sorted(line_map.keys())
 
-        if len(files) <= 1:
+        # 文件数限流: 超出上限的文件跳过，在总览中注明
+        max_files = config.improve_max_files
+        if max_files > 0 and len(all_files) > max_files:
+            files = all_files[:max_files]
+            skipped_files = all_files[max_files:]
+            logger.info(
+                "improve.file_limit project={} mr={} total={} kept={} skipped={}",
+                self.project_id, self.mr_iid, len(all_files), len(files), len(skipped_files),
+            )
+        else:
+            files = all_files
+            skipped_files = []
+
+        if len(files) <= 1 and not skipped_files:
             return super()._call_agent(ws)  # 单文件走原路径
 
         # 按文件拆分 diff
@@ -95,7 +108,7 @@ class ImproveCommand(BaseCommand):
                     # 单个 chunk 失败不影响其他
                     chunk_results.append({"summary_md": "", "suggestions": []})
 
-        return self._merge_chunks(chunk_results)
+        return self._merge_chunks(chunk_results, skipped_files=skipped_files)
 
     def _call_chunk(self, prompt: str, ws, file_path: str) -> dict[str, Any]:
         """单个 chunk 的 opencode 调用."""
@@ -180,7 +193,7 @@ class ImproveCommand(BaseCommand):
         )
 
     @staticmethod
-    def _merge_chunks(results: list[dict[str, Any]]) -> dict[str, Any]:
+    def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None) -> dict[str, Any]:
         """合并多个 chunk 的结果."""
         all_suggestions: list[dict[str, Any]] = []
         summaries: list[str] = []
@@ -213,6 +226,22 @@ class ImproveCommand(BaseCommand):
 
         merged_suggestions = list(seen.values())
 
+        # 建议数限流: 按 severity 排序，保留前 N 条，超出只写总览
+        max_suggestions = config.improve_max_suggestions
+        truncated_count = 0
+        if max_suggestions > 0 and len(merged_suggestions) > max_suggestions:
+            sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+            merged_suggestions.sort(
+                key=lambda s: sev_rank.get((s.get("severity") or "medium").lower(), 2),
+                reverse=True,
+            )
+            truncated_count = len(merged_suggestions) - max_suggestions
+            merged_suggestions = merged_suggestions[:max_suggestions]
+            logger.info(
+                "improve.suggestion_limit kept={} truncated={}",
+                max_suggestions, truncated_count,
+            )
+
         # summary: 从 suggestions 列表生成概览
         total_suggestions = len(merged_suggestions)
         if total_suggestions > 0:
@@ -234,6 +263,10 @@ class ImproveCommand(BaseCommand):
                 "## 改进总览\n\n"
                 + "\n".join(items)
             )
+            if truncated_count > 0:
+                merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
+            if skipped_files:
+                merged_summary += f"\n\n> ⚠️ 以下文件因数量超限未检视: {', '.join(skipped_files)}"
         else:
             merged_summary = "## 改进总览\n\n未发现问题。"
 
