@@ -477,45 +477,48 @@ class Store:
         mr_iid: int,
         file_path: str,
         target_line: int,
-        severity: str,
+        severity: str = "",  # 保留参数仅为向后兼容, 当前实现不再按 severity 过滤
         head_sha: str = "",
     ) -> bool:
-        """跨次去重 (heuristic): 同 (file, line, severity[, head_sha]) 已发布则返回 True.
+        """跨次去重 (heuristic): 同 (file, line[, head_sha]) 已发布则返回 True.
 
         Why: LLM 每次返回的 existing_code 范围不一致 (有时 1 行签名, 有时
         整段函数体), 同一 bug 在不同次 improve 跑出来的 fingerprint 不一样,
-        导致纯 fingerprint dedup 命中率低. 用 (file, line, severity) 做兜底:
-        同一行同一严重度的重复建议大概率是同一 bug, 直接跳过.
+        导致纯 fingerprint dedup 命中率低. 用 (file, line) 做兜底:
+        同一行任意 severity 的重复建议都视为同一 bug, 直接跳过 — 用户已经
+        检视过这一行了, 不管严重度如何都不该重复推送 (避免 LLM 改判 severity
+        后绕开 dedup).
 
         head_sha 维度: MR 被 force-push / reset 到旧 commit 后, 老建议的
         head_sha 跟当前 diff 的 head_sha 不一致, 此时 dedup 应该放行, 让
-        bot 重新发现这些 bug. 调用方传 head_sha='' 时退回旧的 (file, line,
-        severity) 兜底行为.
+        bot 重新发现这些 bug. 调用方传 head_sha='' 时退回旧的 (file, line)
+        兜底行为.
 
         - 状态过滤: 任何状态都视为"已存在" — dismissed 也算, 用户已经明确
           拒绝过这条建议, 不应该重复推送骚扰.
         """
+        del severity  # 静默未使用, 保持向后兼容的调用签名
         with self._conn() as conn:
             if head_sha:
                 row = conn.execute(
                     """
                     SELECT 1 FROM suggestions
                     WHERE project_id=? AND mr_iid=?
-                      AND file_path=? AND target_line=? AND severity=?
+                      AND file_path=? AND target_line=?
                       AND head_sha=?
                     LIMIT 1
                     """,
-                    (project_id, mr_iid, file_path, target_line, severity or '', head_sha),
+                    (project_id, mr_iid, file_path, target_line, head_sha),
                 ).fetchone()
             else:
                 row = conn.execute(
                     """
                     SELECT 1 FROM suggestions
                     WHERE project_id=? AND mr_iid=?
-                      AND file_path=? AND target_line=? AND severity=?
+                      AND file_path=? AND target_line=?
                     LIMIT 1
                     """,
-                    (project_id, mr_iid, file_path, target_line, severity or ''),
+                    (project_id, mr_iid, file_path, target_line),
                 ).fetchone()
             return row is not None
 
