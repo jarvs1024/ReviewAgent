@@ -575,17 +575,19 @@ class ImproveCommand(BaseCommand):
                 # Layer 2: fingerprint (existing_code sha256) — 严格相等, 兜底 layer 1.
                 # 任意一层命中即跳过, 并写 inline_skipped, 最终计入 improve.ok 的 summary.
                 _sev = (normalised.get("severity") or "medium").lower()
+                _head_sha = self._get_mr_head_sha() or ""
                 try:
                     from reviewagent.telemetry.store import get_store as _dedup_store
                     _dedup_db = _dedup_store()
                     if _dedup_db.suggestion_exists_at_line(
                         self.project_id, self.mr_iid, file_path,
-                        decision["new_line"], _sev,
+                        decision["new_line"], _sev, head_sha=_head_sha,
                     ):
                         logger.info(
-                            "improve.skip_at_line project={} mr={} file={} line={} severity={}",
+                            "improve.skip_at_line project={} mr={} file={} line={} severity={} head_sha={}",
                             self.project_id, self.mr_iid, file_path,
                             decision["new_line"], _sev,
+                            _head_sha[:8] if _head_sha else "",
                         )
                         inline_skipped.append({"suggestion": raw, "reason": "duplicate_at_line"})
                         continue
