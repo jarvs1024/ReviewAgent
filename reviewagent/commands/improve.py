@@ -767,6 +767,82 @@ class ImproveCommand(BaseCommand):
             f"{files_text}\n"
         )
 
+    def _build_summary_v2(
+        self,
+        inline_posted: list[dict[str, Any]],
+        inline_skipped: list[dict[str, Any]],
+        total_agent_suggestions: int,
+    ) -> str:
+        """生成 V{N} 格式的顶层 summary, 只展示本次循环内新发布的 suggestions.
+
+        与旧 _merge_chunks 生成的 summary_md 区别:
+        - 旧: 基于 LLM 给的所有 suggestions (含 dedup skip 的) → 看起来像汇总
+        - 新: 基于 inline_posted (本次实际发布到 GitLab 的) → 只显示本次新发现
+        - 标题: `改进总览 V{N}` (该 MR 第几次 improve 触发, N 从 1 开始)
+
+        返回 markdown 字符串. 如果本次没有任何新发布, 返回 "未发现新问题." 占位.
+        """
+        # V{N} 版本号: 该 MR 第几次 improve
+        try:
+            from reviewagent.telemetry.store import get_store
+            store = get_store()
+            runs = store.list_runs(
+                project_id=self.project_id,
+                mr_iid=self.mr_iid,
+                command="improve",
+                limit=1000,
+            )
+            version = len(runs)  # 含本次正在跑的, 所以就是当前这次是第 N 次
+        except Exception as e:
+            logger.warning("improve.summary_version_query failed (non-fatal): {}", e)
+            version = 1
+
+        if not inline_posted:
+            # 没有新发布: 不发空 summary, 避免和"已发过的"混淆
+            skipped_dup = sum(1 for s in inline_skipped if s.get("reason") in ("duplicate_at_line", "duplicate_fingerprint"))
+            if skipped_dup and not any(
+                s.get("reason") not in ("duplicate_at_line", "duplicate_fingerprint")
+                for s in inline_skipped
+            ):
+                return (
+                    f"## 改进总览 V{version}\n\n"
+                    f"本次未发现新问题（已发过的 {skipped_dup} 条跳过，重复 issue 不重复发）"
+                )
+            return ""  # 真的没有输出, 跳过 summary
+
+        items: list[str] = []
+        for entry in inline_posted:
+            norm = entry.get("normalised") or {}
+            raw = entry.get("raw") or {}
+            fp = norm.get("file") or raw.get("file", "")
+            line = norm.get("new_line") or raw.get("start_line", "")
+            header = (norm.get("header") or raw.get("header") or "").strip()
+            severity = (norm.get("severity") or raw.get("severity") or "medium").upper()
+            label = norm.get("label") or raw.get("label") or ""
+            rationale = (norm.get("rationale") or raw.get("rationale") or "").strip()
+            kind = entry.get("kind", "inline")
+            kind_tag = "" if kind == "inline" else " [仅评论, 无 Apply]"
+            # 简短版: rationale 第一句 (按 。/， 截断)
+            short = rationale.split("。")[0].split("，")[0]
+            line_str = f"L{line}" if line else ""
+            items.append(
+                f"- **`{fp}`**{line_str} — **{header}** [{severity}/{label}]{kind_tag}: {short}"
+            )
+
+        body = "\n".join(items)
+        skipped_dup = sum(
+            1 for s in inline_skipped
+            if s.get("reason") in ("duplicate_at_line", "duplicate_fingerprint")
+        )
+        skipped_other = len(inline_skipped) - skipped_dup
+
+        summary = f"## 改进总览 V{version}\n\n本次新发现 {len(inline_posted)} 条建议:\n\n{body}"
+        if skipped_dup > 0:
+            summary += f"\n\n> ℹ️ 另有 {skipped_dup} 条已发过 (重复 issue 跳过)"
+        if skipped_other > 0:
+            summary += f"\n\n> ⚠️ 另有 {skipped_other} 条因校验未通过未发布"
+        return summary
+
     def _publish(self, agent_result: dict[str, Any]) -> dict[str, Any]:
         summary_md = (agent_result.get("summary_md") or "").strip()
         suggestions = agent_result.get("suggestions") or []
@@ -778,18 +854,12 @@ class ImproveCommand(BaseCommand):
         line_map = self._diff_line_map()
         file_sources: dict[str, list[str]] = {}
 
-        # 1. 顶层 summary
-        top_comment_id: int | None = None
-        if summary_md:
-            try:
-                top_comment_id = self.gitlab.post_mr_comment(
-                    self.project_id, self.mr_iid, summary_md
-                )
-            except GitLabError as e:
-                raise BaseCommandError(f"post summary comment failed: {e}") from e
-
-        # 2. 每条 suggestion：先校验 new_line + improved_code 对齐
-        inline_posted: list[str] = []
+        # 1. 每条 suggestion：先校验 new_line + improved_code 对齐
+        # 注意: 顶层 summary 不再这里发, 改到循环结束后基于 inline_posted 重新生成.
+        # Why: 之前 summary 在循环前基于 agent 给的所有 suggestions 生成, 会包含
+        #      被 dedup skip 掉的旧项, 看起来像"汇总上次"而非"本次新发现".
+        #      现在 summary 只显示本次循环内 inline_posted 的内容, 标题带 V{N} 版本号.
+        inline_posted: list[dict[str, Any]] = []
         inline_skipped: list[dict[str, Any]] = []
         for raw in suggestions:
             try:
@@ -888,7 +958,12 @@ class ImproveCommand(BaseCommand):
                     new_line=decision["new_line"],
                 )
                 if note_id:
-                    inline_posted.append(note_id)
+                    inline_posted.append({
+                        "note_id": note_id,
+                        "raw": raw if isinstance(raw, dict) else {},
+                        "normalised": normalised,
+                        "kind": "inline",
+                    })
                     logger.info(
                         "improve.post_inline project={} mr={} file={} line={}",
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
@@ -951,7 +1026,12 @@ class ImproveCommand(BaseCommand):
                     new_line=decision["new_line"],
                 )
                 if note_id:
-                    inline_posted.append(note_id)
+                    inline_posted.append({
+                        "note_id": note_id,
+                        "raw": raw if isinstance(raw, dict) else {},
+                        "normalised": normalised,
+                        "kind": "general",
+                    })
                     logger.info(
                         "improve.post_general project={} mr={} file={} line={} reason={}",
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
@@ -962,6 +1042,21 @@ class ImproveCommand(BaseCommand):
             else:
                 # action == "drop" — 不发任何评论, 仅记 telemetry
                 inline_skipped.append({"suggestion": raw, "reason": decision["reason"]})
+
+        # 3. 顶层 summary: 在所有 inline 决策完成后生成, 只展示本次新发布的.
+        #    标题带 V{N} 版本号 (该 MR 第几次 improve 触发).
+        top_comment_id: int | None = None
+        summary_md = self._build_summary_v2(inline_posted, inline_skipped, len(suggestions))
+        if summary_md:
+            try:
+                top_comment_id = self.gitlab.post_mr_comment(
+                    self.project_id, self.mr_iid, summary_md
+                )
+            except GitLabError as e:
+                logger.warning(
+                    "improve.post_summary_failed (non-fatal) project={} mr={} err={}",
+                    self.project_id, self.mr_iid, e,
+                )
 
         return {
             "top_comment_id": top_comment_id,

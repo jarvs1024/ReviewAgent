@@ -591,3 +591,112 @@ def test_validate_suggestion_shrinks_to_general_for_partial_replacement():
     )
     # 应当 general, 不允许 Apply
     assert result["action"] == "general", f"unexpected action: {result}"
+
+
+# ---------- _build_summary_v2 ----------
+
+def test_build_summary_v2_empty_inline_posted_with_only_dup_skipped():
+    """本次循环没有任何新发布, 但有 dedup skip → 返回说明性 summary (含 V{N})"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    inline_posted: list = []
+    inline_skipped = [
+        {"suggestion": {"file": "x.py", "start_line": 1}, "reason": "duplicate_at_line"},
+        {"suggestion": {"file": "y.py", "start_line": 5}, "reason": "duplicate_fingerprint"},
+    ]
+    out = cmd._build_summary_v2(inline_posted, inline_skipped, total_agent_suggestions=2)
+    assert out.startswith("## 改进总览 V")
+    assert "未发现新问题" in out
+    assert "已发过的 2 条跳过" in out
+
+
+def test_build_summary_v2_truly_empty_returns_empty_string():
+    """LLM 啥也没输出 → 返回空字符串 (不发任何 summary 注释)"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    out = cmd._build_summary_v2(
+        inline_posted=[],
+        inline_skipped=[],
+        total_agent_suggestions=0,
+    )
+    assert out == ""
+
+
+def test_build_summary_v2_lists_only_inline_posted_not_skipped():
+    """本次新发布 2 条 + dedup skip 3 条 → summary 只列 2 条, 末尾注明跳过数"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    inline_posted = [
+        {
+            "note_id": "abc123",
+            "kind": "inline",
+            "raw": {"file": "foo.py", "start_line": 10, "header": "可变默认参数", "severity": "high"},
+            "normalised": {
+                "file": "foo.py", "new_line": 10, "header": "可变默认参数",
+                "severity": "high", "label": "potential bug",
+                "rationale": "违反 SSD-RULE-NO-MUTABLE-DEFAULT: 第 10 行的 `x=[]` 是可变默认实参",
+            },
+        },
+        {
+            "note_id": "def456",
+            "kind": "general",
+            "raw": {"file": "bar.py", "start_line": 20, "header": "静默吞异常", "severity": "medium"},
+            "normalised": {
+                "file": "bar.py", "new_line": 20, "header": "静默吞异常",
+                "severity": "medium", "label": "code quality",
+                "rationale": "违反 R-ERR: 第 20 行的 except: pass 是裸 except",
+            },
+        },
+    ]
+    inline_skipped = [
+        {"suggestion": {"file": "old.py", "start_line": 1}, "reason": "duplicate_at_line"},
+        {"suggestion": {"file": "old.py", "start_line": 2}, "reason": "duplicate_at_line"},
+        {"suggestion": {"file": "old.py", "start_line": 3}, "reason": "duplicate_fingerprint"},
+        {"suggestion": {"file": "bad.py", "start_line": 5}, "reason": "existing_code not found near start_line"},
+    ]
+    out = cmd._build_summary_v2(inline_posted, inline_skipped, total_agent_suggestions=5)
+    assert out.startswith("## 改进总览 V")
+    assert "本次新发现 2 条建议" in out
+    # 必须包含 2 条新发布的
+    assert "foo.py" in out and "L10" in out
+    assert "bar.py" in out and "L20" in out
+    # general kind 必须标"仅评论, 无 Apply"
+    assert "仅评论, 无 Apply" in out
+    # 必须不含旧被 dedup 的 old.py 行
+    assert "old.py" not in out
+    # 末尾注明: 3 条 dedup + 1 条校验失败
+    import re
+    assert re.search(r"3\s*条.*跳过", out), f"未找到 '3 条...跳过': {out!r}"
+    assert re.search(r"1\s*条.*未发布", out), f"未找到 '1 条...未发布': {out!r}"
+
+
+def test_build_summary_v2_version_increments_per_run():
+    """V 编号应该基于 store 中该 MR 已有的 improve run 数 (含本次 = V{N})"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    # 当前 MR 163 已有 3 次 improve (id 258, 260, 261), 第 4 次应该是 V4
+    out = cmd._build_summary_v2(
+        inline_posted=[
+            {
+                "note_id": "x",
+                "kind": "inline",
+                "raw": {"file": "x.py", "start_line": 1, "header": "h"},
+                "normalised": {"file": "x.py", "new_line": 1, "header": "h", "severity": "high", "label": "l", "rationale": "r"},
+            },
+        ],
+        inline_skipped=[],
+        total_agent_suggestions=1,
+    )
+    # V 编号 >= 1, 必须匹配 V{N} 格式
+    import re
+    m = re.search(r"V(\d+)", out)
+    assert m, f"未匹配 V{{N}}: {out!r}"
+    assert int(m.group(1)) >= 1
