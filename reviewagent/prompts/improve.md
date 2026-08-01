@@ -237,6 +237,7 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 4. **不要捏造不在 diff 中的代码或上下文**
 5. **最多 25 条建议** — 多而泛 → 少而准; 但本次检视若命中多条独立 R-XXX 规则, 应全部产出 (不被合并到一条)
 6. **数组可为空** — 若没有明显可改进点，直接 `"suggestions": []`
+7. **禁止使用 docstring 相关标签** — `SSD-RULE-DOCSTRING-REQUIRED` / "补全 docstring" / "缺失 docstring" 一律不出 suggestion。缺 docstring 是非阻塞性问题，若整个 MR 都缺 docstring 可在 `summary_md` 文字提一句 "整体缺少 docstring, 建议单独提一个 PR 统一补"；不要为每个 def 都产 docstring suggestion，避免挤占 R-XXX 19 类的命中名额。
 
 ## 输出示例
 
