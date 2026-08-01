@@ -91,6 +91,11 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
   - `R-OTHER-IMPACT:fixture_break` — fixture 改了, 引用它的 test 失配
 - 优先级: **P1**(与 SSD 自定义规则同级), 不要被 R-XXX / R-OTHER 检查顺序压后
 
+**严格区分 (避免归类混淆)**:
+- `R-OTHER-IMPACT:*` **只用于跨文件影响** — 涉及其他文件 (caller / 引用方 / schema / fixture / import)
+- **同文件内**的资源泄漏 / 死循环 / 静默吞错 / 文件未关等 → 用 `R-XXX` (R-RES / R-LOOP / R-ERR 等), **不要**错归为 R-OTHER-IMPACT
+- 同文件内的拼写 / 命名 / 死代码 / 重复定义等 → 用 `R-OTHER:*`, **不要**错归为 R-OTHER-IMPACT
+
 ### 禁用的"跨文件幻觉"
 
 - ❌ "可能还有其他地方用到" → 必须实际 grep / read 看到
