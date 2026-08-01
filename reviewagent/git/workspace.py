@@ -93,7 +93,7 @@ def _ensure_bare(project_id: int, git_url: str) -> Path:
         _unlock_bare(lock_fd)
 
 
-def _fetch_incremental(bare: Path, git_url: str) -> None:
+def _fetch_incremental(bare: Path, git_url: str, target_sha: str | None = None) -> None:
     """增量 fetch bare repo — shallow 优先, 失败则 full fetch fallback.
 
     Refspec 用 refs/remotes/origin/* 而非 refs/heads/*:
@@ -102,6 +102,12 @@ def _fetch_incremental(bare: Path, git_url: str) -> None:
     整批失败, 导致新 branch 拉不到, 进而 worktree add 报 "invalid reference".
     用 remote-tracking refspec 只更新 refs/remotes/origin/*, 不碰本地 branch,
     永远不会冲突. _create_worktree 只需要 commit SHA, object db 里有就能 worktree add.
+
+    Args:
+        target_sha: 若指定, 确保该 SHA 在 object db (force-push 后新 commit 可能
+                    还没被 refspec 拉到). 用 `git fetch origin <sha>` 单独拉.
+                    修复 issue: MR update head_sha 变化太快, branch refspec 还没
+                    拉到 force-push 后的新 commit 就 worktree add, 报 "invalid reference".
     """
     # 先 prune 掉残留的 worktree 引用, 防止 stale ref 卡住后续命令
     subprocess.run(
@@ -113,18 +119,49 @@ def _fetch_incremental(bare: Path, git_url: str) -> None:
          "+refs/heads/*:refs/remotes/origin/*"],
         capture_output=True, text=True, timeout=120,
     )
-    if proc.returncode == 0:
-        return
-
-    logger.warning("git.fetch shallow failed, trying full: {}", proc.stderr.strip()[:300])
-    # Fallback: full fetch (unshallow)
-    proc = subprocess.run(
-        ["git", "-C", str(bare), "fetch", git_url, "+refs/heads/*:refs/remotes/origin/*"],
-        capture_output=True, text=True, timeout=180,
-    )
     if proc.returncode != 0:
+        logger.warning("git.fetch shallow failed, trying full: {}", proc.stderr.strip()[:300])
+        # Fallback: full fetch (unshallow)
+        proc = subprocess.run(
+            ["git", "-C", str(bare), "fetch", git_url, "+refs/heads/*:refs/remotes/origin/*"],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "git.fetch full also failed (worktree may fail): {}", proc.stderr.strip()[:300]
+            )
+
+    # 单独 fetch target_sha (force-push 后 branch refspec 还没拉到的情况)
+    if target_sha:
+        _fetch_sha(bare, git_url, target_sha)
+
+
+def _fetch_sha(bare: Path, git_url: str, sha: str) -> None:
+    """单独 fetch 一个 commit SHA, 确保它在 object db (无 ancestor).
+
+    Why: 之前 +refs/heads/*:refs/remotes/origin/* 只能拉 branch HEAD 处的 commit.
+    force-push 后, GitLab 报给 webhook 的 head_sha 可能是新 commit, 但本地 branch
+    ref 还没更新. 单独 fetch 该 SHA (depth=1) 只需该 commit object (worktree add
+    不需要祖先).
+    """
+    # 先看是否已有
+    check = subprocess.run(
+        ["git", "-C", str(bare), "cat-file", "-t", sha],
+        capture_output=True, text=True, timeout=10,
+    )
+    if check.returncode == 0:
+        return  # already in object db
+    # 单独 fetch
+    proc = subprocess.run(
+        ["git", "-C", str(bare), "fetch", "--depth=1", git_url, sha],
+        capture_output=True, text=True, timeout=60,
+    )
+    if proc.returncode == 0:
+        logger.info("git.fetch_sha ok bare={} sha={}", bare.name, sha[:7])
+    else:
         logger.warning(
-            "git.fetch full also failed (worktree may fail): {}", proc.stderr.strip()[:300]
+            "git.fetch_sha failed bare={} sha={}: {}",
+            bare.name, sha[:7], proc.stderr.strip()[:200],
         )
 
 
@@ -172,7 +209,7 @@ def prepare_workspace(
     tag: str = "wt",
 ) -> Workspace:
     bare = _ensure_bare(project_id, git_url)
-    _fetch_incremental(bare, git_url)
+    _fetch_incremental(bare, git_url, target_sha=source_sha)  # 确保 source_sha 在 object db
     worktree = _create_worktree(bare, project_id, mr_iid, source_sha, tag)
     diff_file = _write_diff(worktree, diff_text)
     return Workspace(bare=bare, worktree=worktree, diff_file=diff_file)

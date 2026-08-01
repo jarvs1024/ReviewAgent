@@ -83,16 +83,13 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         logger.info("webhook.skip action={} project={} mr={}", mr.action, mr.project_id, mr.mr_iid)
         return {"status": "skipped", "reason": f"action={mr.action}"}
 
-    # 4. cooldown
-    first_cmd = commands[0]
-    if locks.should_skip_cooldown(mr.project_id, mr.mr_iid, first_cmd):
-        logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)
-        return {"status": "skipped", "reason": "cooldown"}
-
-    # 4.5 head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
+    # 4. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
     # Why: 用户在 GitLab UI 点 Apply suggestion 后, 代码会变但不会触发
     #      note 事件, 之前的 /adopt 处理就跑了. 这里在 head_sha 变时
     #      主动探测所有 open suggestions, 把已被 UI apply 的转 state=applied.
+    # 重要: 必须在 cooldown check 之前, 否则连续 2 次 head_sha 变化
+    #       (21:32 MR update + 21:32:51 再次 MR update) 第二次会被 cooldown 跳过,
+    #       永远不跑 auto_detect_applied → telemetry 看不到 applied 状态.
     if mr.action == "update":
         try:
             from reviewagent.commands.suggestion_actions import auto_detect_applied
@@ -113,7 +110,13 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                 mr.project_id, mr.mr_iid, e,
             )
 
-    # 5. 入队命令链
+    # 5. cooldown
+    first_cmd = commands[0]
+    if locks.should_skip_cooldown(mr.project_id, mr.mr_iid, first_cmd):
+        logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)
+        return {"status": "skipped", "reason": "cooldown"}
+
+    # 6. 入队命令链
     job_ids = enqueue_mr_chain(
         commands=commands,
         project_id=mr.project_id,

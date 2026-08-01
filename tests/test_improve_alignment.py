@@ -458,3 +458,20 @@ def test_collect_cross_file_refs_returns_empty_when_no_idents(tmp_path):
         worktree_path=str(tmp_path),
     )
     assert refs_by_file == {"empty.py": []}
+
+
+# ---------- _fetch_incremental with target_sha ----------
+
+def test_fetch_incremental_with_target_sha(tmp_path):
+    """_fetch_incremental 接受 target_sha 参数, 确保该 SHA 在 object db"""
+    from reviewagent.git.workspace import _fetch_incremental
+    import subprocess
+    
+    # 准备 bare repo
+    bare = tmp_path / "test.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    # 假装是空 fetch (没东西可拉) — 只测试 cat-file 路径
+    # target_sha 不存在时不会拉成功, 但不应 crash
+    result = _fetch_incremental(bare, "file:///nonexistent", target_sha="deadbeef" * 5)
+    # 不验证结果, 只验证不 crash
+    assert result is None
