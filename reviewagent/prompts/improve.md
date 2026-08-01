@@ -72,6 +72,52 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 - 同一行可能命中多条规则 → 选最严重 / 最直接的一条给 suggestion，避免重复
 - 命中不要求必给 suggestion，**只在能直接 Apply 时才给**（无法 Apply → summary_md 文字描述）
 
+## 跨文件影响分析 (在规则检查之前)
+
+**核心理念**：单看 diff 行很难发现深层问题 — 改了一个函数签名但 caller 没同步、改了常量但引用方没更新、删了公共函数但别处还在用。每次 diff 都应该**主动追溯仓库里的上下游**，挖掘深层次问题。
+
+### 流程（强制）
+
+1. **识别"高关联"目标**：基于 diff 内容判断要看哪些关联代码
+   - 改的函数 / 类名 / 方法名 → 找所有 caller / 被调用方
+   - 改的常量名 / 配置项 → 找所有引用方
+   - 改的 SQL / ORM schema / 表结构 → 找对应 model / migration
+   - 改的公共 API 签名（加 / 删 / 改参数）→ 找所有调用方
+   - 改的 import 路径 / 模块名 → 找旧路径所有使用
+   - 改的 fixture / 测试 helper → 找引用它的测试函数
+
+2. **主动 read 关联文件**：用 `read` 工具读 **1-3 个最相关** 的文件（避免 token 爆炸）
+   - 优先看 caller（"谁在调我"）
+   - 改的常量 / schema 引用方
+   - 同模块的相关函数 / 类
+
+3. **挖掘深层次问题**：
+   - caller 是否传了旧参数 / 没传新参数 → 缺新参数
+   - 调用方是否依赖被改动的旧行为 → 行为破坏
+   - 类型 / 接口契约是否一致 → 类型不匹配
+   - 公共常量改了，引用方是否要同步 → 常量不同步
+   - 删 / 改名的函数，是否有 caller 没同步 → 调用 broken
+   - fixture 改了，引用它的 test 是否仍能跑 → fixture 失配
+
+4. **产出建议**：
+   - **可 Apply 的跨文件 suggestion**：
+     - 改的文件本身在 diff 里 → 正常产 suggestion，`label` 标 `cross-file impact`，`header` 含"caller 同步" / "引用方更新"等
+   - **不可 Apply 但应报告**（关联 caller 不在 diff 里）：
+     - 写进 `summary_md` 文字，格式：`> 跨文件影响: <文件> L<行号> <一句话问题>`
+
+### 强制要求
+
+- **必须做一次 cross-file read** — 每个 diff 文件至少尝试 read 1 个关联文件；没找到也要在 `summary_md` 里写"未发现 cross-file 关联"
+- **关联行号必须精确** — 来自 read 工具读出来的源行号，不能凭印象 / 估算
+- **不要捏造 caller** — 没实际看到代码就别说"X 在用"
+
+### 禁用的"跨文件幻觉"
+
+- ❌ "可能还有其他地方用到" → 必须实际 grep / read 看到
+- ❌ 凭印象说"调用方依赖 X 行为" → 必须 read 代码确认
+- ❌ 引用一个不存在的文件 / 函数
+- ❌ 跨文件 suggestion 改 caller 但 caller 不在 diff 里（GitLab 不允许 Apply，且污染 diff 范围）→ 改为 summary_md 文字
+
 ## 严格约束（违反即降级为普通文字）
 
 **🔴 必做：在输出任何 suggestion 之前，先用 `read` 工具读 target 文件的源码，对照 `start_line` 确认行号。**

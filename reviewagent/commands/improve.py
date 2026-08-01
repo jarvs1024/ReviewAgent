@@ -212,8 +212,21 @@ class ImproveCommand(BaseCommand):
                 f"命中不要求必给 suggestion, 只在能直接 Apply 时才给 (无法 Apply → summary_md 文字描述).\n\n"
             )
 
+        cross_file_hint = (
+            f"## 🔍 跨文件影响分析 (规则检查之前必做)\n\n"
+            f"在扫 SSD / 通用规则之前, 主动追溯本文件在仓库中的上下游:\n\n"
+            f"1. 识别高关联目标: 本文件改了哪些函数/常量/schema/API 签名? 哪些 caller / 引用方会被影响?\n\n"
+            f"2. 用 read 工具读 1-3 个最相关的关联文件 (caller / 引用方 / 同模块相关函数)\n\n"
+            f"3. 挖掘深层次问题: caller 是否需要传新参数? 常量改了引用方是否同步? 删的函数别处还在用?\n\n"
+            f"4. 产出:\n"
+            f"   - 可 Apply 的: 标 label=`cross-file impact`, header 含 caller 同步/引用方更新等\n"
+            f"   - 不可 Apply 的 (caller 不在 diff): 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n\n"
+            f"禁止: 凭印象/估算关联行号; 引用没 read 到的文件; 跨文件 suggestion 改 caller (caller 不在 diff)\n\n"
+        )
+
         return (
             f"{rules_block}"
+            f"{cross_file_hint}"
             f"## 本次检视文件: `{file_path}`\n\n"
             f"### diff\n```diff\n{file_diff}\n```\n\n"
             f"{source_block}\n\n"
