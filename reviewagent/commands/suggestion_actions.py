@@ -453,9 +453,9 @@ def mark_suggestion_applied_by_diff(
             suggestion_note_id=note_id,
             file_path=file_path,
             target_line=target_line,
-            action="applied",
+            action="adopted",
             actor_username=actor_username,
-            reason="applied via GitLab UI",
+            reason="adopted via GitLab UI",
             validation_status="gitlab-ui-apply",
         )
     except Exception as e:  # pragma: no cover
@@ -579,7 +579,7 @@ def auto_detect_applied(
             target_line=target_line,
             action="adopted",
             actor_username=actor_username,
-            reason="auto-detected: user applied via GitLab UI before reply /adopt",
+            reason="auto-detected: user adopted via GitLab UI before reply /adopt",
             validation_status="ui-apply",
             head_sha_posted=sug.get("head_sha"),
             head_sha_current=head_sha,
