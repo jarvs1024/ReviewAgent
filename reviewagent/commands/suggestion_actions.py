@@ -218,12 +218,56 @@ def process_adopt(
         return {"action": "adopted-unchecked", "reason": "no_record"}
 
     # 2. 检查 suggestion 状态
+    #    state=applied/dismissed: 之前已被处理过 (auto_detect 或用户 /adopt / /dismiss).
+    #    用户的 /adopt 仍然要被记账: 1) 显式 reply 告诉用户"已经被处理",
+    #    2) 把用户提供的 reason 写进 suggestion_actions 让审计可追溯,
+    #    3) 触发 re-improve (用户主动发 /adopt 通常意味着他/她想看最新 diff 状态).
     if sug.get("state") not in ("open",):
+        state = sug.get("state") or "unknown"
         logger.info(
-            "/adopt skipped state={} note_id={}",
-            sug.get("state"), suggestion_note_id,
+            "/adopt skipped state={} note_id={} actor={} reason={!r}",
+            state, suggestion_note_id, actor_username, (reason or "")[:50],
         )
-        return {"action": "adopt-skipped", "reason": f"state={sug.get('state')}"}
+        # 1. reply 反馈: 避免用户感觉命令"静默"
+        label_map = {
+            "applied": "已采纳 (auto-detect 或之前的 /adopt)",
+            "dismissed": "已关闭 (之前的 /dismiss)",
+        }
+        state_label = label_map.get(state, f"状态 {state}")
+        reply_lines = [f"ℹ️ 这条建议当前是 **{state_label}**，无需重复 /adopt。"]
+        if reason:
+            reply_lines.append(f"\n你补充的理由 `{reason}` 已记录在审计中, 用于改进后续建议。")
+        else:
+            reply_lines.append("\n如需补充说明, 请用 `/adopt 你的理由` 重新发, 或继续讨论。")
+        try:
+            gl.reply_to_discussion(
+                project_id, mr_iid, suggestion_note_id, "\n".join(reply_lines)
+            )
+        except GitLabError as e:
+            logger.warning("/adopt.reply_for_skipped_state failed: {}", e)
+        # 2. 写审计: 即使 state 已是 applied, 用户的 /adopt 行为也入 audit
+        #    (validation_status=already-{state} 区分 auto_detect 的 ui-apply)
+        sug_file = sug.get("file_path") or ""
+        sug_line = int(sug.get("target_line") or 0)
+        store.record_suggestion_action(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            suggestion_note_id=suggestion_note_id,
+            file_path=sug_file,
+            target_line=sug_line,
+            action="adopted",
+            actor_username=actor_username,
+            reason=reason or f"user /adopt after state={state}",
+            validation_status=f"already-{state}",
+        )
+        # 3. 触发 re-improve: 用户主动表达意愿, 给他/她看到最新 diff
+        reimprove_job = _maybe_enqueue_reimprove(
+            project_id=project_id, mr_iid=mr_iid, actor_username=actor_username,
+        )
+        result = {"action": "adopt-skipped", "reason": f"state={state}"}
+        if reimprove_job:
+            result["reimprove_job"] = reimprove_job
+        return result
 
     # 3. 验证目标行是否被修改
     head_sha_posted = sug.get("head_sha") or ""

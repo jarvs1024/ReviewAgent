@@ -252,3 +252,75 @@ def test_summary_placeholder_posted_before_inline(tmp_telemetry):
     assert placeholder_idx < inline_idx < edit_idx, (
         f"顺序应为 placeholder→inline→edit, 实际={call_log}"
     )
+
+
+def test_adopt_skipped_state_applied_replies_and_audits(tmp_telemetry):
+    """回归: 当 /adopt 调用时 suggestion.state 已是 applied (被 auto_detect
+    或前一次 /adopt 标记过), 旧实现静默 return 不给任何反馈, 用户感知
+    'adopt 没生效'. 修复: 即使 skip, 也要:
+    1) reply_to_discussion 告诉用户'已采纳, 无需重复 /adopt'
+    2) 把用户的 reason 写进 suggestion_actions audit
+    3) 触发 re-improve
+    """
+    from reviewagent.commands.improve import ImproveCommand  # noqa: F401
+    from reviewagent.commands.suggestion_actions import process_adopt
+    from reviewagent.telemetry.store import get_store
+
+    head_sha = "abc12345" * 5
+    store = get_store()
+    store.record_suggestion(
+        project_id=34, mr_iid=164, note_id="already-applied-1",
+        file_path="services/health_check.py", target_line=13,
+        target_line_end=13,
+        existing_code="from services.notify import *",
+        improved_code="from services.notify import dispatch_email, lookup_recipient",
+        header="禁止 wildcard import", label="potential bug",
+        fingerprint="fpalready1", cohort_key="c1",
+        severity_source="rule",
+        head_sha=head_sha,
+    )
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute(
+        "UPDATE suggestions SET head_sha=?, state='applied' WHERE note_id='already-applied-1'",
+        (head_sha,),
+    )
+    conn.commit()
+    conn.close()
+
+    fake_gl = MagicMock()
+    fake_gl.resolve_discussion.return_value = True
+    fake_gl.reply_to_discussion.return_value = 9999
+
+    # enqueue_improve 是 _maybe_enqueue_reimprove 内部从 reviewagent.workers.tasks
+    # 延迟 import, patch 必须在原模块位置 (不是 suggestion_actions)
+    # cooldown check 也要 patch 掉, 否则跨测试时 Redis 还在冷却
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=fake_gl), \
+         patch("reviewagent.workers.tasks.enqueue_improve", return_value="job-xyz") as mock_enqueue, \
+         patch("reviewagent.webhook.locks.locks") as mock_locks:
+        mock_locks.should_skip_cooldown.return_value = False
+        result = process_adopt(
+            project_id=34, mr_iid=164,
+            suggestion_note_id="already-applied-1",
+            actor_username="root",
+            reason="fix",
+        )
+
+    # 1. 返回值带 re-improve job
+    assert result["action"] == "adopt-skipped"
+    assert "reimprove_job" in result, f"应触发 re-improve, 实际 {result}"
+    # 2. reply_to_discussion 至少调用一次 (给用户反馈)
+    assert fake_gl.reply_to_discussion.called, "应给用户 reply, 实际未调用"
+    # 3. 用户的 reason 写进 audit
+    conn = sqlite3.connect(tmp_telemetry)
+    rows = conn.execute(
+        "SELECT actor_username, action, reason, validation_status "
+        "FROM suggestion_actions "
+        "WHERE suggestion_note_id='already-applied-1' AND validation_status='already-applied'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1, f"audit 应记一条 already-applied, 实际 {rows}"
+    assert rows[0][0] == "root"
+    assert rows[0][1] == "adopted"
+    assert rows[0][2] == "fix"
+    # 4. enqueue_improve 被调用
+    assert mock_enqueue.called
