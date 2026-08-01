@@ -256,7 +256,7 @@ class ImproveCommand(BaseCommand):
                 refs.append({
                     "file": f_rel,
                     "line": ln,
-                    "content": content.strip()[:200],
+                    "content": content.strip()[:500],
                     "ident": ident,
                 })
                 hits += 1
@@ -304,13 +304,26 @@ class ImproveCommand(BaseCommand):
         """构建单文件的精简 prompt."""
         wt = str(ws.worktree)
 
-        # 读取完整源码
+        # 读取完整源码 (限制最大行数, 超过截断 + 提示)
+        _MAX_SOURCE_LINES = 2500
         lines = self._read_file_lines(file_path)
         if lines:
-            numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
-            source_block = f"### 完整源码：`{file_path}`（共 {len(lines)} 行）\n```\n{numbered}\n```"
+            total_lines = len(lines)
+            if total_lines > _MAX_SOURCE_LINES:
+                # 截断到前 _MAX_SOURCE_LINES 行, 提示末尾未加载
+                kept_lines = lines[:_MAX_SOURCE_LINES]
+                numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(kept_lines))
+                source_block = (
+                    f"### 完整源码: `{file_path}` (共 {total_lines} 行, **已截断到前 {_MAX_SOURCE_LINES} 行**)\n"
+                    f"⚠️ 上下文不完整 — 末尾 {total_lines - _MAX_SOURCE_LINES} 行未加载, "
+                    f"如需检视请缩小 diff 范围或拆分 MR\n```\n{numbered}\n```"
+                )
+            else:
+                numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
+                source_block = f"### 完整源码: `{file_path}` (共 {len(lines)} 行)\n```\n{numbered}\n```"
         else:
             source_block = f"### 完整源码\n(无法读取 {file_path})"
+
 
         # VALID NEW LINES
         vl_sorted = sorted(valid_lines)
