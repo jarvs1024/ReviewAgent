@@ -302,17 +302,31 @@ def process_adopt(
             "/adopt skipped state={} note_id={} actor={} reason={!r}",
             state, suggestion_note_id, actor_username, (reason or "")[:50],
         )
-        # 1. reply 反馈: 避免用户感觉命令"静默"
-        label_map = {
-            "applied": "已采纳 (auto-detect 或之前的 /adopt)",
-            "dismissed": "已关闭 (之前的 /dismiss)",
-        }
-        state_label = label_map.get(state, f"状态 {state}")
-        reply_lines = [f"ℹ️ 这条建议当前是 **{state_label}**，无需重复 /adopt。"]
-        if reason:
-            reply_lines.append(f"\n你补充的理由 `{reason}` 已记录在审计中, 用于改进后续建议。")
+        # 1. reply 反馈: 明确告诉用户当前状态 + /adopt 这次带来的实际作用
+        #    (留 reason), 不再说"无需重复" — 因为 /adopt 仍是有意义的:
+        #    它把用户的"采纳思路"作为 reason 入 audit, 用于改进后续建议.
+        if state == "applied":
+            header = "ℹ️ 这条建议已被自动检测采纳 (push 时代码改动触发系统识别)。"
+            adopt_purpose = (
+                "你的 `/adopt` 这次主要作用是 **记录采纳思路** —— "
+                "下方 reason 已被加入审计, 用于改进后续建议质量。"
+            )
+        elif state == "dismissed":
+            header = "ℹ️ 这条建议之前已被 /dismiss 关闭。"
+            adopt_purpose = (
+                "当前是 closed 状态, 不会再次标记为采纳。"
+                "如要重新打开讨论, 建议直接 push 新 commit 让系统重新检视。"
+            )
         else:
-            reply_lines.append("\n如需补充说明, 请用 `/adopt 你的理由` 重新发, 或继续讨论。")
+            header = f"ℹ️ 这条建议当前状态: {state}。"
+            adopt_purpose = "请继续讨论或直接 push 新代码触发重新检视。"
+        reply_lines = [header, "", adopt_purpose]
+        if reason:
+            reply_lines.append("")
+            reply_lines.append(f"你补充的理由: `{reason}`")
+        elif state == "applied":
+            reply_lines.append("")
+            reply_lines.append("下次想留理由时, 可以用 `/adopt 你的理由` 把思路写进审计。")
         try:
             gl.reply_to_discussion(
                 project_id, mr_iid, suggestion_note_id, "\n".join(reply_lines)
