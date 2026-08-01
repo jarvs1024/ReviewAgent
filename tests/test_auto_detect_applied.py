@@ -56,13 +56,20 @@ def test_changed_target_lines_get_marked_applied(tmp_telemetry):
     _seed_suggestion(s)
 
     gl = MagicMock()
-    # current file at new head_sha — the target line was changed (user applied)
-    gl.get_file_at_sha.return_value = (
+    posted = (
         "def foo():\n"
         "    pass\n"
-        "    return 2\n"  # was "    return 1"
+        "    return 1\n"  # original
         "print('after')\n"
     )
+    current = (
+        "def foo():\n"
+        "    pass\n"
+        "    return 2\n"  # was "    return 1" (user applied)
+        "print('after')\n"
+    )
+    # auto_detect_applied 调 2 次 get_file_at_sha: posted 时代 + current 时代
+    gl.get_file_at_sha.side_effect = [posted, current]
 
     with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
          patch("reviewagent.commands.suggestion_actions.get_store", return_value=s):
@@ -89,13 +96,14 @@ def test_unchanged_target_lines_stay_open(tmp_telemetry):
     _seed_suggestion(s)
 
     gl = MagicMock()
-    # file unchanged — still has the original target line
-    gl.get_file_at_sha.return_value = (
+    unchanged_file = (
         "def foo():\n"
         "    pass\n"
         "    return 1\n"  # unchanged
         "print('after')\n"
     )
+    # auto_detect_applied 调 2 次 get_file_at_sha: posted + current 都返回原文件
+    gl.get_file_at_sha.side_effect = [unchanged_file, unchanged_file]
 
     with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
          patch("reviewagent.commands.suggestion_actions.get_store", return_value=s):

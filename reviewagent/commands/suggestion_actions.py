@@ -524,14 +524,32 @@ def auto_detect_applied(
             )
             continue
 
+        # 拿 posted 时代 (sug.head_sha) 的整个文件, 跟 current_content 做 file-level diff
+        # Why: telemetry 存的 existing_code 只是 target line(s) 几行, 不够
+        # _target_region_changed 用 LCS 找 offset (假设 posted_content 是整个文件).
+        # 直接用 posted 时代整个文件 vs 当前整个文件, 精确判断"目标行是否被改".
+        posted_content = gl.get_file_at_sha(
+            project_id, file_path, sug.get("head_sha") or head_sha
+        )
+
         # 比对目标行是否被改
         try:
-            changed = _target_region_changed(
-                existing_code,
-                current_content,
-                line=target_line,
-                line_end=target_line_end,
-            )
+            if posted_content is not None:
+                # 用 posted 时代整个文件 + 当前整个文件, _target_region_changed 能正确工作
+                changed = _target_region_changed(
+                    posted_content,
+                    current_content,
+                    line=target_line,
+                    line_end=target_line_end,
+                )
+            else:
+                # 拿不到 posted 时代文件, fallback 用 existing_code (有局限)
+                changed = _target_region_changed(
+                    existing_code,
+                    current_content,
+                    line=target_line,
+                    line_end=target_line_end,
+                )
         except Exception as e:  # noqa: BLE001
             result["errors"] += 1
             logger.warning(
