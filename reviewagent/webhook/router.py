@@ -170,6 +170,28 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
         actor = f"{actor_name}@{actor}" if actor_name and actor else actor
         if locks.should_skip_cooldown(project_id, mr_iid, config.push_commands[0]):
             continue
+        # push event 也可能隐含 user 改了代码 (手动 apply / 直接改源) —
+        # 探测哪些 open suggestion 已被实际改写, 转 state=applied
+        try:
+            from reviewagent.commands.suggestion_actions import auto_detect_applied
+            head_sha_push = mr.get("sha") or ""
+            if head_sha_push:
+                ad_result = auto_detect_applied(
+                    project_id=project_id,
+                    mr_iid=mr_iid,
+                    head_sha=head_sha_push,
+                    actor_username=actor or "auto-detect",
+                )
+                if ad_result.get("applied"):
+                    logger.info(
+                        "push.auto_detect_applied project={} mr={} applied={}",
+                        project_id, mr_iid, ad_result["applied"],
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "push.auto_detect_applied failed (non-fatal) project={} mr={}: {}",
+                project_id, mr_iid, e,
+            )
         job_ids = enqueue_mr_chain(
             commands=config.push_commands,
             project_id=project_id,
