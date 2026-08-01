@@ -302,19 +302,19 @@ def process_adopt(
             "/adopt skipped state={} note_id={} actor={} reason={!r}",
             state, suggestion_note_id, actor_username, (reason or "")[:50],
         )
-        # 1. reply 反馈: 简洁说明 /adopt 这次实际作用 (留 reason),
-        #    不再"无需重复"或大段状态描述.
+        # 1. reply 反馈: 简洁说明当前状态 + /adopt reason 的去向
         if state == "applied":
             reply_lines = [
-                "你的 `/adopt` 这次主要作用是 **记录采纳思路** —— "
-                "下方 reason 已被加入审计, 用于改进后续建议质量。"
+                "ℹ️ 这条建议已被自动检测采纳 (push 时代码改动触发系统识别)。"
             ]
             if reason:
-                reply_lines.append("")
-                reply_lines.append(f"你补充的理由: `{reason}`")
+                reply_lines.append(
+                    f"你的 /adopt 理由: `{reason}` 将用于改进后续建议质量。"
+                )
             else:
-                reply_lines.append("")
-                reply_lines.append("下次想留理由时, 可以用 `/adopt 你的理由` 把思路写进审计。")
+                reply_lines.append(
+                    "如需记录采纳思路, 用 `/adopt 你的理由`。"
+                )
         elif state == "dismissed":
             reply_lines = [
                 "ℹ️ 这条建议之前已被 /dismiss 关闭, 不会再次标记为采纳。"
