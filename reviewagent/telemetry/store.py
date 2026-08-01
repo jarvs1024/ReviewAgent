@@ -710,10 +710,21 @@ class Store:
             by_action[row["action"]] = by_action.get(row["action"], 0) + 1
         adopted = by_state.get("applied", 0)
         dismissed = by_state.get("dismissed", 0)
-        return {"total": len(suggestions), "state_counts": by_state,
-                "severity_counts": by_severity, "action_counts": by_action,
-                "adopted": adopted, "dismissed": dismissed,
-                "adoption_rate": round(adopted / (adopted + dismissed) * 100, 1) if adopted + dismissed else 0.0}
+        total = len(suggestions)
+        # 采纳率 = applied / total (含 open). 前端 renderer 期望 0~1 小数
+        # (再 * 100 = %), 与 my-pr-agent reporting/renderer.py 一致.
+        adoption_rate = round(adopted / total, 4) if total else 0.0
+        return {
+            "total": total,
+            "state_counts": by_state,
+            "severity_counts": by_severity,
+            "action_counts": by_action,
+            "adopted": adopted,
+            "dismissed": dismissed,
+            "adoption_rate": adoption_rate,
+            # 兼容老前端: 直接给百分数字段
+            "adoption_pct": round(adoption_rate * 100, 1),
+        }
 
     def list_dismissals(
         self, *, project_id=None, mr_iid=None, since=None, until=None,
