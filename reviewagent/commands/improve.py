@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from reviewagent.commands._common import BaseCommand, BaseCommandError
+import re
+import subprocess
 from reviewagent.config import config
 from reviewagent.git.diff_lines import (
     find_nearest_valid_line,
@@ -171,6 +173,117 @@ class ImproveCommand(BaseCommand):
                 result[fp] = part
         return result
 
+    @staticmethod
+    def _extract_identifiers(diff: str) -> list[str]:
+        """从 diff 的 `+` 行提取改动的标识符 (def/class/常量/import 名字)."""
+        if not diff:
+            return []
+        # 只看 + 行
+        added = "\n".join(ln[1:] for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+        idents: set[str] = set()
+        for m in re.finditer(r"^\s*def\s+([A-Za-z_]\w{2,})\s*\(", added, re.MULTILINE):
+            idents.add(m.group(1))
+        for m in re.finditer(r"^\s*class\s+([A-Za-z_]\w{2,})", added, re.MULTILINE):
+            idents.add(m.group(1))
+        for m in re.finditer(r"^\s*([A-Z][A-Z0-9_]{2,})\s*[:=]", added, re.MULTILINE):
+            idents.add(m.group(1))
+        for m in re.finditer(r"^\s*from\s+\S+\s+import\s+([A-Za-z_]\w{2,})", added, re.MULTILINE):
+            idents.add(m.group(1))
+        for m in re.finditer(r"^\s*from\s+\S+\s+import\s+\(([^)]+)\)", added, re.MULTILINE):
+            for part in m.group(1).split(","):
+                name = part.strip().split(" as ")[0].strip()
+                if len(name) >= 3:
+                    idents.add(name)
+        # 排除常见噪音
+        stop = {"self", "cls", "None", "True", "False", "args", "kwargs"}
+        return sorted(idents - stop)[:15]
+
+    @staticmethod
+    def _find_cross_file_refs(file_path: str, diff: str, worktree_path, max_refs: int = 6) -> list[dict]:
+        """在 worktree 找 diff 改动的标识符在其他文件的 caller 引用.
+
+        用 rg (ripgrep) 排除当前文件, 每个 ident 限 2 条命中, 总数限 max_refs.
+        返回 [{"file": rel, "line": N, "content": "..."}, ...]
+        """
+        from pathlib import Path
+        idents = ImproveCommand._extract_identifiers(diff)
+        if not idents or not worktree_path:
+            return []
+        workdir = str(Path(worktree_path))
+        refs: list[dict] = []
+        seen: set[tuple[str, int]] = set()
+        rel_self = file_path
+        for ident in idents:
+            if len(ident) < 3:
+                continue
+            try:
+                result = subprocess.run(
+                    ["rg", "-n", "--no-heading", "-t", "py",
+                     rf"\b{ident}\b", ".",
+                     "-g", f"!{rel_self}",
+                     "-g", "!reviewagent/**",
+                     "-g", "!tests/**",
+                     "-g", "!.venv/**",
+                     "-g", "!**/__pycache__/**",
+                     "-g", "!.git/**"],
+                    cwd=workdir,
+                    capture_output=True, text=True, timeout=8,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                continue
+            hits = 0
+            for line in result.stdout.splitlines():
+                parts = line.split(":", 2)
+                if len(parts) < 3:
+                    continue
+                f, ln_s, content = parts[0], parts[1], parts[2]
+                f_rel = f.lstrip("./")
+                if f_rel == rel_self or not f_rel:
+                    continue
+                try:
+                    ln = int(ln_s)
+                except ValueError:
+                    continue
+                key = (f_rel, ln)
+                if key in seen:
+                    continue
+                seen.add(key)
+                refs.append({
+                    "file": f_rel,
+                    "line": ln,
+                    "content": content.strip()[:200],
+                    "ident": ident,
+                })
+                hits += 1
+                if hits >= 2 or len(refs) >= max_refs:
+                    break
+            if len(refs) >= max_refs:
+                break
+        return refs
+
+    def _render_cross_file_section(self, refs: list[dict]) -> str:
+        """把 cross-file 引用渲染成 chunk prompt 段."""
+        if not refs:
+            return (
+                "## 🔍 跨文件影响分析 (规则检查之前必做)\n\n"
+                "Python 端 rg 没找到 cross-file caller 引用 (本文件可能是新增 / 改动是局部 / 仓库无其他文件引用).\n"
+                "请在 summary_md 注明 '未发现 cross-file 关联'.\n\n"
+            )
+        section = "## 🔍 跨文件影响分析 (Python 端已 grep, 必做)\n\n"
+        section += f"在 worktree 找到 {len(refs)} 条其他文件对本文件改动的引用:\n\n"
+        for ref in refs:
+            section += (
+                f"**`{ref['file']}:{ref['line']}`** 引用 `{ref['ident']}`:\n"
+                f"```\n{ref['content']}\n```\n\n"
+            )
+        section += (
+            "**请逐一分析每条 caller 是否需要同步更新**：\n"
+            "- 函数签名变了但 caller 没传新参数 / 类型不匹配 → 产 suggestion, `label: cross-file impact`\n"
+            "- 常量改了引用方没同步 → 产 suggestion, `label: cross-file impact`\n"
+            "- 删除/重命名的函数别处还在用 → 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n\n"
+        )
+        return section
+
     def _build_chunk_prompt(
         self, file_path: str, file_diff: str, valid_lines: set[int], ws
     ) -> str:
@@ -212,21 +325,13 @@ class ImproveCommand(BaseCommand):
                 f"命中不要求必给 suggestion, 只在能直接 Apply 时才给 (无法 Apply → summary_md 文字描述).\n\n"
             )
 
-        cross_file_hint = (
-            f"## 🔍 跨文件影响分析 (规则检查之前必做)\n\n"
-            f"在扫 SSD / 通用规则之前, 主动追溯本文件在仓库中的上下游:\n\n"
-            f"1. 识别高关联目标: 本文件改了哪些函数/常量/schema/API 签名? 哪些 caller / 引用方会被影响?\n\n"
-            f"2. 用 read 工具读 1-3 个最相关的关联文件 (caller / 引用方 / 同模块相关函数)\n\n"
-            f"3. 挖掘深层次问题: caller 是否需要传新参数? 常量改了引用方是否同步? 删的函数别处还在用?\n\n"
-            f"4. 产出:\n"
-            f"   - 可 Apply 的: 标 label=`cross-file impact`, header 含 caller 同步/引用方更新等\n"
-            f"   - 不可 Apply 的 (caller 不在 diff): 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n\n"
-            f"禁止: 凭印象/估算关联行号; 引用没 read 到的文件; 跨文件 suggestion 改 caller (caller 不在 diff)\n\n"
-        )
+        # Python 端预先用 rg 找 cross-file caller 引用, 渲染成 prompt 段
+        cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
+        cross_file_section = self._render_cross_file_section(cross_file_refs)
 
         return (
             f"{rules_block}"
-            f"{cross_file_hint}"
+            f"{cross_file_section}"
             f"## 本次检视文件: `{file_path}`\n\n"
             f"### diff\n```diff\n{file_diff}\n```\n\n"
             f"{source_block}\n\n"
