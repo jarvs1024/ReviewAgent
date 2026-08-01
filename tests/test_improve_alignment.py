@@ -414,3 +414,47 @@ def test_score_suggestion_label_potential_bug_baseline():
     sc_p1 = ImproveCommand._score_suggestion(s2)
     # cross-file impact 应 ≥ potential bug (同为 25 分)
     assert sc_p1 >= sc_baseline, f"cross-file impact ({sc_p1}) 应 ≥ potential bug ({sc_baseline})"
+
+
+# ---------- _collect_cross_file_refs_for_mr (全局缓存) ----------
+
+def test_collect_cross_file_refs_excludes_self(tmp_path):
+    """全局 caller 引用: 排除 caller 引用本文件自身"""
+    import subprocess
+    # 构造 mock worktree
+    (tmp_path / "a.py").write_text("def helper(): return 1\n")
+    (tmp_path / "b.py").write_text("from a import helper\nx = helper()\n")
+    (tmp_path / "c.py").write_text("# c references helper via import: helper\nfrom a import helper\nhelper()\n")
+    
+    # 调全局方法
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)  # 跳过 __init__
+    refs_by_file = cmd._collect_cross_file_refs_for_mr(
+        files=["a.py", "b.py", "c.py"],
+        diff_by_file={
+            "a.py": "+def new_func(): pass\n",
+            "b.py": "",
+            "c.py": "",
+        },
+        worktree_path=str(tmp_path),
+    )
+    # a.py: new_func 在 b.py/c.py 没引用, 应该是空
+    # b.py: import a 改了, b.py 自身不应出现在自己的 caller 列表
+    # c.py: helper 引用出现在 a.py (def helper) — 但 c.py 的 ident 包含 'helper'
+    assert isinstance(refs_by_file, dict)
+    assert set(refs_by_file.keys()) == {"a.py", "b.py", "c.py"}
+    for fp, refs in refs_by_file.items():
+        for r in refs:
+            assert r["file"] != fp, f"caller 不能引用自身: file={fp}, caller={r}"
+
+
+def test_collect_cross_file_refs_returns_empty_when_no_idents(tmp_path):
+    """diff 为空 / 无 ident 时返回空 refs (不调 rg)"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    refs_by_file = cmd._collect_cross_file_refs_for_mr(
+        files=["empty.py"],
+        diff_by_file={"empty.py": ""},
+        worktree_path=str(tmp_path),
+    )
+    assert refs_by_file == {"empty.py": []}

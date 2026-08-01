@@ -104,6 +104,10 @@ class ImproveCommand(BaseCommand):
         # 按文件拆分 diff
         diff_by_file = self._split_diff_by_file(ws.diff_file, files)
 
+        # 全局一次 rg 找所有 diff 文件的跨文件 caller 引用 (替代 per-file 重复 rg)
+        wt = str(ws.worktree)
+        cross_file_refs_by_file = self._collect_cross_file_refs_for_mr(files, diff_by_file, wt)
+
         # 并行调用
         workers = min(len(files), config.improve_parallel_workers)
         logger.info(
@@ -117,7 +121,10 @@ class ImproveCommand(BaseCommand):
             for fp in files:
                 file_diff = diff_by_file.get(fp, "")
                 valid_lines = line_map.get(fp, set())
-                prompt = self._build_chunk_prompt(fp, file_diff, valid_lines, ws)
+                prompt = self._build_chunk_prompt(
+                    fp, file_diff, valid_lines, ws,
+                    cross_file_refs=cross_file_refs_by_file.get(fp, []),
+                )
                 fut = pool.submit(self._call_chunk, prompt, ws, fp)
                 futures[fut] = fp
             for fut in as_completed(futures):
@@ -266,6 +273,102 @@ class ImproveCommand(BaseCommand):
                 break
         return refs
 
+    def _collect_cross_file_refs_for_mr(
+        self, files: list[str], diff_by_file: dict[str, str], worktree_path, max_refs_per_file: int = 6
+    ) -> dict[str, list[dict]]:
+        """对整个 MR 一次性 rg 找所有 diff 文件的标识符在仓库的 caller 引用.
+
+        Returns: {file_path: [{file, line, content, ident}, ...]}
+        - 一次 rg 用所有 ident 的并集作为 pattern, 避免每个文件重启 subprocess
+        - 按 ident 分桶, 给每个 diff file 排除自身的 caller
+        - 比 per-file 调用更全: file A 的 ident 在 file B 的 caller 也会被发现 (反之亦然)
+        """
+        from pathlib import Path
+        if not worktree_path:
+            return {fp: [] for fp in files}
+        workdir = str(Path(worktree_path))
+
+        # 1. 收集所有 ident (per file)
+        idents_by_file: dict[str, set[str]] = {}
+        all_idents: set[str] = set()
+        for fp in files:
+            idents = set(self._extract_identifiers(diff_by_file.get(fp, "")))
+            idents_by_file[fp] = idents
+            all_idents |= idents
+        # 排除短 ident + 常见噪音
+        stop = {"self", "cls", "None", "True", "False", "args", "kwargs"}
+        all_idents = {i for i in all_idents if len(i) >= 3} - stop
+        if not all_idents:
+            return {fp: [] for fp in files}
+
+        # 2. 一次 rg 找所有 ident (按 ident 分类)
+        idents_sorted = sorted(all_idents)
+        import re as _re
+        pattern = r"\b(?:" + "|".join(_re.escape(i) for i in idents_sorted) + r")\b"
+        try:
+            result = subprocess.run(
+                ["rg", "-n", "--no-heading", "-t", "py", pattern, ".",
+                 "-g", "!reviewagent/**",
+                 "-g", "!tests/**",
+                 "-g", "!.venv/**",
+                 "-g", "!**/__pycache__/**",
+                 "-g", "!.git/**"],
+                cwd=workdir,
+                capture_output=True, text=True, timeout=30,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            logger.warning("improve.cross_file_global_rg failed: {}", e)
+            return {fp: [] for fp in files}
+
+        # 3. 解析: 按 ident 分桶
+        refs_by_ident: dict[str, list[dict]] = {i: [] for i in all_idents}
+        for line in result.stdout.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            f, ln_s, content = parts[0], parts[1], parts[2]
+            f_rel = f.lstrip("./")
+            if not f_rel:
+                continue
+            try:
+                ln = int(ln_s)
+            except ValueError:
+                continue
+            # 一行只算一个 ident 命中 (按 ident 顺序优先)
+            for ident in idents_sorted:
+                if _re.search(rf"\b{_re.escape(ident)}\b", content):
+                    refs_by_ident[ident].append({
+                        "file": f_rel,
+                        "line": ln,
+                        "content": content.strip()[:500],
+                        "ident": ident,
+                    })
+                    break
+
+        # 4. 给每个 diff file 分配 refs (排除自身, 每个 ident 限 2, 总限 max_refs)
+        out: dict[str, list[dict]] = {}
+        for fp in files:
+            my_idents = idents_by_file.get(fp, set())
+            seen: set[tuple[str, int]] = set()
+            refs: list[dict] = []
+            for ident in my_idents:
+                hits = 0
+                for r in refs_by_ident.get(ident, []):
+                    if r["file"] == fp:
+                        continue
+                    key = (r["file"], r["line"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    refs.append(r)
+                    hits += 1
+                    if hits >= 2 or len(refs) >= max_refs_per_file:
+                        break
+                if len(refs) >= max_refs_per_file:
+                    break
+            out[fp] = refs
+        return out
+
     def _render_cross_file_section(self, refs: list[dict]) -> str:
         """把 cross-file 引用渲染成 chunk prompt 段."""
         if not refs:
@@ -299,9 +402,14 @@ class ImproveCommand(BaseCommand):
         return section
 
     def _build_chunk_prompt(
-        self, file_path: str, file_diff: str, valid_lines: set[int], ws
+        self, file_path: str, file_diff: str, valid_lines: set[int], ws,
+        cross_file_refs: list[dict] | None = None,
     ) -> str:
-        """构建单文件的精简 prompt."""
+        """构建单文件的精简 prompt.
+
+        cross_file_refs: 预计算的跨文件 caller 引用列表 (来自 _call_agent 一次全局 rg).
+                         None 时回退到 per-file _find_cross_file_refs (单文件走基类路径时用).
+        """
         wt = str(ws.worktree)
 
         # 读取完整源码 (限制最大 5000 行, 超过截断到前 5000 行 + 提示)
@@ -352,8 +460,9 @@ class ImproveCommand(BaseCommand):
                 f"命中不要求必给 suggestion, 只在能直接 Apply 时才给 (无法 Apply → summary_md 文字描述).\n\n"
             )
 
-        # Python 端预先用 rg 找 cross-file caller 引用, 渲染成 prompt 段 (放在规则清单前 — 跨文件影响类问题不要求命中 R-XXX)
-        cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
+        # 跨文件 caller 引用: 优先用 _call_agent 预计算的全局结果, fallback 到 per-file 调用
+        if cross_file_refs is None:
+            cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
         cross_file_section = self._render_cross_file_section(cross_file_refs)
 
         return (
