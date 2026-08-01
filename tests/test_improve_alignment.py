@@ -350,3 +350,67 @@ def test_validate_no_existing_code_still_snaps():
     )
     # snap 跳过 (start_line=2 已在 valid), step 4 对齐: target='return items' vs imp='return items or []', 共享 token 'items' (>=5字符) → post
     assert decision["action"] == "post", f"expected post, got: {decision}"
+
+
+# ---------- _RULE_REF_REGEX + _score_suggestion ----------
+
+def test_rule_ref_regex_exempts_ssd_rule():
+    """SSD-RULE-* 豁免 _score_suggestion 过滤"""
+    from reviewagent.commands.improve import _RULE_REF_REGEX
+    assert _RULE_REF_REGEX.search("命中 SSD-RULE-NIL-GUARD")
+
+
+def test_rule_ref_regex_exempts_r_xxx():
+    """R-XXX 通用规则键也豁免 (与 SSD-RULE 同级)"""
+    from reviewagent.commands.improve import _RULE_REF_REGEX
+    for ref in ["R-RES", "R-PERF", "R-OTHER", "R-CLEAN", "R-NVME"]:
+        assert _RULE_REF_REGEX.search(f"命中 {ref} 规则"), f"应豁免 {ref}"
+
+
+def test_rule_ref_regex_exempts_r_other_with_subkey():
+    """R-OTHER:<x> / R-OTHER-IMPACT:<x> 兜底前缀也豁免"""
+    from reviewagent.commands.improve import _RULE_REF_REGEX
+    for ref in [
+        "R-OTHER:magic_number",
+        "R-OTHER:typo",
+        "R-OTHER-IMPACT:caller_param",
+        "R-OTHER-IMPACT:schema_drift",
+        "R-OTHER-IMPACT:import_path",
+    ]:
+        assert _RULE_REF_REGEX.search(f"命中 {ref}"), f"应豁免 {ref}"
+
+
+def test_rule_ref_regex_does_not_exempt_plain_text():
+    """无规则键的普通文本不豁免"""
+    from reviewagent.commands.improve import _RULE_REF_REGEX
+    assert _RULE_REF_REGEX.search("普通代码风格建议") is None
+    assert _RULE_REF_REGEX.search("测试代码略") is None
+
+
+def test_score_suggestion_label_cross_file_impact_high():
+    """label=cross-file impact 应得 25 分 (与 potential bug 同级, 体现 P1 优先级)"""
+    s = {
+        "label": "cross-file impact",
+        "severity": "high",
+        # rationale 长度 > 50 → +8; +10 (rule ref R-OTHER-IMPACT); +5 (header)
+        "rationale": "R-OTHER-IMPACT:caller_param — 调用方 callerA 还在用旧签名, 传了 2 个参数, 新签名需要 3 个",
+        "header": "caller 同步",
+    }
+    sc = ImproveCommand._score_suggestion(s)
+    # 30 (high) + 25 (cross-file impact) + 8 (rationale 50~100字) + 10 (rule ref) + 5 (header ok) = 78
+    assert sc >= 70, f"cross-file impact 应得高分, got {sc}"
+
+
+def test_score_suggestion_label_potential_bug_baseline():
+    """label=potential bug 作为基线"""
+    s = {
+        "label": "potential bug",
+        "severity": "high",
+        "rationale": "R-RES 命中: open() 未关闭",
+        "header": "资源关闭",
+    }
+    sc_baseline = ImproveCommand._score_suggestion(s)
+    s2 = dict(s, label="cross-file impact")
+    sc_p1 = ImproveCommand._score_suggestion(s2)
+    # cross-file impact 应 ≥ potential bug (同为 25 分)
+    assert sc_p1 >= sc_baseline, f"cross-file impact ({sc_p1}) 应 ≥ potential bug ({sc_baseline})"

@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 from reviewagent.commands._common import BaseCommand, BaseCommandError
-import re
 import subprocess
 from reviewagent.config import config
 from reviewagent.git.diff_lines import (
@@ -41,7 +40,13 @@ from reviewagent.opencode.client import OpencodeOutputError, client as opencode
 ImproveError = BaseCommandError
 
 # 规则引用正则: 匹配 SSD-RULE-XXX 形式 (rule_key_prefix 可配)
-_RULE_REF_REGEX = re.compile(rf"\b{re.escape(config.rule_key_prefix)}-RULE-\w+\b")
+# 规则键豁免正则: SSD-RULE-* / R-XXX / R-OTHER:* / R-OTHER-IMPACT:* 全部豁免 _score_suggestion 过滤
+_RULE_REF_REGEX = re.compile(
+    r"\b(?:SSD-RULE-\w+"
+    r"|R-OTHER-IMPACT:[a-z0-9_]+"
+    r"|R-OTHER:[a-z0-9_]+"
+    r"|R-[A-Z]+(?:-[A-Z0-9_]+)*)\b"
+)
 
 
 
@@ -265,11 +270,17 @@ class ImproveCommand(BaseCommand):
         """把 cross-file 引用渲染成 chunk prompt 段."""
         if not refs:
             return (
-                "## 🔍 跨文件影响分析 (规则检查之前必做)\n\n"
-                "Python 端 rg 没找到 cross-file caller 引用 (本文件可能是新增 / 改动是局部 / 仓库无其他文件引用).\n"
-                "请在 summary_md 注明 '未发现 cross-file 关联'.\n\n"
+                "## 🔍 跨文件影响分析 (规则检查之前必做, **P1**)\n\n"
+                "Python 端 rg 没找到 cross-file caller 引用 (本文件可能是新增 / 改动是局部 / 仓库无其他文件引用).\n\n"
+                "**仍请按 P1 优先级自行判断是否需要产 R-OTHER-IMPACT suggestion** — Python 端仅做粗扫，"
+                "如下情况仍可能有跨文件风险:\n"
+                "- 新增 / 重命名的公共函数、类、常量 (无 caller 但下游模块可能依赖)\n"
+                "- 改了 fixture / 测试 helper (本 diff 未引用但其它 test 可能引用)\n"
+                "- 改了 import 路径 (旧路径可能还有引用未被发现)\n"
+                "- 改了 SQL / ORM schema (model/migration 可能未同步)\n\n"
+                "确认无风险 → 在 summary_md 注明 '未发现 cross-file 关联'。**不要为凑数硬编 R-OTHER-IMPACT**。\n\n"
             )
-        section = "## 🔍 跨文件影响分析 (Python 端已 grep, 必做)\n\n"
+        section = "## 🔍 跨文件影响分析 (Python 端已 grep, **优先级 P1, 在所有规则检查之前**)\n\n"
         section += f"在 worktree 找到 {len(refs)} 条其他文件对本文件改动的引用:\n\n"
         for ref in refs:
             section += (
@@ -280,7 +291,9 @@ class ImproveCommand(BaseCommand):
             "**请逐一分析每条 caller 是否需要同步更新**：\n"
             "- 函数签名变了但 caller 没传新参数 / 类型不匹配 → 产 suggestion, `label: cross-file impact`\n"
             "- 常量改了引用方没同步 → 产 suggestion, `label: cross-file impact`\n"
-            "- 删除/重命名的函数别处还在用 → 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n\n"
+            "- 删除/重命名的函数别处还在用 → 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n"
+            "- 跨文件影响类问题**不要求先命中 R-XXX 19 类**, 命中即产 suggestion\n"
+            "- `rationale` 必须以 `R-OTHER-IMPACT:<简短描述>` 开头 (例 `R-OTHER-IMPACT:caller_param` / `R-OTHER-IMPACT:schema_drift` / `R-OTHER-IMPACT:import_path` / `R-OTHER-IMPACT:fixture_break`)\n\n"
         )
         return section
 
@@ -309,7 +322,7 @@ class ImproveCommand(BaseCommand):
                 f"## 🔴 优先 1 — SSD 自定义规则 (项目方定义, 最高优先级)\n\n"
                 f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
                 f"{self.repo_context}\n\n"
-                f"## 🟡 优先 2 — 通用规则 (常规代码 + 测试代码问题, 共 11 条)\n\n"
+                f"## 🟡 优先 2 — 通用规则 (常规代码 + 测试代码问题, 共 19 条 R-XXX + R-OTHER 兜底)\n\n"
                 f"完成 SSD 规则扫描后, 再用以下通用规则覆盖剩余问题, rationale 以 R-XXX 开头:\n\n"
                 f"- R-REPRO: time.time()/datetime.now() 在测试函数 → time.perf_counter()/mock\n"
                 f"- R-RES: open/serial/socket/Popen/ioctl 创建后无 with 或 close/wait → 资源用 with 或 try/finally close\n"
@@ -321,17 +334,35 @@ class ImproveCommand(BaseCommand):
                 f"- R-LOG: print() 替代 logger / 测试失败不 dump 设备上下文 (dmesg/smartctl/nvme list) → 改 logger.* / 失败时 dump 状态\n"
                 f"- R-CI: 多 test 共写同一路径 (race) / 需独占设备无 @pytest.mark.serial 或 lock → tmp_path + PID 后缀 / 加 serial 标记或 lock\n"
                 f"- R-NVME: NVMe/SCSI struct.pack 字节序错 (<I vs >I) / opcode 硬编码 / buffer length 跟 sector size 不匹配 / 超时未 RESPONSE abort → 命名常量 / 对齐字节序 / 匹配 sector / 超时 abort\n"
-                f"- R-PERF: 短操作 (< 1ms) 用 time.time() 而非 time.perf_counter() / 测量区间过大 → 改 perf_counter / 收紧区间\n\n"
+                f"- R-PERF: 短操作 (< 1ms) 用 time.time() 而非 time.perf_counter() / 测量区间过大 → 改 perf_counter / 收紧区间\n"
+                f"- R-CONST: 超时 / 重试 / 固件地址 / 服务地址硬编码 / 配置读取无校验 → 收拢常量 + 配置多层校验\n"
+                f"- R-SHELL: subprocess f-string 拼外部参数透传设备入参 → args 列表 + 白名单过滤\n"
+                f"- R-LOOP: 无限 while 无 max_retry / 截止 deadline / 遍历原地修改容器 → 重试 + deadline / 副本遍历\n"
+                f"- R-MEM: 全盘数据 / 海量日志全量加载内存 / 大对象频繁创建无释放 → 流式读写 / 缩小生命周期\n"
+                f"- R-LOCK: 多线程 / 多进程并发操作 SSD 无锁 / 异常崩溃锁长期持有 → 文件锁 / finally 释放\n"
+                f"- R-DEP: 三方依赖无版本锁定 / 强绑系统命令无多系统兜底 → 固化版本 + 可用性检测\n"
+                f"- R-STATE: 下发 NVMe 指令 / 磁盘读写前未校验设备在位 / 健康 / 固件就绪 → 前置校验 + 异常终止\n"
+                f"- R-DATA: SSD 载荷 / LBA / 扇区长度裸透传无值域 / 对齐 / 长度校验 → 报文前置合法性校验\n"
+                f"- R-CLEAN: 用例异常残留挂载点 / 裸盘占用 / 临时镜像 / 垃圾堆积 → 统一后置清理 + 兜底回收\n\n"
+                f"### 兜底: 野生问题 (不在上面 19 条 R-XXX 内但有价值的)\n"
+                f"仅当 high severity (潜在 bug / 安全隐患) 才强制产 suggestion, rationale 以 `R-OTHER:<简短描述>` 开头, 例:\n"
+                f"- `R-OTHER:magic_number` 硬编码魔法数 (端口/超时/重试等)\n"
+                f"- `R-OTHER:typo` 标识符 / 注释拼写错误\n"
+                f"- `R-OTHER:dead_code` diff 引入后立即未使用\n"
+                f"- `R-OTHER:naming_inconsistency` 与同模块命名风格不一致\n"
+                f"- `R-OTHER:duplicated_definition` 与已有常量 / 函数重复\n"
+                f"- `R-OTHER:stale_comment` 注释与代码实际行为已不一致\n"
+                f"rationale 末尾加一句 '未命中 R-XXX 19 类, 原因: ...', 真的没找到就空着, 不要硬编.\n\n"
                 f"命中不要求必给 suggestion, 只在能直接 Apply 时才给 (无法 Apply → summary_md 文字描述).\n\n"
             )
 
-        # Python 端预先用 rg 找 cross-file caller 引用, 渲染成 prompt 段
+        # Python 端预先用 rg 找 cross-file caller 引用, 渲染成 prompt 段 (放在规则清单前 — 跨文件影响类问题不要求命中 R-XXX)
         cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
         cross_file_section = self._render_cross_file_section(cross_file_refs)
 
         return (
-            f"{rules_block}"
             f"{cross_file_section}"
+            f"{rules_block}"
             f"## 本次检视文件: `{file_path}`\n\n"
             f"### diff\n```diff\n{file_diff}\n```\n\n"
             f"{source_block}\n\n"
@@ -764,7 +795,11 @@ class ImproveCommand(BaseCommand):
                         existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
                         # === 跨次去重: file+line+existing_code 的指纹 ===
                         import hashlib as _hl
-                        rule_keys = (raw.get("rule_keys") if isinstance(raw, dict) else None) or []
+                        # LLM 不输出 rule_keys 字段 → 从 rationale 文本里抽 R-XXX / R-OTHER / SSD-RULE-* 前缀
+                        _rationale = (normalised.get("rationale") or "") if isinstance(normalised, dict) else ""
+                        _rk = re.findall(r"(?:^|[^A-Z0-9-])(R-OTHER-IMPACT:[a-z0-9_]+|R-OTHER:[a-z0-9_]+|R-[A-Z]+(?:-[A-Z0-9_]+)*|SSD-RULE-[A-Z0-9-]+)", _rationale)
+                        _rk = list(dict.fromkeys(_rk))  # 去重保序
+                        rule_keys = (raw.get("rule_keys") if isinstance(raw, dict) else None) or _rk
                         fingerprint = _hl.sha256(
                             (existing or "").strip().encode("utf-8")
                         ).hexdigest()[:24]
@@ -989,9 +1024,9 @@ class ImproveCommand(BaseCommand):
         # severity (0~35)
         sev_map = {"critical": 35, "high": 30, "medium": 20, "low": 10}
         score += sev_map.get((s.get("severity") or "medium").lower(), 20)
-        # label (0~30)
+        # label (0~30) — cross-file impact 与 potential bug 同级, 体现 P1 优先级
         label_map = {
-            "security": 30, "potential bug": 25, "performance": 20,
+            "security": 30, "potential bug": 25, "cross-file impact": 25, "performance": 20,
             "enhancement": 15, "code quality": 12, "style": 5,
         }
         score += label_map.get((s.get("label") or "").lower(), 10)
