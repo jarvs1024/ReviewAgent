@@ -602,13 +602,13 @@ class Store:
         """列出该 MR 全部 state=open 的 suggestions (给 auto_detect_applied 用).
 
         Returns: list of dict with note_id, file_path, target_line,
-        target_line_end, existing_code, head_sha.
+        target_line_end, existing_code, improved_code, head_sha.
         """
         with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT note_id, file_path, target_line, target_line_end,
-                       existing_code, head_sha
+                       existing_code, improved_code, head_sha
                 FROM suggestions
                 WHERE project_id=? AND mr_iid=? AND state='open'
                 ORDER BY id

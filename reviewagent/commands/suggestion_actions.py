@@ -118,6 +118,80 @@ def _target_region_changed(
     return _norm(target_lines_posted) != _norm(target_lines_current)
 
 
+# Fallback: token-level 采纳判定. 当 strip 严格比对失败时使用.
+# 适用: 用户改了格式/空白, 或用了等效写法 (如 if x is None vs if not x),
+# 但引入的关键标识符仍在目标行附近出现. 这种"采纳"严格文本比对看不出来.
+_KEYWORDS = {
+    "if", "else", "elif", "for", "while", "return", "def", "class",
+    "import", "from", "as", "with", "try", "except", "finally",
+    "raise", "pass", "in", "is", "not", "and", "or",
+    "True", "False", "None", "lambda", "yield", "global", "nonlocal",
+    "assert", "del", "break", "continue", "self", "cls",
+}
+
+
+def _extract_identifiers(code: str) -> set[str]:
+    """从代码中提取标识符, 排除 Python 关键字."""
+    if not code:
+        return set()
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code)) - _KEYWORDS
+
+
+def _token_adoption_match(
+    posted_content: str,
+    current_content: str,
+    *,
+    line: int,
+    line_end: int,
+    improved_code: str,
+    existing_code: str | None = None,
+    context_lines: int = 5,
+    threshold: float = 0.5,
+) -> bool:
+    """Fallback: improved_code 引入的"新 token"在 current 文件目标行 ±context_lines 范围内
+    出现比例 >= threshold → 算采纳.
+
+    Why: 严格 strip 比对会漏掉"用户改了格式但语义一致"或"等效写法"的情况.
+    用 token 重叠 + 位置限定 (目标行附近) 兜底.
+
+    Token 选择: improved 引入的"新 token" (排除 existing_code 已有的 + 关键字),
+    避免像 'open' / 'path' / 'read' 这种原本就有的 token 误判.
+
+    例子:
+      existing: "open(path).read()"
+      improved: "with open(path) as f:\n    return f.read()"
+      引入新 token: 只看 improved 中存在但 existing 没有的标识符, 例如 {"with", "fp"} 或 "f"
+      (实际 with 被 keywords 排除, 只剩 "f" — 这就是新变量)
+      current 目标行 ±5 行内出现 "f" (作为新变量引用) → 算采纳
+
+    Returns: True 表示 fallback 判定为采纳.
+    """
+    if not improved_code or not current_content:
+        return False
+    improved_tokens = _extract_identifiers(improved_code)
+    if not improved_tokens:
+        return False
+    # 排除 existing_code 已有的 token, 只关注"建议新引入"
+    if existing_code:
+        existing_tokens = _extract_identifiers(existing_code)
+        new_tokens = improved_tokens - existing_tokens
+    else:
+        new_tokens = improved_tokens
+    if not new_tokens:
+        return False
+    current_lines = current_content.splitlines()
+    if line_end < line:
+        line_end = line
+    lo = max(0, line - 1 - context_lines)
+    hi = min(len(current_lines), line_end + context_lines)
+    if lo >= hi:
+        return False
+    window = "\n".join(current_lines[lo:hi])
+    window_tokens = _extract_identifiers(window)
+    hit = len(new_tokens & window_tokens)
+    return hit / len(new_tokens) >= threshold
+
+
 # ---------- handlers ----------
 def process_dismiss(
     *,
@@ -347,6 +421,17 @@ def process_adopt(
         line=target_line, line_end=target_line_end,
         context_lines=2,
     )
+    # Fallback: 严格 strip 比对失败时, 用 token 重叠判定"用户改了格式但语义一致"
+    # 的情况. 例如建议加 `with open(...) as f:`, 用户写了等效写法.
+    if not changed:
+        sug_improved = (sug.get("improved_code") or "").strip()
+        if sug_improved:
+            changed = _token_adoption_match(
+                posted_content, current_content,
+                line=target_line, line_end=target_line_end,
+                improved_code=sug_improved,
+                existing_code=(sug.get("existing_code") or "").strip() or None,
+            )
 
     if not changed:
         reply = (
@@ -601,6 +686,31 @@ def auto_detect_applied(
                 note_id[:8], file_path, e,
             )
             continue
+
+        # Fallback: 严格 strip 比对失败时, 用 token 重叠判定.
+        # 适用: 用户改了格式/空白/或用等效写法但引入的关键标识符仍在目标行附近.
+        if not changed:
+            sug_improved = (sug.get("improved_code") or "").strip()
+            if sug_improved:
+                try:
+                    changed = _token_adoption_match(
+                        posted_content if posted_content is not None else existing_code,
+                        current_content,
+                        line=target_line,
+                        line_end=target_line_end,
+                        improved_code=sug_improved,
+                        existing_code=existing_code or None,
+                    )
+                    if changed:
+                        logger.info(
+                            "auto_detect_applied token_fallback note={} file={} line={}",
+                            note_id[:8], file_path, target_line,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "auto_detect_applied token_fallback failed note={} err={}",
+                        note_id[:8], e,
+                    )
 
         if not changed:
             result["unchanged"] += 1

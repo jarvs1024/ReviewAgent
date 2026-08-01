@@ -324,3 +324,51 @@ def test_adopt_skipped_state_applied_replies_and_audits(tmp_telemetry):
     assert rows[0][2] == "fix"
     # 4. enqueue_improve 被调用
     assert mock_enqueue.called
+
+
+def test_token_adoption_match_detects_with_block_change():
+    """回归: 严格 strip 比对漏判的"格式不同但语义一致"场景, token fallback
+    必须识别. 例: 建议 `with open(...) as f: f.read()`, 用户用了 with block
+    (但变量名 f → fp, 多了一个变量引入), token 'fp' 出现在目标行附近.
+    """
+    from reviewagent.commands.suggestion_actions import _token_adoption_match
+
+    posted = "def f():\n    return open(path).read()\n"
+    # 用户用 with block 但变量名不同
+    current = "def f():\n    with open(path) as fp:\n        return fp.read()\n"
+    existing = "return open(path).read()"
+    # 引入 token: "with" (keyword, 排除) + "fp" (新变量) → 只剩 {"fp"}
+    # current 目标行 ±5 行内出现 "fp" → 算采纳
+    assert _token_adoption_match(
+        posted, current,
+        line=2, line_end=2,
+        improved_code="with open(path) as fp:\n    return fp.read()",
+        existing_code=existing,
+    )
+
+
+def test_token_adoption_match_rejects_unrelated_change():
+    """反例: 用户改了别的行 (target 行附近没出现 improved 的新 token) → 不算采纳."""
+    from reviewagent.commands.suggestion_actions import _token_adoption_match
+
+    posted = "def f():\n    return open(path).read()\n\ndef g():\n    pass\n"
+    # 用户改了 g 函数, 没动 f
+    current = "def f():\n    return open(path).read()\n\ndef g():\n    return 42\n"
+    existing = "return open(path).read()"
+    # 引入新 token: improved 中减去 existing 已有 = {"with", "as", "fp"} → 排除 keyword
+    # 后 = {"fp"}. 目标行附近没出现 "fp" → 不算采纳
+    assert not _token_adoption_match(
+        posted, current,
+        line=2, line_end=2,
+        improved_code="with open(path) as fp:\n    return fp.read()",
+        existing_code=existing,
+    )
+
+
+def test_token_adoption_match_empty_inputs():
+    """边界: improved_code 为空 / current 为空 → 不算采纳."""
+    from reviewagent.commands.suggestion_actions import _token_adoption_match
+
+    assert not _token_adoption_match("a", "", line=1, line_end=1, improved_code="x")
+    assert not _token_adoption_match("a", "b", line=1, line_end=1, improved_code="")
+    assert not _token_adoption_match("a", "b", line=1, line_end=1, improved_code=None)
