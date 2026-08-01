@@ -172,3 +172,83 @@ def test_post_action_still_skipped_at_line(tmp_telemetry):
     assert result["inline_posted"] == 0
     assert result["inline_skipped"] == 1
     cmd.gitlab.post_mr_discussion.assert_not_called()
+
+
+def test_summary_placeholder_posted_before_inline(tmp_telemetry):
+    """回归: 改进总览 V{N} placeholder 必须在 inline 建议之前发布,
+    这样 GitLab UI 按 created_at 排序时, 本次 run 的总览永远在该 run 的
+    inline 建议之上.
+
+    之前 V{N} 实现把 placeholder 写在循环后, 导致 GitLab UI 上 summary
+    排在 inline 之后, 违反"总览在最上面"的预期.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.telemetry.store import get_store
+
+    head_sha = "feedface" * 5
+    s = get_store()
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 999
+    cmd.gitlab = MagicMock()
+    cmd.gitlab.post_mr_discussion.return_value = "discussion-note-id"
+    cmd.gitlab.post_mr_comment.return_value = 4242
+    cmd.HELP_TEXT_FOOTER = ""
+
+    call_log: list[str] = []
+
+    def _record_post_comment(*args, **kwargs):
+        call_log.append("post_mr_comment")
+        return 4242
+
+    def _record_post_discussion(*args, **kwargs):
+        call_log.append("post_mr_discussion")
+        return "d1"
+
+    def _record_update(*args, **kwargs):
+        call_log.append("update_mr_comment")
+        return True
+
+    cmd.gitlab.post_mr_comment.side_effect = _record_post_comment
+    cmd.gitlab.post_mr_discussion.side_effect = _record_post_discussion
+    cmd.gitlab.update_mr_comment.side_effect = _record_update
+
+    raw = {
+        "file": "tests/test_metrics.py", "line": 11,
+        "header": "h", "label": "l",
+        "rationale": "r", "severity": "medium",
+        "improved_code": "x = 2",
+        "existing_code": "x = 1",
+        "rule_keys": [],
+    }
+    cmd._normalise_suggestion = lambda r: {
+        "file": r["file"], "new_line": r["line"],
+        "header": r["header"], "label": r["label"],
+        "rationale": r["rationale"], "severity": r["severity"],
+        "improved_code": r["improved_code"],
+        "body": "**b**",
+    }
+    cmd._validate_suggestion = lambda **kw: {"action": "post", "new_line": kw["start_line"]}
+    cmd._get_mr_head_sha = lambda: head_sha
+    cmd._diff_line_map = lambda: {}
+    cmd._build_summary_placeholder = lambda *a, **kw: "## 改进总览 V1\n\n_加载中…_"
+    cmd._build_summary_v2 = lambda *a, **kw: "## 改进总览 V1\n\n本次新发现 1 条"
+
+    with patch("reviewagent.telemetry.store.get_store", return_value=s):
+        result = cmd._publish({"summary_md": "", "suggestions": [raw]})
+
+    # 验证: 第一次 post_mr_comment (placeholder) 必须在任何
+    # post_mr_discussion (inline) 之前, edit (update_mr_comment) 在最后.
+    assert result["inline_posted"] == 1
+    assert call_log[0] == "post_mr_comment", (
+        f"placeholder 必须在 inline 之前发布, 实际 call_log={call_log}"
+    )
+    assert "post_mr_discussion" in call_log
+    assert "update_mr_comment" in call_log
+    placeholder_idx = call_log.index("post_mr_comment")
+    inline_idx = call_log.index("post_mr_discussion")
+    edit_idx = call_log.index("update_mr_comment")
+    assert placeholder_idx < inline_idx < edit_idx, (
+        f"顺序应为 placeholder→inline→edit, 实际={call_log}"
+    )

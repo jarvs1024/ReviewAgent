@@ -879,6 +879,21 @@ class ImproveCommand(BaseCommand):
         line_map = self._diff_line_map()
         file_sources: dict[str, list[str]] = {}
 
+        # 0. 顶层 summary placeholder: 必须在 inline 循环之前先发,
+        #    这样 GitLab UI 按 created_at 排序时 summary 永远在该 run 顶部.
+        # Why: 之前 V{N} 实现的 placeholder 创建位置写在循环后, 仍排 inline 之后.
+        #      修复: placeholder 循环前发, edit 留到循环后.
+        top_comment_id: int | None = None
+        try:
+            placeholder_body = self._build_summary_placeholder([], [], len(suggestions))
+            top_comment_id = self.gitlab.post_mr_comment(
+                self.project_id, self.mr_iid, placeholder_body
+            )
+        except GitLabError as e:
+            logger.warning(
+                "improve.post_summary_placeholder_failed (non-fatal) project={} mr={} err={}",
+                self.project_id, self.mr_iid, e,
+            )
         # 1. 每条 suggestion：先校验 new_line + improved_code 对齐
         # 注意: 顶层 summary 不再这里发, 改到循环结束后基于 inline_posted 重新生成.
         # Why: 之前 summary 在循环前基于 agent 给的所有 suggestions 生成, 会包含
@@ -1068,24 +1083,8 @@ class ImproveCommand(BaseCommand):
                 # action == "drop" — 不发任何评论, 仅记 telemetry
                 inline_skipped.append({"suggestion": raw, "reason": decision["reason"]})
 
-        # 3. 顶层 summary: 在循环之前先发 placeholder (保证显示在最顶部),
-        #    循环结束后 edit 为完整内容. 这样 GitLab 上 summary 永远在最顶部.
-        # Why: 用户反馈"之前 summary 都在前面", 之前实现是在循环前发完整 summary.
-        #      现在 V{N} 实现需要在循环后生成 (因为要拿到 inline_posted 数据),
-        #      但仍要保持 GitLab UI 上 summary 在最顶部 → placeholder + edit 模式.
-        top_comment_id: int | None = None
-        placeholder_body = self._build_summary_placeholder(inline_posted, inline_skipped, len(suggestions))
-        try:
-            top_comment_id = self.gitlab.post_mr_comment(
-                self.project_id, self.mr_iid, placeholder_body
-            )
-        except GitLabError as e:
-            logger.warning(
-                "improve.post_summary_placeholder_failed (non-fatal) project={} mr={} err={}",
-                self.project_id, self.mr_iid, e,
-            )
-
-        # 4. edit placeholder 为完整 summary (含实际 inline_posted 列表)
+        # 3. edit placeholder 为完整 summary (含实际 inline_posted 列表).
+        #    placeholder 已在循环前创建 (见顶部 step 0), 此处只更新正文.
         summary_md = self._build_summary_v2(inline_posted, inline_skipped, len(suggestions))
         if top_comment_id and summary_md:
             try:
