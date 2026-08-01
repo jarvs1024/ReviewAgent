@@ -593,6 +593,30 @@ class Store:
             ).fetchone()
             return dict(row) if row else None
 
+    def list_open_suggestions(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+    ) -> list[dict]:
+        """列出该 MR 全部 state=open 的 suggestions (给 auto_detect_applied 用).
+
+        Returns: list of dict with note_id, file_path, target_line,
+        target_line_end, existing_code, head_sha.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT note_id, file_path, target_line, target_line_end,
+                       existing_code, head_sha
+                FROM suggestions
+                WHERE project_id=? AND mr_iid=? AND state='open'
+                ORDER BY id
+                """,
+                (project_id, mr_iid),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def update_suggestion_state(
         self,
         note_id: str,

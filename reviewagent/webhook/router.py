@@ -89,6 +89,30 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)
         return {"status": "skipped", "reason": "cooldown"}
 
+    # 4.5 head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
+    # Why: 用户在 GitLab UI 点 Apply suggestion 后, 代码会变但不会触发
+    #      note 事件, 之前的 /adopt 处理就跑了. 这里在 head_sha 变时
+    #      主动探测所有 open suggestions, 把已被 UI apply 的转 state=applied.
+    if mr.action == "update":
+        try:
+            from reviewagent.commands.suggestion_actions import auto_detect_applied
+            ad_result = auto_detect_applied(
+                project_id=mr.project_id,
+                mr_iid=mr.mr_iid,
+                head_sha=mr.head_sha,
+                actor_username=mr.actor_username or "auto-detect",
+            )
+            if ad_result.get("applied"):
+                logger.info(
+                    "webhook.auto_detect_applied project={} mr={} applied={}",
+                    mr.project_id, mr.mr_iid, ad_result["applied"],
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "webhook.auto_detect_applied failed (non-fatal) project={} mr={}: {}",
+                mr.project_id, mr.mr_iid, e,
+            )
+
     # 5. 入队命令链
     job_ids = enqueue_mr_chain(
         commands=commands,

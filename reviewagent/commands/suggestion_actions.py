@@ -466,3 +466,116 @@ def mark_suggestion_applied_by_diff(
         project_id, mr_iid, file_path, target_line, sug.get("id"), source_note_id,
     )
     return sug.get("id")
+
+
+# ---------- Auto-detect UI-applied suggestions ----------
+
+def auto_detect_applied(
+    *,
+    project_id: int,
+    mr_iid: int,
+    head_sha: str,
+    actor_username: str = "auto-detect",
+) -> dict[str, Any]:
+    """当 head_sha 变化 (push / MR update) 时, 探测哪些 open suggestion
+    已被用户在 GitLab UI "Apply suggestion" 了.
+
+    Returns: {
+        "scanned": int,   # 检查的总条数
+        "applied": int,   # 自动转 state=applied 的条数
+        "unchanged": int, # 目标行未变, 保留 open
+        "errors": int,    # 探测失败 (文件找不到 / 权限等)
+        "applied_note_ids": [str, ...],
+    }
+
+    Why: 之前用户 UI apply 不会触发 webhook note 事件, 导致 telemetry
+    state 永远停留在 open. 现在 MR 每次有 head_sha 变化 (push, UI apply,
+    force-push, merge from web) 都会先跑一次探测, 把已应用的转 applied,
+    再触发后续的 describe+improve (作为二次检视).
+    """
+    gl = GitLabClient()
+    store = get_store()
+
+    open_sugs = store.list_open_suggestions(project_id=project_id, mr_iid=mr_iid)
+    result: dict[str, Any] = {
+        "scanned": len(open_sugs),
+        "applied": 0,
+        "unchanged": 0,
+        "errors": 0,
+        "applied_note_ids": [],
+    }
+    for sug in open_sugs:
+        note_id = sug.get("note_id") or ""
+        file_path = sug.get("file_path") or ""
+        target_line = int(sug.get("target_line") or 0)
+        target_line_end = int(sug.get("target_line_end") or target_line)
+        existing_code = sug.get("existing_code") or ""
+        if not (note_id and file_path and target_line and existing_code):
+            continue
+
+        # 拿当前 head_sha 下的文件内容
+        current_content = gl.get_file_at_sha(project_id, file_path, head_sha)
+        if current_content is None:
+            # 文件可能已被删除 / 移到别的位置
+            result["errors"] += 1
+            logger.info(
+                "auto_detect_applied skip (no file) project={} mr={} note={} file={}",
+                project_id, mr_iid, note_id[:8], file_path,
+            )
+            continue
+
+        # 比对目标行是否被改
+        try:
+            changed = _target_region_changed(
+                existing_code,
+                current_content,
+                line=target_line,
+                line_end=target_line_end,
+            )
+        except Exception as e:  # noqa: BLE001
+            result["errors"] += 1
+            logger.warning(
+                "auto_detect_applied compare failed note={} file={} err={}",
+                note_id[:8], file_path, e,
+            )
+            continue
+
+        if not changed:
+            result["unchanged"] += 1
+            continue
+
+        # 已应用 → resolve + 记录 + 改 state
+        try:
+            gl.resolve_discussion(project_id, mr_iid, note_id)
+        except GitLabError as e:
+            logger.warning("auto_detect_applied resolve failed: {}", e)
+
+        store.update_suggestion_state(
+            note_id, "applied", actor_username=actor_username
+        )
+        store.record_suggestion_action(
+            project_id=project_id,
+            mr_iid=mr_iid,
+            suggestion_note_id=note_id,
+            file_path=file_path,
+            target_line=target_line,
+            action="adopted",
+            actor_username=actor_username,
+            reason="auto-detected: user applied via GitLab UI before reply /adopt",
+            validation_status="ui-apply",
+            head_sha_posted=sug.get("head_sha"),
+            head_sha_current=head_sha,
+        )
+        result["applied"] += 1
+        result["applied_note_ids"].append(note_id)
+        logger.info(
+            "auto_detect_applied project={} mr={} note={} file={} line={}",
+            project_id, mr_iid, note_id[:8], file_path, target_line,
+        )
+
+    if result["applied"]:
+        logger.info(
+            "auto_detect_applied summary project={} mr={} {}",
+            project_id, mr_iid, result,
+        )
+    return result
