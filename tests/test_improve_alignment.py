@@ -475,3 +475,119 @@ def test_fetch_incremental_with_target_sha(tmp_path):
     result = _fetch_incremental(bare, "file:///nonexistent", target_sha="deadbeef" * 5)
     # 不验证结果, 只验证不 crash
     assert result is None
+
+
+# ---------- empty improved_code (delete range) ----------
+
+def test_normalise_suggestion_allows_empty_improved_with_existing():
+    """空 improved_code + 非空 existing_code = 删除整段 (duplicated_definition / dead_code).
+
+    修复: 之前 _normalise_suggestion 直接 raise ValueError, LLM 对 duplicated_definition
+    的建议被全部 skip 掉. 现在允许生成 GitLab suggestion:-0+(N-1) + 空 body = 删除 N 行.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    existing = "def foo():\n    return 1\n"
+    s = {
+        "file": "x.py",
+        "start_line": 10,
+        "existing_code": existing,
+        "improved_code": "",
+        "header": "重复函数",
+        "rationale": "删除 dead code",
+        "label": "code quality",
+        "severity": "high",
+    }
+    out = cmd._normalise_suggestion(s)
+    # body 必须包含 suggestion:-0+(N-1) 标记
+    assert "```suggestion:-0+1\n\n```" in out["body"], f"unexpected body:\n{out['body']!r}"
+    assert out["file"] == "x.py"
+    assert out["new_line"] == 10
+
+
+def test_normalise_suggestion_rejects_empty_both():
+    """improved 和 existing 都为空 → 仍然 raise (防止误删)"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    s = {
+        "file": "x.py",
+        "start_line": 10,
+        "existing_code": "",
+        "improved_code": "",
+        "header": "h",
+        "rationale": "r",
+        "label": "l",
+        "severity": "high",
+    }
+    with pytest.raises(ValueError, match="missing 'improved_code'"):
+        cmd._normalise_suggestion(s)
+
+
+def test_validate_suggestion_empty_improved_passes_through_shrink_check():
+    """空 improved_code + 12 行 existing: 不走 shrink_to_general, 走 post (删除)."""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 0
+    cmd.mr_iid = 0
+
+    # 构造一个临时 git repo + 真实文件
+    import subprocess, tempfile
+    from pathlib import Path
+    tmp = Path(tempfile.mkdtemp())
+    subprocess.run(["git", "init", str(tmp)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp), "config", "user.email", "t@t"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp), "config", "user.name", "t"], check=True, capture_output=True)
+    # 写入文件 (确保 line_map valid 集合包含目标行)
+    target_file = "src.py"
+    lines = ["# header\n"] + [f"x = {i}\n" for i in range(1, 20)] + ["y = 99\n"]
+    (tmp / target_file).write_text("".join(lines))
+
+    # existing 是 line 10-15 (6 行)
+    existing = "".join(lines[9:15])
+    file_lines = lines
+
+    # line_map 让 line 10-15 valid
+    line_map = {target_file: set(range(10, 16))}
+    file_sources = {target_file: [l.rstrip("\n") for l in file_lines]}
+
+    result = cmd._validate_suggestion(
+        file_path=target_file,
+        start_line=10,
+        improved_code="",
+        existing_code=existing,
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    # 必须 post, 不能 general
+    assert result["action"] == "post", f"unexpected action: {result}"
+    assert "delete_range" in result.get("reason", "") or result.get("reason") == "ok"
+
+
+def test_validate_suggestion_shrinks_to_general_for_partial_replacement():
+    """部分替换 (M < N 但 M > 0) 仍然走 shrink_to_general (风险高)."""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 0
+    cmd.mr_iid = 0
+    import subprocess, tempfile
+    from pathlib import Path
+    tmp = Path(tempfile.mkdtemp())
+    target_file = "src.py"
+    lines = ["# header\n"] + [f"x = {i}\n" for i in range(1, 20)] + ["y = 99\n"]
+    (tmp / target_file).write_text("".join(lines))
+
+    # existing 6 行, improved 1 行 (删 5 行的部分收缩)
+    existing = "".join(lines[9:15])
+    line_map = {target_file: set(range(10, 16))}
+    file_sources = {target_file: [l.rstrip("\n") for l in lines]}
+
+    result = cmd._validate_suggestion(
+        file_path=target_file,
+        start_line=10,
+        improved_code="x = 999\n",
+        existing_code=existing,
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    # 应当 general, 不允许 Apply
+    assert result["action"] == "general", f"unexpected action: {result}"

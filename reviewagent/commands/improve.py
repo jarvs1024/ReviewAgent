@@ -1097,8 +1097,11 @@ class ImproveCommand(BaseCommand):
         # N→N 等行数替换: existing_code 已在文件中定位 (actual_line 非 None),
         #   agent 有意改写代码 (e.g. print→logger.info), 第一行不需要匹配.
         # 1→1 且 existing_code 未找到: 仍需校验第一行对齐, 防止模型乱发.
+        # 例外: improved 为空 (删除整段) → 不需要对齐第一行
         is_same_line_count = bool(existing_lines) and len(improved_lines) == len(existing_lines)
-        if not (is_same_line_count and actual_line is not None):
+        if not improved_lines:
+            pass  # 删除场景, 不需要对齐
+        elif not (is_same_line_count and actual_line is not None):
             if not _code_first_line_matches(target_line, imp_first):
                 return {"action": "drop", "new_line": start_line,
                         "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
@@ -1106,7 +1109,16 @@ class ImproveCommand(BaseCommand):
         # 4c. 收缩检查: M < N 时一律降级为普通评论（无 Apply 按钮）
         #     收缩建议移除代码的风险太高 — agent 经常把不该删的行包进 existing_code
         #     导致 Apply 后丢失关键逻辑。降级后用户仍能看到建议文本，但不能一键应用。
-        if len(improved_lines) < len(existing_lines):
+        # 例外: M == 0 且 existing 非空 → 整段删除 (duplicated_definition / dead_code),
+        #     允许多行删除 suggestion 走到 publish 阶段.
+        if len(improved_lines) == 0 and existing_lines:
+            logger.info(
+                "improve.delete_range project={} mr={} file={} "
+                "line={} delete_lines={}",
+                self.project_id, self.mr_iid, file_path,
+                start_line, len(existing_lines),
+            )
+        elif len(improved_lines) < len(existing_lines):
             logger.info(
                 "improve.shrink_to_general project={} mr={} file={} "
                 "line={} existing={} improved={}",
@@ -1189,8 +1201,11 @@ class ImproveCommand(BaseCommand):
             raise ValueError("missing 'start_line' (int > 0)")
         existing = (s.get("existing_code") or "").strip("\n")
         improved = (s.get("improved_code") or "").strip("\n")
-        if not improved:
-            raise ValueError("missing 'improved_code' (non-empty)")
+        # 空 improved_code 表示删除整段 existing (GitLab suggestion:-0+(N-1) + 空 body)
+        # 典型场景: duplicated_definition / dead_code, agent 不知怎么 "删除 N 行"
+        # 要求: existing 必须非空, 否则 raise 防止误删
+        if not improved and not existing:
+            raise ValueError("missing 'improved_code' (non-empty) and empty 'existing_code'")
 
         header = (s.get("header") or "建议改进").strip()
         rationale = (s.get("rationale") or "").strip()
