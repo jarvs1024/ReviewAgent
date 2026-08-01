@@ -310,6 +310,10 @@ def test_adopt_skipped_state_applied_replies_and_audits(tmp_telemetry):
     assert "reimprove_job" in result, f"应触发 re-improve, 实际 {result}"
     # 2. reply_to_discussion 至少调用一次 (给用户反馈)
     assert fake_gl.reply_to_discussion.called, "应给用户 reply, 实际未调用"
+    # 3. resolve_discussion 也必须调用 (用户期望 /adopt 后 thread 自动关闭对勾)
+    assert fake_gl.resolve_discussion.called, (
+        "skip-state 路径应自动 resolve thread, 实际未调用 resolve_discussion"
+    )
     # 3. 用户的 reason 写进 audit
     conn = sqlite3.connect(tmp_telemetry)
     rows = conn.execute(

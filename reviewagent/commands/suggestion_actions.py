@@ -323,6 +323,14 @@ def process_adopt(
         #    (validation_status=already-{state} 区分 auto_detect 的 ui-apply)
         sug_file = sug.get("file_path") or ""
         sug_line = int(sug.get("target_line") or 0)
+        # 0. resolve discussion: /adopt 表示用户已经处理这条建议 (无论是
+        #    state=applied 还是 dismissed), thread 应该自动关闭对勾.
+        #    Why: 之前只 reply 用户但没调 resolve, 用户仍要手动点对勾按钮.
+        #         用户的 /adopt 行为 = "我处理完了", 必须自动 resolve.
+        try:
+            gl.resolve_discussion(project_id, mr_iid, suggestion_note_id)
+        except GitLabError as e:
+            logger.warning("/adopt.resolve_for_skipped_state failed: {}", e)
         store.record_suggestion_action(
             project_id=project_id,
             mr_iid=mr_iid,
