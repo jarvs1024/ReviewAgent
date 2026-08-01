@@ -92,9 +92,11 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 - 优先级: **P1**(与 SSD 自定义规则同级), 不要被 R-XXX / R-OTHER 检查顺序压后
 
 **严格区分 (避免归类混淆)**:
-- `R-OTHER-IMPACT:*` **只用于跨文件影响** — 涉及其他文件 (caller / 引用方 / schema / fixture / import)
+- `R-OTHER-IMPACT:*` **字面意义 = 跨文件** — 必须涉及**其他文件** (caller 在别的文件 / 引用方在别的文件 / schema 在别的文件 / fixture 在别的文件 / import 路径在别的文件)。**diff 范围内只有一个文件, 没法跨文件**
 - **同文件内**的资源泄漏 / 死循环 / 静默吞错 / 文件未关等 → 用 `R-XXX` (R-RES / R-LOOP / R-ERR 等), **不要**错归为 R-OTHER-IMPACT
 - 同文件内的拼写 / 命名 / 死代码 / 重复定义等 → 用 `R-OTHER:*`, **不要**错归为 R-OTHER-IMPACT
+- 判断方法: 你的 suggestion 涉及的代码行**只在本 diff 文件**? → 不用 R-OTHER-IMPACT
+- 反例 (R-OTHER-IMPACT 不应使用): `R-OTHER-IMPACT:file_resource_leak` (这是 R-RES), `R-OTHER-IMPACT:retry_counter` (这是 R-LOOP), `R-OTHER-IMPACT:swallowed_exception` (这是 R-ERR) — 这些都在同文件内, 属于 R-XXX
 
 ### 禁用的"跨文件幻觉"
 
