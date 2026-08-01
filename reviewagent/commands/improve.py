@@ -189,24 +189,13 @@ class ImproveCommand(BaseCommand):
         vl_sorted = sorted(valid_lines)
         vl_str = f"{file_path}: {vl_sorted}"
 
-        # 致命风险清单 + 仓库规则 — 致命优先 (与 system prompt 一致)
+        # 规则直接嵌入 (不依赖 agent read)
         rules_block = ""
         if self.repo_context:
             rules_block = (
-                f"## 🔴 优先 1 — 安全/可靠性致命风险 (高于一切规则)\n\n"
-                f"先扫下面 diff 命中这些反模式 → 立即产 severity=high suggestion:\n\n"
-                f"- 反序列化: pickle.loads / pickle.load / yaml.load 无 Loader\n"
-                f"- 注入 SQL: f-string 拼到 SQL → 参数化 cursor.execute(sql, params)\n"
-                f"- 注入 Shell: subprocess.run(cmd, shell=True) + 字符串拼接 → shell=False + list 形参, 或 shlex.quote\n"
-                f"- 注入 Path: os.path.join(base, user_input) / Path(base) / user_input 不做边界检查\n"
-                f"- 弱哈希: hashlib.md5/sha1 用于密码/token → pbkdf2_hmac / bcrypt / sha256\n"
-                f"- 硬编码凭证: 模块级 *_KEY/TOKEN/PASSWORD = 字面量 → os.environ[\"...\"]\n"
-                f"- 死循环: while True: ... time.sleep(...) 无退出条件 → 加 timeout / max retry\n"
-                f"- 阻塞 IO: requests.get(...) 无 timeout → 显式 timeout= 参数\n"
-                f"- eval: eval/exec/compile on user input → ast.literal_eval\n"
-                f"- 资源未释放: open(p).read() / f = open(p) 无 with → with open(p) as f:\n\n"
-                f"## 优先 2 — 仓库规则 (致命风险之后)\n\n"
-                f"完成致命风险扫描后, 再用下面规则覆盖剩余代码风格 / 规范问题:\n\n"
+                f"## 仓库规则（优先遵循）\n\n"
+                f"以下规则来自仓库 AGENTS.md 和 .agents/rules/，"
+                f"**你的建议必须优先覆盖这些规则**：\n\n"
                 f"{self.repo_context}\n\n"
             )
 
