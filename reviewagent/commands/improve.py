@@ -678,33 +678,13 @@ class ImproveCommand(BaseCommand):
                 line_map=line_map,
                 file_sources=file_sources,
             )
-            if decision["action"] == "post":
-                body_to_post = normalised["body"]
-                nc = decision.get("normalised_code") or normalised["improved_code"]
-                n_lines = len(nc.split("\n"))
-                if nc != normalised["improved_code"]:
-                    logger.info(
-                        "improve.fix_indent project={} mr={} file={} line={}",
-                        self.project_id, self.mr_iid, file_path, decision["new_line"],
-                    )
-                    sev = normalised.get("severity", "medium").upper()
-                    # suggestion:-0+N: +N = N lines AFTER comment line
-                    # 替换 N+1 行 (注释行 + N 行后续行)
-                    # 要替换 len(existing_lines) 行 → N = len - 1
-                    existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
-                    existing_lines = existing.split("\n") if existing else []
-                    n_replace = max(0, len(existing_lines) - 1)
-                    body_to_post = (
-                        f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
-                        f"{normalised['rationale']}\n\n"
-                        f"```suggestion:-0+{n_replace}\n{nc}\n```"
-                        + self.HELP_TEXT_FOOTER
-                    )
-                # === A. 跨次去重 — 两层防御 ===
-                # Layer 1: (file, line, severity) heuristic — 防 LLM 每次 existing_code
-                #          范围不一致导致的 fingerprint 漂移 (同一 bug 被多次发布).
-                # Layer 2: fingerprint (existing_code sha256) — 严格相等, 兜底 layer 1.
-                # 任意一层命中即跳过, 并写 inline_skipped, 最终计入 improve.ok 的 summary.
+            # === A. 跨次去重 — 守卫所有发布动作 (post / general).
+            # Why: 此前 dedup 只在 action == "post" 分支内, 收缩建议
+            #      (action == "general") 走另一条路径直接发评论, 同一行
+            #      在第二轮 improve 时会重复发 [issue: MR155 line 12 x 2].
+            #      把 dedup 提前到 _validate_suggestion 之后, 让所有
+            #      会发到 GitLab 的分支都先查重.
+            if decision["action"] in ("post", "general"):
                 _sev = (normalised.get("severity") or "medium").lower()
                 _head_sha = self._get_mr_head_sha() or ""
                 try:
@@ -740,6 +720,29 @@ class ImproveCommand(BaseCommand):
                         continue
                 except Exception as _e:
                     logger.warning("improve.dedup_check failed (non-fatal): {}", _e)
+
+            if decision["action"] == "post":
+                body_to_post = normalised["body"]
+                nc = decision.get("normalised_code") or normalised["improved_code"]
+                n_lines = len(nc.split("\n"))
+                if nc != normalised["improved_code"]:
+                    logger.info(
+                        "improve.fix_indent project={} mr={} file={} line={}",
+                        self.project_id, self.mr_iid, file_path, decision["new_line"],
+                    )
+                    sev = normalised.get("severity", "medium").upper()
+                    # suggestion:-0+N: +N = N lines AFTER comment line
+                    # 替换 N+1 行 (注释行 + N 行后续行)
+                    # 要替换 len(existing_lines) 行 → N = len - 1
+                    existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                    existing_lines = existing.split("\n") if existing else []
+                    n_replace = max(0, len(existing_lines) - 1)
+                    body_to_post = (
+                        f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
+                        f"{normalised['rationale']}\n\n"
+                        f"```suggestion:-0+{n_replace}\n{nc}\n```"
+                        + self.HELP_TEXT_FOOTER
+                    )
 
                 note_id = self.gitlab.post_mr_discussion(
                     self.project_id,
