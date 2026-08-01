@@ -124,6 +124,20 @@ class GitLabClient:
                     project_id, mr_iid, note.id)
         return note.id
 
+    def update_mr_comment(self, project_id: int, mr_iid: int, note_id: int, body: str) -> bool:
+        """修改 MR 评论内容（PUT /notes/:id）。返回是否成功."""
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            note = mr.notes.get(note_id)
+            note.body = body
+            note.save()
+        except gitlab.exceptions.GitlabError as e:
+            raise GitLabError(f"update_mr_comment failed: {e}") from e
+        logger.info("gitlab.update_comment project={} mr={} note_id={}",
+                    project_id, mr_iid, note_id)
+        return True
+
     # ---------- 行内评论 (Discussion) ----------
     def get_mr_diff_refs(self, project_id: int, mr_iid: int) -> dict[str, str]:
         """拉 MR 的 diff_refs（base_sha / start_sha / head_sha），用于发布行内评论.

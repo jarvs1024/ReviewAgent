@@ -700,3 +700,22 @@ def test_build_summary_v2_version_increments_per_run():
     m = re.search(r"V(\d+)", out)
     assert m, f"未匹配 V{{N}}: {out!r}"
     assert int(m.group(1)) >= 1
+
+
+def test_build_summary_placeholder_contains_version():
+    """placeholder 必须包含 V{N}, 即使还没拿到 inline_posted 数据"""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    out = cmd._build_summary_placeholder(
+        inline_posted=[],
+        inline_skipped=[],
+        total_agent_suggestions=0,
+    )
+    # 必有 V{N} + 加载中
+    import re
+    m = re.search(r"V(\d+)", out)
+    assert m, f"未匹配 V{{N}}: {out!r}"
+    assert "加载中" in out, f"placeholder 应有'加载中'提示: {out!r}"
+    assert out.startswith("## 改进总览")

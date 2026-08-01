@@ -767,6 +767,31 @@ class ImproveCommand(BaseCommand):
             f"{files_text}\n"
         )
 
+    def _build_summary_placeholder(
+        self,
+        inline_posted: list[dict[str, Any]],
+        inline_skipped: list[dict[str, Any]],
+        total_agent_suggestions: int,
+    ) -> str:
+        """生成 summary placeholder (在 inline 循环之前先发, 拿到 note_id 后 edit 为完整内容).
+
+        placeholder 包含版本号 V{N} 让用户在看到第一条 inline 之前就知道这是第几次检视.
+        内容会在循环结束后被 edit 为 _build_summary_v2 的完整输出.
+        """
+        try:
+            from reviewagent.telemetry.store import get_store
+            store = get_store()
+            runs = store.list_runs(
+                project_id=self.project_id,
+                mr_iid=self.mr_iid,
+                command="improve",
+                limit=1000,
+            )
+            version = len(runs)
+        except Exception:
+            version = 1
+        return f"## 改进总览 V{version}\n\n_加载中…_"
+
     def _build_summary_v2(
         self,
         inline_posted: list[dict[str, Any]],
@@ -1043,18 +1068,33 @@ class ImproveCommand(BaseCommand):
                 # action == "drop" — 不发任何评论, 仅记 telemetry
                 inline_skipped.append({"suggestion": raw, "reason": decision["reason"]})
 
-        # 3. 顶层 summary: 在所有 inline 决策完成后生成, 只展示本次新发布的.
-        #    标题带 V{N} 版本号 (该 MR 第几次 improve 触发).
+        # 3. 顶层 summary: 在循环之前先发 placeholder (保证显示在最顶部),
+        #    循环结束后 edit 为完整内容. 这样 GitLab 上 summary 永远在最顶部.
+        # Why: 用户反馈"之前 summary 都在前面", 之前实现是在循环前发完整 summary.
+        #      现在 V{N} 实现需要在循环后生成 (因为要拿到 inline_posted 数据),
+        #      但仍要保持 GitLab UI 上 summary 在最顶部 → placeholder + edit 模式.
         top_comment_id: int | None = None
+        placeholder_body = self._build_summary_placeholder(inline_posted, inline_skipped, len(suggestions))
+        try:
+            top_comment_id = self.gitlab.post_mr_comment(
+                self.project_id, self.mr_iid, placeholder_body
+            )
+        except GitLabError as e:
+            logger.warning(
+                "improve.post_summary_placeholder_failed (non-fatal) project={} mr={} err={}",
+                self.project_id, self.mr_iid, e,
+            )
+
+        # 4. edit placeholder 为完整 summary (含实际 inline_posted 列表)
         summary_md = self._build_summary_v2(inline_posted, inline_skipped, len(suggestions))
-        if summary_md:
+        if top_comment_id and summary_md:
             try:
-                top_comment_id = self.gitlab.post_mr_comment(
-                    self.project_id, self.mr_iid, summary_md
+                self.gitlab.update_mr_comment(
+                    self.project_id, self.mr_iid, top_comment_id, summary_md
                 )
             except GitLabError as e:
                 logger.warning(
-                    "improve.post_summary_failed (non-fatal) project={} mr={} err={}",
+                    "improve.update_summary_failed (non-fatal) project={} mr={} err={}",
                     self.project_id, self.mr_iid, e,
                 )
 
