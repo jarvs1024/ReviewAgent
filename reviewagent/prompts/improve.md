@@ -51,21 +51,30 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 ### 🟡 优先 2 — 通用规则 (针对常规代码 + 测试代码问题)
 
 完成 SSD 规则扫描后，**再**用以下通用规则清单覆盖剩余问题。规则键以 `R-` 开头，便于在 `rationale` 中引用。
-**通用规则清单（共 11 条）**：
+**通用规则清单（共 19 条，按检视顺序排列）**：
 
 | 键 | 类别 | 反模式 | 修复方向 |
 |---|---|---|---|
-| `R-REPRO` | 可重复性 | `time.time()` / `datetime.now()` 出现在测试函数或计时上下文 | 改 `time.perf_counter()` / mock |
-| `R-RES` | 资源句柄 | `open(...)` / `serial.Serial()` / `socket.socket()` / `subprocess.Popen()` / `fcntl.ioctl(fd, ...)` 创建后无 `with` 或 close/wait | 资源全部用 `with` 或显式 try/finally close |
-| `R-TIME` | 时序与超时 | `time.sleep(N)` 写死在测试主路径 / 阻塞 IO (`subprocess.run` / `requests.get` / `socket.recv`) 缺 `timeout=` / `while True: time.sleep(1)` 忙循环无 max_retry 或 deadline | 改 poll-with-timeout / 加显式 `timeout=` / 设 max_retry |
-| `R-ASSERT` | 断言强度 | `assert x == y` 缺 `msg=` / `assertTrue(is_valid)` 不打实际值 / `assertEqual(actual, expected)` 顺序反 / `assertEqual(x, None)` 而非 `assertIsNone` / 测试函数体无任何 `assert` (silent test) | 加 msg / 用 assertIs / expected 在前 / silent test 必加断言 |
-| `R-FIX` | fixture 隔离 | `setUp`/`setup_method` 无对应 `tearDown` / 测试中 `open('/tmp/x')` 不用 `tmp_path` fixture / 临时资源缺 `try/finally` 兜底 | 配对 teardown / 用 `tmp_path` / `try/finally` 保证清理 |
-| `R-SKIP` | 跳过与平台 | `@unittest.skipIf(...)` / `@pytest.mark.skipif(...)` 缺 `reason=` / 平台判断写死无 fallback / 假设 root/特定 kernel/设备路径无 try | 加 `reason=` / 提供 fallback / try 兜底 |
-| `R-ERR` | 错误处理 | `except: pass` / `except Exception: pass` 静默吞错 / `traceback.print_exc()` 替代 logger | 捕获具体异常 + logger.exception / 至少记录 |
-| `R-LOG` | 日志可观测 | `print(...)` 出现在非 `__main__` 的模块级 / 函数级代码 (替代 logger) / 测试失败不 dump 设备上下文 (`dmesg`/`smartctl -a`/`nvme list`) | 改 `logger.*` / 失败时 dump 状态 |
-| `R-CI` | CI 并行 | 多个 test 共写同一路径 (`/tmp/foo`/`~/test_data`) → 并行 race / 需独占设备的测试缺 `@pytest.mark.serial` 或 file lock | 改用 `tmp_path` 或 PID 后缀 / 加 serial 标记或 lock |
-| `R-NVME` | 固件协议 | NVMe / SCSI `struct.pack` format 字符串字节序错 (`<I` vs `>I`) / opcode / 关键常量硬编码 (无命名常量) / buffer length 跟 device sector size (512/4096) 不匹配 / 命令超时未发 RESPONSE abort 或设备 reset | 用 `nvme.NVME_OPC_*` 命名常量 / 对齐 `struct.pack` 字节序 / 匹配 sector size / 超时后走 abort 流程 |
-| `R-PERF` | 精确测量 | 测短操作 (< 1ms) 用 `time.time()` 而非 `time.perf_counter()` / 测量区间过大 (含 setup/print) | 改 `time.perf_counter()` / 收紧区间 |
+| `R-REPRO` | 可重复性 | `time.time()` / `datetime.now()` 写死在测试函数、计时逻辑中，导致用例无法稳定重放 | 计时统计改用 `time.perf_counter()`；系统时间点使用 mock 隔离 |
+| `R-RES` | 资源句柄 | `open` / `serial` / `socket` / `subprocess.Popen` / `fcntl` 句柄创建后无 `with` / `close`；Popen 未 wait 产生僵尸进程；异常路径句柄泄漏 | 文件、串口、套接字优先 `with` 托管；非托管资源用 `try-finally` 强制关闭，子进程必须等待回收 |
+| `R-TIME` | 时序与单次超时 | `sleep` 阻塞主流程、同步 IO 未设置 timeout；`while` 循环忙等待无最大等待时长 | IO 请求强制配置 timeout；阻塞等待改用轮询 + 超时阈值，禁止长 sleep 卡死进程 |
+| `R-ASSERT` | 断言强度 | `assert` 缺少错误描述 `msg`；`actual` / `expected` 参数顺序颠倒；使用无信息的静默断言 | 断言补充报错信息；统一入参顺序；关键测试结果禁止无文案静默断言 |
+| `R-FIX` | fixture 隔离 | `setup` 无配对 `teardown`；临时文件 / 硬件资源无兜底清理逻辑 | 测试前置资源必须配置后置回收；临时资源使用专用临时路径兜底释放 |
+| `R-SKIP` | 跳过与平台适配 | `skip` 标记缺少 `reason` 说明；平台路径、root 权限硬编码无降级兜底 | 所有 `skip` 填写原因；系统、设备路径增加存在性判断，配置降级兜底逻辑 |
+| `R-ERR` | 错误处理 | 裸 `except` / `Exception` 静默吞异常；仅打印异常不记录堆栈；吞错不更新测试状态 | 捕获指定细分异常，使用 `logger.exception` 记录全堆栈；异常同步标记用例失败；致命硬件异常向上抛出 |
+| `R-LOG` | 日志可观测 | 模块 / 函数内使用 `print` 打印信息；测试失败不导出盘状态日志 (`dmesg` / `smartctl -a` / `nvme list`) | 业务代码全部替换为分级 `logger`；用例失败自动采集磁盘硬件上下文日志留存 |
+| `R-CI` | CI 并行 | 多用例共用同一临时路径 / 硬件设备，无隔离；独占 SSD 测试未添加串行标记 | 临时目录拼接 PID / 用例 ID 隔离；独占硬件测试添加串行标记或文件锁隔离资源争抢 |
+| `R-NVME` | 固件协议 | 结构体打包字节序错误、buffer 长度不匹配、扇区大小硬编码；指令超时无 abort / 设备复位 | 统一字节序对齐配置常量；扇区参数使用设备实际查询值；指令超时执行 abort 与硬件复位流程 |
+| `R-PERF` | 精确测量 | 微秒级耗时测量使用 `time.time`，计时精度不足；测量区间包含 setup、打印等无关耗时 | 高精度测量固定使用 `perf_counter`，精简计时区间，剔除无关冗余耗时代码 |
+| `R-CONST` | 配置常量校验 | 超时、重试、固件地址、服务地址等字面量硬编码；配置读取不校验字段存在、类型、值域 | 统一收拢至配置 / 常量文件；读取配置强制多层校验，非法配置直接终止程序 |
+| `R-SHELL` | Shell 执行安全 | `subprocess` 通过 f-string 拼接外部参数拼装命令，直接透传设备原始入参 | 命令固定使用 `args` 列表传参；外部输入增加白名单过滤，杜绝命令注入风险 |
+| `R-LOOP` | 循环熔断管控 | 无限 `while` 无 `max_retry`、无整体截止 deadline；遍历列表 / 字典时原地修改容器数据 | 所有重试循环配置最大次数 + 全局截止超时；遍历修改数据操作副本，不改动原容器 |
+| `R-MEM` | 内存与大批量 IO | 全盘数据、海量日志一次性全量加载进内存；循环频繁创建大对象无生命周期释放 | 大文件采用分片流式读写；缩小大对象生命周期；测试临时缓存配置过期自动清理 |
+| `R-LOCK` | 硬件资源互斥 | 多线程 / 多进程并发操作同一块 SSD 无锁控制；异常崩溃后硬件锁长期持有不释放 | 独占硬件操作增加进程 / 文件锁；正常、异常分支统一在 `finally` 执行解锁与硬件释放 |
+| `R-DEP` | 依赖 & 环境兼容 | 三方依赖无版本锁定、存在冗余无效包；强绑定系统独有命令，无多系统兼容兜底 | 固化依赖版本清单；调用系统指令先做可用性检测，配置多系统兼容降级逻辑 |
+| `R-STATE` | 设备前置状态校验 | 下发 NVMe 指令、磁盘读写前，未校验磁盘在位、健康、固件就绪状态 | 所有硬件操作前置校验设备在线与健康状态；异常设备直接终止当前测试步骤并告警 |
+| `R-DATA` | 原始报文校验 | 下发 SSD 载荷、LBA 地址、扇区长度等数据不做值域、对齐、长度校验，裸透传原始数据 | 硬件交互报文前置合法性校验，拦截非法参数下发，规避 SSD 固件异常 |
+| `R-CLEAN` | 测试现场清理 | 用例异常崩溃残留挂载点、裸盘占用、临时镜像文件，多轮测试磁盘垃圾堆积 | 所有用例配置统一后置清理逻辑，挂载、镜像、磁盘占用无论成败全部兜底回收 |
 
 **通用规则使用方式**：
 - 每命中一条 → 产一条 suggestion，`rationale` 字段以 `R-XXX` 开头引用规则键
