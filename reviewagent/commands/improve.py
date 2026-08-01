@@ -189,14 +189,27 @@ class ImproveCommand(BaseCommand):
         vl_sorted = sorted(valid_lines)
         vl_str = f"{file_path}: {vl_sorted}"
 
-        # 规则直接嵌入 (不依赖 agent read)
+        # 通用规则清单 + 仓库规则 — 与 system prompt 保持一致
         rules_block = ""
         if self.repo_context:
             rules_block = (
-                f"## 仓库规则（优先遵循）\n\n"
-                f"以下规则来自仓库 AGENTS.md 和 .agents/rules/，"
-                f"**你的建议必须优先覆盖这些规则**：\n\n"
+                f"## 🔴 优先 1 — SSD 自定义规则 (项目方定义, 最高优先级)\n\n"
+                f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
                 f"{self.repo_context}\n\n"
+                f"## 🟡 优先 2 — 通用规则 (常规代码 + 测试代码问题, 共 11 条)\n\n"
+                f"完成 SSD 规则扫描后, 再用以下通用规则覆盖剩余问题, rationale 以 R-XXX 开头:\n\n"
+                f"- R-REPRO: time.time()/datetime.now() 在测试函数 → time.perf_counter()/mock\n"
+                f"- R-RES: open/serial/socket/Popen/ioctl 创建后无 with 或 close/wait → 资源用 with 或 try/finally close\n"
+                f"- R-TIME: time.sleep(N) 写死 / 阻塞 IO 缺 timeout= / while True 忙循环无 max_retry → poll-with-timeout / 加 timeout= / 设 max_retry\n"
+                f"- R-ASSERT: assert 缺 msg / 顺序反 / assertEqual(x, None) / silent test (无 assert) → 加 msg / assertIs / 必加 assert\n"
+                f"- R-FIX: setUp 无 tearDown / open(/tmp/x) 不用 tmp_path / 临时资源无 try/finally → 配对 teardown / 用 tmp_path / try/finally 兜底\n"
+                f"- R-SKIP: @skipIf 缺 reason= / 平台判断写死 / 假设 root 或设备路径无 try → 加 reason / fallback / try 兜底\n"
+                f"- R-ERR: except: pass 静默吞错 / traceback.print_exc() 替代 logger → 捕获具体异常 + logger.exception\n"
+                f"- R-LOG: print() 替代 logger / 测试失败不 dump 设备上下文 (dmesg/smartctl/nvme list) → 改 logger.* / 失败时 dump 状态\n"
+                f"- R-CI: 多 test 共写同一路径 (race) / 需独占设备无 @pytest.mark.serial 或 lock → tmp_path + PID 后缀 / 加 serial 标记或 lock\n"
+                f"- R-NVME: NVMe/SCSI struct.pack 字节序错 (<I vs >I) / opcode 硬编码 / buffer length 跟 sector size 不匹配 / 超时未 RESPONSE abort → 命名常量 / 对齐字节序 / 匹配 sector / 超时 abort\n"
+                f"- R-PERF: 短操作 (< 1ms) 用 time.time() 而非 time.perf_counter() / 测量区间过大 → 改 perf_counter / 收紧区间\n\n"
+                f"命中不要求必给 suggestion, 只在能直接 Apply 时才给 (无法 Apply → summary_md 文字描述).\n\n"
             )
 
         return (

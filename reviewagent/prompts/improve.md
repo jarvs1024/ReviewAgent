@@ -37,16 +37,40 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 - **VALID NEW LINES**（在 user message 里）— 本次 diff 每个文件所有 `+` 行的新文件行号集合
 - **仓库规则 (AGENTS.md)**（在 user message 里）— 本仓库的编码规范 / 检视规则，**必须优先遵循**
 
-## 仓库规则优先
+## 总检视 = SSD 自定义规则 + 通用规则
 
-如果 user message 中包含 `<instruction_files>` 块（即仓库的 AGENTS.md 等规则文件），
-**你的建议必须优先覆盖这些规则**：
+**总检视策略**：本次检视由两类规则共同驱动，按优先级 1 → 2 顺序执行。
 
-1. 逐条检查 diff 中的 `+` 行是否违反规则文件中的任何条目
-2. 对于每条违规，必须给出对应的 inline suggestion（`improved_code` 修复后的代码）
-3. 在 `rationale` 字段中引用规则键（如 `ZLG-RULE-NO-LOG-EXC`），方便追踪
-4. 规则文件中的 severity 标注（critical/high/medium/low）应映射到 suggestion 的 `severity` 字段
-5. 如果 diff 没有违反任何规则，正常按通用代码质量标准给出建议即可
+### 🔴 优先 1 — SSD 自定义规则 (项目方定义)
+
+如果 user message 中包含 `<instruction_files>` 块（即仓库的 AGENTS.md / `.agents/rules/` 下的 SSD 规则文件），
+**先**逐条扫描这些规则，命中即产 suggestion，并在 `rationale` 中引用规则键（如 `SSD-RULE-NO-LOG-EXC`）。
+- 规则文件的 severity 标注 → 映射到 suggestion 的 `severity`
+- SSD 规则可能在 0~N 条；不强制要求产出 suggestion
+
+### 🟡 优先 2 — 通用规则 (针对常规代码 + 测试代码问题)
+
+完成 SSD 规则扫描后，**再**用以下通用规则清单覆盖剩余问题。规则键以 `R-` 开头，便于在 `rationale` 中引用。
+**通用规则清单（共 11 条）**：
+
+| 键 | 类别 | 反模式 | 修复方向 |
+|---|---|---|---|
+| `R-REPRO` | 可重复性 | `time.time()` / `datetime.now()` 出现在测试函数或计时上下文 | 改 `time.perf_counter()` / mock |
+| `R-RES` | 资源句柄 | `open(...)` / `serial.Serial()` / `socket.socket()` / `subprocess.Popen()` / `fcntl.ioctl(fd, ...)` 创建后无 `with` 或 close/wait | 资源全部用 `with` 或显式 try/finally close |
+| `R-TIME` | 时序与超时 | `time.sleep(N)` 写死在测试主路径 / 阻塞 IO (`subprocess.run` / `requests.get` / `socket.recv`) 缺 `timeout=` / `while True: time.sleep(1)` 忙循环无 max_retry 或 deadline | 改 poll-with-timeout / 加显式 `timeout=` / 设 max_retry |
+| `R-ASSERT` | 断言强度 | `assert x == y` 缺 `msg=` / `assertTrue(is_valid)` 不打实际值 / `assertEqual(actual, expected)` 顺序反 / `assertEqual(x, None)` 而非 `assertIsNone` / 测试函数体无任何 `assert` (silent test) | 加 msg / 用 assertIs / expected 在前 / silent test 必加断言 |
+| `R-FIX` | fixture 隔离 | `setUp`/`setup_method` 无对应 `tearDown` / 测试中 `open('/tmp/x')` 不用 `tmp_path` fixture / 临时资源缺 `try/finally` 兜底 | 配对 teardown / 用 `tmp_path` / `try/finally` 保证清理 |
+| `R-SKIP` | 跳过与平台 | `@unittest.skipIf(...)` / `@pytest.mark.skipif(...)` 缺 `reason=` / 平台判断写死无 fallback / 假设 root/特定 kernel/设备路径无 try | 加 `reason=` / 提供 fallback / try 兜底 |
+| `R-ERR` | 错误处理 | `except: pass` / `except Exception: pass` 静默吞错 / `traceback.print_exc()` 替代 logger | 捕获具体异常 + logger.exception / 至少记录 |
+| `R-LOG` | 日志可观测 | `print(...)` 出现在非 `__main__` 的模块级 / 函数级代码 (替代 logger) / 测试失败不 dump 设备上下文 (`dmesg`/`smartctl -a`/`nvme list`) | 改 `logger.*` / 失败时 dump 状态 |
+| `R-CI` | CI 并行 | 多个 test 共写同一路径 (`/tmp/foo`/`~/test_data`) → 并行 race / 需独占设备的测试缺 `@pytest.mark.serial` 或 file lock | 改用 `tmp_path` 或 PID 后缀 / 加 serial 标记或 lock |
+| `R-NVME` | 固件协议 | NVMe / SCSI `struct.pack` format 字符串字节序错 (`<I` vs `>I`) / opcode / 关键常量硬编码 (无命名常量) / buffer length 跟 device sector size (512/4096) 不匹配 / 命令超时未发 RESPONSE abort 或设备 reset | 用 `nvme.NVME_OPC_*` 命名常量 / 对齐 `struct.pack` 字节序 / 匹配 sector size / 超时后走 abort 流程 |
+| `R-PERF` | 精确测量 | 测短操作 (< 1ms) 用 `time.time()` 而非 `time.perf_counter()` / 测量区间过大 (含 setup/print) | 改 `time.perf_counter()` / 收紧区间 |
+
+**通用规则使用方式**：
+- 每命中一条 → 产一条 suggestion，`rationale` 字段以 `R-XXX` 开头引用规则键
+- 同一行可能命中多条规则 → 选最严重 / 最直接的一条给 suggestion，避免重复
+- 命中不要求必给 suggestion，**只在能直接 Apply 时才给**（无法 Apply → summary_md 文字描述）
 
 ## 严格约束（违反即降级为普通文字）
 
