@@ -479,8 +479,9 @@ class Store:
         target_line: int,
         severity: str = "",  # 保留参数仅为向后兼容, 当前实现不再按 severity 过滤
         head_sha: str = "",
+        line_tolerance: int = 0,
     ) -> bool:
-        """跨次去重 (heuristic): 同 (file, line[, head_sha]) 已发布则返回 True.
+        """跨次去重 (heuristic): 同 (file, line[±tolerance][, head_sha]) 已发布则返回 True.
 
         Why: LLM 每次返回的 existing_code 范围不一致 (有时 1 行签名, 有时
         整段函数体), 同一 bug 在不同次 improve 跑出来的 fingerprint 不一样,
@@ -494,31 +495,38 @@ class Store:
         bot 重新发现这些 bug. 调用方传 head_sha='' 时退回旧的 (file, line)
         兜底行为.
 
+        line_tolerance 维度 (默认 2): LLM 跨次 improve 容易出现 ±1~3 行的
+        position 漂移 (行号指 def 行而非真实出错行 / 数错 @@ 偏移). 加 ±N
+        行容差后, 同一 head 下 (file, line±N) 已检视过则视为重复 — 比强制
+        LLM 给精确行号更可靠. 设为 0 = 严格相等.
+
         - 状态过滤: 任何状态都视为"已存在" — dismissed 也算, 用户已经明确
           拒绝过这条建议, 不应该重复推送骚扰.
         """
         del severity  # 静默未使用, 保持向后兼容的调用签名
+        lo = target_line - max(0, line_tolerance)
+        hi = target_line + max(0, line_tolerance)
         with self._conn() as conn:
             if head_sha:
                 row = conn.execute(
                     """
                     SELECT 1 FROM suggestions
                     WHERE project_id=? AND mr_iid=?
-                      AND file_path=? AND target_line=?
+                      AND file_path=? AND target_line BETWEEN ? AND ?
                       AND head_sha=?
                     LIMIT 1
                     """,
-                    (project_id, mr_iid, file_path, target_line, head_sha),
+                    (project_id, mr_iid, file_path, lo, hi, head_sha),
                 ).fetchone()
             else:
                 row = conn.execute(
                     """
                     SELECT 1 FROM suggestions
                     WHERE project_id=? AND mr_iid=?
-                      AND file_path=? AND target_line=?
+                      AND file_path=? AND target_line BETWEEN ? AND ?
                     LIMIT 1
                     """,
-                    (project_id, mr_iid, file_path, target_line),
+                    (project_id, mr_iid, file_path, lo, hi),
                 ).fetchone()
             return row is not None
 

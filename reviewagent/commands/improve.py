@@ -713,6 +713,7 @@ class ImproveCommand(BaseCommand):
                     if _dedup_db.suggestion_exists_at_line(
                         self.project_id, self.mr_iid, file_path,
                         decision["new_line"], _sev, head_sha=_head_sha,
+                        line_tolerance=2,
                     ):
                         logger.info(
                             "improve.skip_at_line project={} mr={} file={} line={} severity={} head_sha={}",
