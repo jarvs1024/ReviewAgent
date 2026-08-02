@@ -796,6 +796,160 @@ class ImproveCommand(BaseCommand):
             version = 1
         return f"## 改进总览 V{version}\n\n_加载中…_"
 
+    def _detect_apply_risk(
+        self,
+        *,
+        file_path: str,
+        target_line: int,
+        improved_code: str,
+        file_sources: dict[str, list[str]],
+    ) -> tuple[str, list[str]]:
+        """识别 improved_code 中引用了 file_sources 未定义的符号.
+
+        返回 (level, msgs):
+          - ("ok", [])              : 全部符号都能解析, apply 安全
+          - ("warn", ["...", ...])  : 引用了 missing 符号, apply 后会 NameError / ImportError;
+                                       review 中加 ⚠️ 提示, 但保留 Apply 按钮让 reviewer 自行处理
+
+        排除: builtins / 关键字 / self / cls / 已定义 (def/class/import/赋值/函数参数/lambda)
+        改进片段本身 AST 解析 syntax error (def 缺 body 等) → 视为 ok (治本靠 prompt 约束 8)
+        """
+        try:
+            import ast as _ast
+            tree = _ast.parse(improved_code)
+        except SyntaxError:
+            # 改进片段常不完整 (def 缺 body / while 缺 body), AST 解析必然 fail,
+            # 但这不代表 missing symbol. 视为 ok, 让 prompt 约束 8 治本.
+            return "ok", []
+
+        file_lines_local = file_sources.get(file_path, [])
+        if not file_lines_local:
+            # 没源文件 → 不警告 (避免误报)
+            return "ok", []
+
+        file_src = "\n".join(file_lines_local)
+
+        # === 收集本文件已定义符号 ===
+        local_defs: set[str] = set()
+        try:
+            mod = _ast.parse(file_src)
+            for node in _ast.walk(mod):
+                if isinstance(node, _ast.ClassDef):
+                    local_defs.add(node.name)
+                elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    local_defs.add(node.name)
+                    # 函数参数 (regular / kwonly / vararg / kwarg)
+                    for arg in (node.args.posonlyargs + node.args.args +
+                                node.args.kwonlyargs + [node.args.vararg, node.args.kwarg]):
+                        if arg:
+                            local_defs.add(arg.arg)
+                elif isinstance(node, _ast.Lambda):
+                    for arg in node.args.posonlyargs + node.args.args + [node.args.vararg, node.args.kwarg]:
+                        if arg:
+                            local_defs.add(arg.arg)
+                elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                    for alias in node.names:
+                        local_defs.add(alias.asname or alias.name.split(".")[0])
+                elif isinstance(node, _ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, _ast.Name):
+                            local_defs.add(tgt.id)
+                        elif isinstance(tgt, _ast.Tuple):
+                            for el in tgt.elts:
+                                if isinstance(el, _ast.Name):
+                                    local_defs.add(el.id)
+        except SyntaxError:
+            pass
+
+        import builtins as _bi
+        builtin_names = set(dir(_bi))
+        excluded = {"True", "False", "None", "self", "cls"}
+        excluded.update(builtin_names)
+
+        # === 收集 improved_code 自身定义的符号 ===
+        defined_in_improved: set[str] = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ClassDef):
+                defined_in_improved.add(node.name)
+            elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                defined_in_improved.add(node.name)
+                for arg in (node.args.posonlyargs + node.args.args +
+                            node.args.kwonlyargs + [node.args.vararg, node.args.kwarg]):
+                    if arg:
+                        defined_in_improved.add(arg.arg)
+            elif isinstance(node, _ast.Lambda):
+                for arg in node.args.posonlyargs + node.args.args + [node.args.vararg, node.args.kwarg]:
+                    if arg:
+                        defined_in_improved.add(arg.arg)
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for alias in node.names:
+                    defined_in_improved.add(alias.asname or alias.name.split(".")[0])
+            elif isinstance(node, _ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, _ast.Name):
+                        defined_in_improved.add(tgt.id)
+                    elif isinstance(tgt, _ast.Tuple):
+                        for el in tgt.elts:
+                            if isinstance(el, _ast.Name):
+                                defined_in_improved.add(el.id)
+
+        all_defined = local_defs | defined_in_improved | excluded
+
+        # === 收集 missing Name + Attribute base ===
+        # 规则:
+        #   - Name: 必须已定义 (否则 missing)
+        #   - Attribute: base 是 self/cls → 跳过 (实例属性动态)
+        #              base 是已定义 Name (e.g. logger) → 跳过
+        #              base 是未定义 Name → 标 base (避免重复标 attr)
+        missing: list[str] = []
+        seen_attr_bases: set[int] = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Name):
+                if isinstance(node.ctx, _ast.Store):
+                    continue
+                if node.id in all_defined:
+                    continue
+                missing.append(node.id)
+            elif isinstance(node, _ast.Attribute):
+                base = node.value
+                if isinstance(base, _ast.Name) and base.id in all_defined:
+                    continue
+                if isinstance(base, _ast.Name) and id(base) not in seen_attr_bases:
+                    seen_attr_bases.add(id(base))
+                    if base.id not in all_defined:
+                        missing.append(base.id)
+
+        # 去重保序
+        seen: set[str] = set()
+        uniq_missing: list[str] = []
+        for n in missing:
+            if n not in seen:
+                seen.add(n)
+                uniq_missing.append(n)
+
+        if not uniq_missing:
+            return "ok", []
+
+        # 启发式: 全小写无下划线 → 大概率 stdlib/第三方模块名 (LLM 通常会加 import)
+        # 单独标 warn, 但不列在 missing symbols 里 (避免噪音)
+        likely_module = [n for n in uniq_missing if n.islower() and "_" not in n]
+        truly_missing = [n for n in uniq_missing if n not in likely_module]
+
+        msgs: list[str] = []
+        if truly_missing:
+            msgs.append(
+                f"**目标文件未定义** ({', '.join(truly_missing[:8])}) — "
+                f"apply 后会 `NameError`；请先在文件里 `add {truly_missing[0]} = <value>` "
+                f"或 `import {truly_missing[0]}` 后再 apply"
+            )
+        if likely_module:
+            msgs.append(
+                f"**疑似未 import 的模块/外层变量** ({', '.join(likely_module[:5])}) — "
+                f"apply 前请确认 import 已就位或该变量在调用方作用域内可见"
+            )
+
+        return "warn", msgs
+
     def _build_summary_v2(
         self,
         inline_posted: list[dict[str, Any]],
@@ -992,6 +1146,26 @@ class ImproveCommand(BaseCommand):
                     logger.warning("improve.dedup_check failed (non-fatal): {}", _e)
 
             if decision["action"] == "post":
+                # === apply 风险检测: 引用了 missing 符号时, 在 review 中加 ⚠️ 提示
+                # 永远走 post 路径 (保留 Apply 按钮), reviewer 自己决定怎么处理
+                _risk_level, _risk_msgs = self._detect_apply_risk(
+                    file_path=file_path,
+                    target_line=decision["new_line"],
+                    improved_code=decision.get("normalised_code") or normalised["improved_code"],
+                    file_sources=file_sources,
+                )
+                _warn_block = ""
+                if _risk_level == "warn" and _risk_msgs:
+                    _warn_block = (
+                        "> ⚠️ **apply 前请确认** — 这条建议引用了目标文件中未定义的符号；\n"
+                        + "\n".join(f"> • {m}" for m in _risk_msgs) + "\n"
+                        + "> 💡 apply 后请补全缺失的 import / 常量 / 方法, 否则会 NameError 或 ImportError.\n\n"
+                    )
+                    logger.info(
+                        "improve.apply_risk_warn project={} mr={} file={} line={} missing={}",
+                        self.project_id, self.mr_iid, file_path, decision["new_line"],
+                        _risk_msgs,
+                    )
                 body_to_post = normalised["body"]
                 nc = decision.get("normalised_code") or normalised["improved_code"]
                 n_lines = len(nc.split("\n"))
@@ -1012,6 +1186,17 @@ class ImproveCommand(BaseCommand):
                         f"{normalised['rationale']}\n\n"
                         f"```suggestion:-0+{n_replace}\n{nc}\n```"
                         + self.HELP_TEXT_FOOTER
+                    )
+                    if _warn_block:
+                        body_to_post = body_to_post.replace(
+                            "```suggestion", _warn_block + "```suggestion", 1
+                        )
+                        _warn_block = ""  # 已注入, 避免下面重复
+
+                # === apply 风险: else 分支 (body_to_post 直接用 normalised["body"]) 也需注入 ===
+                if _warn_block and "```suggestion" in body_to_post:
+                    body_to_post = body_to_post.replace(
+                        "```suggestion", _warn_block + "```suggestion", 1
                     )
 
                 note_id = self.gitlab.post_mr_discussion(

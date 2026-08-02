@@ -289,6 +289,12 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 4. **不要捏造不在 diff 中的代码或上下文**
 5. **最多 15 条建议** (config: `IMPROVE_MAX_SUGGESTIONS`, 多而泛 → 少而准; 但本次检视若命中多条独立 R-XXX 规则, 应全部产出 (不被合并到一条))
 6. **数组可为空** — 若没有明显可改进点，直接 `"suggestions": []`
+7. **建议 position 必须指向出错的那一行代码（不是 def 行）** — `target_line` / `start_line` 必须指向违规 / 可改进行的那一行；不要指向 `def` / `class` 头
+8. **符号验证 (硬性)** — 改进代码前必须确保所有引用的 Name / Attribute 在目标文件中能解析。
+   - **必须 read 目标文件完整内容**，确认：常量 (e.g. `RETRY_PORT`) / 类型 (e.g. `Payload`) / 函数 (e.g. `logger`) 都已存在
+   - **禁止** 凭空猜测常量名 (`RETRY_PORT` / `CONFIG` / `MAX_*` / `TIMEOUT` 等)。如果改进确实需要新常量, 必须在 `improved_code` **开头一并 add `XXX = <value>` 定义**, 而不是只引用
+   - **禁止** 引入未 `import` 的第三方 / stdlib 符号；如果必须, 在改进代码顶部加 `import xxx` 一并补上
+   - 违反此约束不会阻止发布，但会在 review 中**加 ⚠️ 风险提示**让 reviewer 知情，reviewer apply 后需自己补全缺失符号
 
 ## 输出示例
 
