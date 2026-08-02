@@ -90,7 +90,7 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
   - `R-OTHER-IMPACT:import_path` — import 旧路径还有引用
   - `R-OTHER-IMPACT:fixture_break` — fixture 改了, 引用它的 test 失配
 - **每个 missing parameter 独立产一条 suggestion** — `probe()` 加了 3 个新参数 (timeout, retry, attempts) 而 caller 一个都没传, 必须发 3 条独立 suggestion, 不要合并为 1 条
-- 优先级: **P1**(与 SSD 自定义规则同级), 不要被 R-XXX / R-OTHER 检查顺序压后
+- 优先级: **P1** — 见下 `## 总检视顺序` 段 🟠 优先 1 节, 与 SSD 同级 (都是强信号) 但**先于 SSD 执行**; 不要被 R-XXX / R-OTHER 检查顺序压后
 
 **R-OTHER:magic_number 覆盖范围 (含 inline 循环)**:
 - module-level 常量 (例: `MAX_BUFFER = 4096`) ✓

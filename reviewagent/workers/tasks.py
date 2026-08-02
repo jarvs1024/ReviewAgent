@@ -267,22 +267,50 @@ def run_mr_chain(
 
     失败隔离: 某命令失败不影响后续命令执行.
     返回: 每个命令的执行结果列表.
+
+    并发保护: 同 MR 的多个 chain job (来自多次 Apply / push) 共享一把 Redis
+    锁, 强制串行执行. 避免:
+      - V{N} 版本号 race condition (基于 runs 计数, 并发读会跳号或重复)
+      - inline_posted / summary placeholder 互相覆盖 (都发到 GitLab 同一 MR 评论)
+      - dedup_at_line 读到中间态 head_sha (前一个 chain 还没 finish_run, 但已
+        emit_run_started; 后一个 chain 算 V{N} 时把前一个当已完成)
     """
-    results: list[dict[str, Any]] = []
-    for cmd in commands:
+    # 阻塞锁: 等到拿到锁才执行. blocking_timeout=600 (10 分钟) 兜底防 worker 卡死.
+    # 不同 MR 并行: 锁 key 包含 project_id + mr_iid, 互不阻塞.
+    # redis-py 8.x 签名: acquire(blocking=True, blocking_timeout=...)
+    lock = locks.get_lock(project_id, mr_iid)
+    if not lock.acquire(blocking=True, blocking_timeout=600):
+        logger.warning(
+            "chain.lock_timeout project={} mr={} — 释放锁失败/超时, 放弃本次 chain",
+            project_id, mr_iid,
+        )
+        return [{"command": "lock", "status": "failed", "error": "lock_timeout"}]
+    try:
+        logger.info(
+            "chain.lock_acquired project={} mr={} commands={}",
+            project_id, mr_iid, list(commands),
+        )
+        results: list[dict[str, Any]] = []
+        for cmd in commands:
+            try:
+                result = _run_command(
+                    cmd,
+                    project_id=project_id,
+                    mr_iid=mr_iid,
+                    triggered_by=triggered_by,
+                    actor_username=actor_username,
+                )
+                results.append({"command": cmd, "status": "success", "result": result})
+            except Exception as e:
+                logger.error(
+                    "chain.run_{} failed project={} mr={} err={}",
+                    cmd, project_id, mr_iid, e,
+                )
+                results.append({"command": cmd, "status": "failed", "error": str(e)})
+        return results
+    finally:
         try:
-            result = _run_command(
-                cmd,
-                project_id=project_id,
-                mr_iid=mr_iid,
-                triggered_by=triggered_by,
-                actor_username=actor_username,
-            )
-            results.append({"command": cmd, "status": "success", "result": result})
+            lock.release()
         except Exception as e:
-            logger.error(
-                "chain.run_{} failed project={} mr={} err={}",
-                cmd, project_id, mr_iid, e,
-            )
-            results.append({"command": cmd, "status": "failed", "error": str(e)})
-    return results
+            logger.warning("chain.lock_release failed project={} mr={} err={}",
+                           project_id, mr_iid, e)

@@ -381,7 +381,7 @@ class ImproveCommand(BaseCommand):
         """把 cross-file 引用渲染成 chunk prompt 段."""
         if not refs:
             return (
-                "## 🔍 跨文件影响分析 (规则检查之前必做, **P1**)\n\n"
+                "## 🟠 优先 1 — 跨文件影响分析 (规则检查之前必做, **P1**)\n\n"
                 "Python 端 rg 没找到 cross-file caller 引用 (本文件可能是新增 / 改动是局部 / 仓库无其他文件引用).\n\n"
                 "**仍请按 P1 优先级自行判断是否需要产 R-OTHER-IMPACT suggestion** — Python 端仅做粗扫，"
                 "如下情况仍可能有跨文件风险:\n"
