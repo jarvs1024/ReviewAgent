@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"输出目录 (默认: {DEFAULT_OUTPUT_DIR})")
     p.add_argument("--project-id", type=int, default=None,
                    help="覆盖 REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID")
+    p.add_argument("--enqueue", action="store_true",
+                   help="只入 RQ 队列（由 worker 异步执行，含 opencode LLM 调用），fire-and-forget")
     return p.parse_args()
 
 
@@ -49,11 +51,24 @@ def main() -> int:
     setup_logging()
     args = parse_args()
 
+    # 队列模式: 只把整份周报 job 入队, 真正的采集 + LLM + 推送在 worker 内跑
+    if args.enqueue:
+        from reviewagent.workers.tasks import enqueue_weekly_report
+        job_id = enqueue_weekly_report(
+            week_offset=args.week_offset,
+            output_dir=str(DEFAULT_OUTPUT_DIR),
+            push=args.push,
+            project_id=args.project_id,
+        )
+        print(f"[ok] enqueued weekly_report job={job_id} (worker will run it)")
+        return 0
+
     cfg = WeeklyReportConfig.from_env()
     if args.project_id is not None:
         cfg = WeeklyReportConfig(
             enabled=cfg.enabled,
             target_project_id=args.project_id,
+            target_branch=cfg.target_branch,
             timezone=cfg.timezone,
             collectors=cfg.collectors,
             notifier=cfg.notifier,
@@ -62,6 +77,7 @@ def main() -> int:
             dingtalk_dry_run=cfg.dingtalk_dry_run,
             dingtalk_retry_attempts=cfg.dingtalk_retry_attempts,
             markdown_chunk_limit=cfg.markdown_chunk_limit,
+            cron_schedule=cfg.cron_schedule,
         )
 
     result = run_weekly_job(
@@ -76,8 +92,6 @@ def main() -> int:
     print(f"[ok] week_label   : {result['week_label']}")
     print(f"[ok] artifact     : {result['artifact_path']}")
     print(f"[ok] markdown     : {result['markdown_path']}")
-    if result.get("xlsx_path"):
-        print(f"[ok] xlsx         : {result['xlsx_path']}")
     print(f"[ok] sections     : {result['sections']}")
     delivery = result['delivery']
     if delivery.get('dry_run'):

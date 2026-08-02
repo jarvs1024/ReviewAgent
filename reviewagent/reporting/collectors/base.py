@@ -17,6 +17,7 @@ class CollectorContext:
     data_dir: str
     timezone: str
     target_branch: str = ""
+    prev_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

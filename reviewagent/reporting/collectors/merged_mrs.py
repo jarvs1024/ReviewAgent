@@ -12,10 +12,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from reviewagent.config import config
 from reviewagent.gitlab.client import GitLabError, client as gl
 from reviewagent.logging_setup import logger
+from reviewagent.opencode.client import OpencodeError, client as opencode
 
 from .base import CollectorContext, SectionResult
 
@@ -44,6 +47,7 @@ class MergedMrsCollector:
             mrs = gl.list_project_mrs(
                 project_id,
                 state="merged",
+                target_branch=target_branch,
                 updated_after=week_start.isoformat(),
                 updated_before=week_end.isoformat(),
                 per_page=100,
@@ -73,6 +77,7 @@ class MergedMrsCollector:
         author_set: set[str] = set()
         additions_total = 0
         deletions_total = 0
+        files_changed_total = 0
         items: list[dict[str, Any]] = []
         mr_list: list[dict[str, Any]] = []
         for m in in_window:
@@ -83,6 +88,10 @@ class MergedMrsCollector:
             dels = m.get("deletions_count") or 0
             additions_total += adds
             deletions_total += dels
+            # changes_count 是 GitLab list API 确实返回的字段 (字符串), 比 additions/deletions 可靠
+            cc = m.get("changes_count")
+            files_changed = int(cc) if cc and str(cc).isdigit() else 0
+            files_changed_total += files_changed
             item = {
                 "iid": m.get("iid"),
                 "title": m.get("title", ""),
@@ -95,7 +104,7 @@ class MergedMrsCollector:
                 "url": m.get("web_url"),  # PR-Agent 风格
                 "additions": adds,
                 "deletions": dels,
-                "changed_files": m.get("changed_files_count") or 0,
+                "changed_files": files_changed,
                 "squash": bool(m.get("squash")),
                 "description": (m.get("description") or "").strip(),
             }
@@ -113,13 +122,26 @@ class MergedMrsCollector:
             "authors": sorted(author_set),
             "additions": additions_total,
             "deletions": deletions_total,
+            "files_changed": files_changed_total,
             "items": items,
             "mr_list": mr_list,
             "target_branch": target_branch,
             "window": {"since": week_start.isoformat(), "until": week_end.isoformat()},
-            # 没有 LLM 时, llm_description_markdown 为空字符串
+            # LLM 生成的变更摘要 (失败则回退到确定性 _build_change_summary)
             "llm_description_markdown": "",
         }
+
+        # 调 opencode 生成"变更摘要" (像 improve 的 _call_chunk: 数据塞进 prompt, files=[])
+        prev_merged = (ctx.prev_data.get("merged_mrs") or {}) if ctx.prev_data else {}
+        try:
+            llm_md = self._generate_llm_summary(data, target_branch, prev_merged)
+            if llm_md and llm_md.strip():
+                data["llm_description_markdown"] = llm_md
+                logger.info("merged_mrs.llm_summary ok chars={}", len(llm_md))
+            else:
+                logger.warning("merged_mrs.llm_summary empty -> fallback to deterministic")
+        except Exception as e:
+            logger.warning("merged_mrs.llm_summary failed (fallback to deterministic): {}", e)
 
         return SectionResult(
             status="ok",
@@ -127,3 +149,43 @@ class MergedMrsCollector:
             meta={"queried_total": len(mrs), "week_start": week_start.isoformat(),
                   "week_end": week_end.isoformat()},
         )
+
+    @staticmethod
+    def _build_llm_prompt(data: dict[str, Any], target_branch: str,
+                          prev_data: dict[str, Any] | None = None) -> str:
+        """构造发给 weekly_change_summary agent 的 user prompt (MR 清单)."""
+        items = data.get("items") or []
+        lines: list[str] = [
+            "你是技术周报编辑。下面是本周合并到目标分支的 MR 清单。",
+            "请据此写一段『变更摘要』：按主题/模块归纳团队本周的主要交付，用自然语言讲清楚做了什么、",
+            "有什么值得注意的趋势。不要只罗列 MR，要有洞察。",
+            "输出严格 JSON：{\"markdown\": \"...\"}, markdown 用中文，可含 bullet，不要用 # 顶级标题。",
+            "",
+            f"目标分支：`{target_branch}`",
+            f"本周合并 MR 数：{len(items)}，涉及作者：{data.get('author_count', 0)} 位。",
+        ]
+        if prev_data:
+            prev_count = prev_data.get("merge_count", prev_data.get("total", 0))
+            lines.append(f"上周合并 MR 数：{prev_count}（用于趋势对比，不要编造）。")
+        lines.append("")
+        lines.append("MR 清单（iid | 标题 | 作者 | +增/-删 | 描述摘要）：")
+        for m in items[:40]:
+            desc = (m.get("description") or "").strip().replace("\n", " ")[:300]
+            lines.append(
+                f"- [{m.get('iid')}] {m.get('title')} | @{m.get('author')} "
+                f"| +{m.get('additions')}/-{m.get('deletions')} | {desc}"
+            )
+        return "\n".join(lines)
+
+    def _generate_llm_summary(self, data: dict[str, Any], target_branch: str,
+                              prev_data: dict[str, Any] | None = None) -> str:
+        """调 opencode weekly_change_summary agent 生成变更摘要；失败抛异常由调用方回退."""
+        prompt = self._build_llm_prompt(data, target_branch, prev_data)
+        oc_result = opencode.run(
+            agent="weekly_change_summary",
+            prompt=prompt,
+            workdir=Path.cwd(),
+            files=[],
+            timeout=max(120, int(config.rq_worker_timeout * 0.4)),
+        )
+        return (oc_result.data or {}).get("markdown", "") or ""

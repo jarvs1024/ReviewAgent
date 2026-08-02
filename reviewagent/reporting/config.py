@@ -38,6 +38,7 @@ class WeeklyReportConfig:
     """周报运行时配置."""
     enabled: bool = True
     target_project_id: int = 0
+    target_branch: str = "main"
     timezone: str = "Asia/Shanghai"
     collectors: tuple[str, ...] = ("telemetry",)
     notifier: str = "dingtalk"
@@ -46,8 +47,9 @@ class WeeklyReportConfig:
     dingtalk_dry_run: bool = True
     dingtalk_retry_attempts: int = 3
     markdown_chunk_limit: int = 18000
-    report_title: str = "ReviewAgent 项目代码检视周报"
+    report_title: str = "SSD自动化代码检视周报"
     report_emoji: str = "📊"
+    cron_schedule: str = "Mon 10:00"  # systemd OnCalendar 格式, 用户可自定义
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -55,6 +57,7 @@ class WeeklyReportConfig:
         return cls(
             enabled=_env_bool("REVIEWAGENT_WEEKLY_ENABLED", True),
             target_project_id=_env_int("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", 0),
+            target_branch=_env_str("REVIEWAGENT_WEEKLY_TARGET_BRANCH", "main"),
             timezone=_env_str("REVIEWAGENT_WEEKLY_TIMEZONE", "Asia/Shanghai"),
             collectors=tuple(
                 # 默认全 3 段 (对齐 pr_agent), 用户可通过 env 覆盖
@@ -71,6 +74,7 @@ class WeeklyReportConfig:
             dingtalk_dry_run=_env_bool("REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN", True),
             dingtalk_retry_attempts=_env_int("REVIEWAGENT_WEEKLY_DINGTALK_RETRY", 3),
             markdown_chunk_limit=_env_int("REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT", 18000),
+            cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 09:00"),
         )
 
 

@@ -1,88 +1,40 @@
 """Layer-C1 collector: 本周代码质量扫描 (确定性 / 规则引擎版).
 
-参考 pr_agent ``pr_agent/reporting/collectors/repo_scan.py`` 的设计 (clone+diff+LLM).
-本实现因为当前 opencode 客户端要求 workdir, 走另一条路:
-
-1. 从 GitLab `mr.changes()` 拉本周合并 MR 的 diff (文本),
-2. 解析 diff 拿到文件级 +/-, 选变更最密集的 N 个文件,
-3. 结合 telemetry 的 suggestion_metrics / rule_key_counts,
-4. 给一段 deterministic 报告, 含 SSD 维度相关 bullet.
+设计:
+- 不再拉 MR 的 unified diff 去解析行数 (GitLab 返回 unified diff, 旧的正则按
+  `git diff --stat` 格式写, 永远解析出 0 文件 — 已废弃).
+- 改为直接从 telemetry 的 `suggestions` 真实检视产出按文件聚合:
+    * 高风险模块 = 本周窗口内 high/critical 严重度建议最多的文件 (带代表摘要)
+    * 新增坏味道 = 触发最多的规则 (rule_key_counts)
+- 这样数据源就是"实际被 agent 标出的问题", 比解析 diff 更准, 也更贴近人读的报告.
 
 输出 SectionResult.data:
     target_branch    : 目标分支
-    diff_stats       : {commits, files_changed, additions, deletions, mr_count}
-    high_risk_files  : [{path, additions, deletions, reason}]
-    code_smells      : [bullet dict {rule_key, count, severity}]
+    high_risk_files  : [{path, high, critical, total, summary}]
+    code_smells      : [{rule_key, count}]
     top_rules        : [(rule_key, count), ...]
+    severity         : {high: N, medium: M, ...}
+    suggestion_total : 本周窗口 suggestion 总数
     llm_review_markdown : 渲染好的 markdown 报告 (确定性)
     truncated        : bool
 """
 from __future__ import annotations
 
-import re
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timezone as _tz
+from pathlib import Path
 from typing import Any
 
-from reviewagent.gitlab.client import GitLabError, client as gl
+from reviewagent.config import config
 from reviewagent.logging_setup import logger
+from reviewagent.opencode.client import client as opencode
 from reviewagent.telemetry.store import get_store
 
 from .base import CollectorContext, SectionResult
 
 
-# diff 一行匹配 (+x / -x / " 文件 changed, X insertions, Y deletions")
-_INSERTION_RE = re.compile(r"(\d+) insertion")
-_DELETION_RE = re.compile(r"(\d+) deletion")
-_FILE_CHANGED_RE = re.compile(r"^\s*(.+?)\s+\|\s+(\d+)\s*([+-]*)")
-_SUMMARY_RE = re.compile(r"(\d+)\s+files?\s+changed")
-
-
-def _parse_diff_stats(diff_text: str | None) -> tuple[int, int, int]:
-    """从 ``git diff --stat`` 输出解析 (files_changed, additions, deletions)."""
-    if not diff_text:
-        return 0, 0, 0
-    adds = dels = 0
-    files: set[str] = set()
-    for line in diff_text.splitlines():
-        s = _SUMMARY_RE.search(line)
-        if s:
-            files_cnt = int(s.group(1))
-            for ln in diff_text.splitlines():
-                m = _FILE_CHANGED_RE.match(ln)
-                if m and m.group(1) and m.group(1) != "-":
-                    files.add(m.group(1).strip())
-            return max(files_cnt, len(files)), adds, dels
-        m = _FILE_CHANGED_RE.match(line)
-        if m and m.group(1) and m.group(1) != "-":
-            files.add(m.group(1).strip())
-            adds += len(m.group(3).replace("-", ""))
-            dels += len(m.group(3).replace("+", ""))
-    return len(files), adds, dels
-
-
-def _high_risk_files_from_diff(diff_text: str | None) -> list[dict[str, Any]]:
-    """从 diff 提取高变更文件 (按 +/- 总和排序)."""
-    if not diff_text:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in diff_text.splitlines():
-        m = _FILE_CHANGED_RE.match(line)
-        if not m or m.group(1) == "-":
-            continue
-        path = m.group(1).strip()
-        # m.group(3) 是 '+' / '-' 字符序列 (git diff --stat 风格)
-        delta_marker = m.group(3)
-        a = delta_marker.count("+")
-        d = delta_marker.count("-")
-        if a + d == 0:
-            continue
-        rows.append({"path": path, "additions": a, "deletions": d})
-    rows.sort(key=lambda r: -(r["additions"] + r["deletions"]))
-    return rows[:5]
-
-
 class RepoScanCollector:
-    """本周代码质量扫描 (确定版, 不调 LLM)."""
+    """本周代码质量扫描 (确定性, 基于 suggestions 聚合)."""
 
     name: str = "repo_scan"
 
@@ -99,158 +51,265 @@ class RepoScanCollector:
                                  meta={"reason": "no_target_project_id"})
         target_branch = ctx.target_branch or "main"
 
-        # 1. 拉本周合并 MR 列表 (用于拿 diff / 选高风险文件)
-        try:
-            mrs = gl.list_project_mrs(
-                project_id,
-                state="merged",
-                updated_after=week_start.isoformat(),
-                updated_before=week_end.isoformat(),
-                per_page=100,
-            )
-        except GitLabError as e:
-            logger.warning("repo_scan: list_project_mrs failed: {}", e)
-            mrs = []
+        # SQLite 比较 created_at 用字典序, 统一转 UTC 再传 (与 telemetry 一致)
+        since_iso = week_start.astimezone(_tz.utc).isoformat()
+        until_iso = week_end.astimezone(_tz.utc).isoformat()
 
-        # 时间窗内 merged_at 过滤
-        ws_ts = week_start.timestamp()
-        we_ts = week_end.timestamp()
-        in_window = []
-        for m in mrs:
-            merged_at = m.get("merged_at")
-            if not merged_at:
-                continue
-            try:
-                ts = datetime.fromisoformat(merged_at.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                continue
-            if ws_ts <= ts < we_ts:
-                in_window.append(m)
-
-        # 2. 逐 MR 拉 diff (限速: 只取前 10 个 MR)
-        combined_diff = ""
-        added = 0
-        deleted = 0
-        files_count = 0
-        for mr in in_window[:10]:
-            iid = mr.get("iid")
-            try:
-                diff = gl.get_mr_diff(project_id, iid)
-                # 解析 stat
-                fc, a, d = _parse_diff_stats(diff)
-                added += a
-                deleted += d
-                files_count += fc
-                combined_diff += diff + "\n"
-            except GitLabError as e:
-                logger.debug("repo_scan: get_mr_diff !%s failed: {}", iid, e)
-
-        # 3. 高风险文件 (按 +/- 总和)
-        high_risk = _high_risk_files_from_diff(combined_diff)
-
-        # 4. 规则层 — 从 telemetry 取本窗口 suggestion 触发最多的规则
         store = get_store()
-        sev = store.suggestion_metrics(
-            project_id=project_id, since=week_start.isoformat(), until=week_end.isoformat(),
+        # 本周窗口内的 suggestion (真实检视产出)
+        suggestions = store.list_suggestions(
+            project_id=project_id, since=since_iso, until=until_iso, limit=100000,
         )
-        top_rules = store.rule_key_counts(
-            project_id=project_id, since=week_start.isoformat(), until=week_end.isoformat(),
-            top_n=5,
-        )
-        severity = sev.get("severity_counts", {})
 
-        # 5. 渲染报告 (deterministic markdown)
-        md = self._render_markdown(
+        # 按文件聚合: 计数 + high/critical 数 + 代表摘要 + 规则频次
+        by_file: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"count": 0, "high": 0, "critical": 0,
+                     "summaries": [], "rules": defaultdict(int)}
+        )
+        for s in suggestions:
+            fp = s.get("file_path") or "(未知文件)"
+            rec = by_file[fp]
+            rec["count"] += 1
+            sev = (s.get("severity") or "").lower()
+            if sev == "high":
+                rec["high"] += 1
+            elif sev == "critical":
+                rec["critical"] += 1
+            summ = s.get("one_sentence_summary") or s.get("header") or ""
+            if summ and summ not in rec["summaries"]:
+                rec["summaries"].append(summ)
+            for r in (s.get("rule_keys") or "").split(","):
+                r = r.strip()
+                if r:
+                    rec["rules"][r] += 1
+
+        # 高风险模块: 按 critical*2 + high 加权排序, 取前 5
+        ranked = sorted(
+            by_file.items(),
+            key=lambda kv: -(kv[1]["critical"] * 2 + kv[1]["high"]),
+        )[:5]
+        high_risk: list[dict[str, Any]] = []
+        for fp, rec in ranked:
+            rep = rec["summaries"][0] if rec["summaries"] else ""
+            high_risk.append({
+                "path": fp,
+                "high": rec["high"],
+                "critical": rec["critical"],
+                "total": rec["count"],
+                "summary": rep,
+            })
+
+        # 规则层 + 严重度层
+        top_rules = store.rule_key_counts(
+            project_id=project_id, since=since_iso, until=until_iso, top_n=5,
+        )
+        sev = store.suggestion_metrics(
+            project_id=project_id, since=since_iso, until=until_iso,
+        ).get("severity_counts", {})
+        severity = {k: v for k, v in sev.items() if k != "unspecified"}
+        if "unspecified" in sev:
+            severity["other"] = sev["unspecified"]
+
+        deterministic_md = self._render_markdown(
             target_branch=target_branch,
             week_start=week_start, week_end=week_end,
-            mr_count=len(in_window),
-            files_changed=files_count, additions=added, deletions=deleted,
-            high_risk=high_risk,
-            severity=severity, top_rules=top_rules,
+            high_risk=high_risk, severity=severity,
+            top_rules=top_rules, suggestion_total=len(suggestions),
         )
+
+        # 调 opencode 生成"代码质量扫描"综述 (让 LLM 自由发挥, 不限制规则命中)
+        # 失败则回退到确定性 deterministic_md, 保证周报不崩
+        prev_repo = (ctx.prev_data.get("repo_scan") or {}) if ctx.prev_data else {}
+        llm_md = ""
+        try:
+            llm_md = self._generate_llm_review(
+                target_branch=target_branch,
+                week_start=week_start, week_end=week_end,
+                high_risk=high_risk, severity=severity,
+                top_rules=top_rules, suggestion_total=len(suggestions),
+                prev_data=prev_repo,
+            )
+            if not llm_md or not llm_md.strip():
+                logger.warning("repo_scan.llm_review empty -> fallback to deterministic")
+                llm_md = deterministic_md
+            else:
+                logger.info("repo_scan.llm_review ok chars={}", len(llm_md))
+        except Exception as e:
+            logger.warning("repo_scan.llm_review failed (fallback to deterministic): {}", e)
+            llm_md = deterministic_md
 
         return SectionResult(
             status="ok",
             data={
                 "target_branch": target_branch,
-                "diff_stats": {
-                    "commits": len(in_window),
-                    "files_changed": files_count,
-                    "additions": added, "deletions": deleted,
-                    "mr_count": len(in_window),
-                },
                 "high_risk_files": high_risk,
                 "code_smells": [{"rule_key": r, "count": c} for r, c in top_rules],
                 "top_rules": top_rules,
                 "severity": severity,
-                "llm_review_markdown": md,
+                "suggestion_total": len(suggestions),
+                "llm_review_markdown": llm_md,
                 "truncated": False,
             },
-            markdown=md,
-            meta={"mr_in_window": len(in_window)},
+            markdown=llm_md,
+            meta={"suggestion_total": len(suggestions),
+                  "high_risk_files": len(high_risk)},
         )
+
+    @staticmethod
+    def _build_llm_prompt(
+        *,
+        target_branch: str,
+        week_start: datetime, week_end: datetime,
+        high_risk: list[dict[str, Any]],
+        severity: dict[str, int],
+        top_rules: list[tuple[str, int]],
+        suggestion_total: int,
+        prev_data: dict[str, Any] | None = None,
+    ) -> str:
+        """构造发给 weekly_quality_scan agent 的 user prompt (聚合数据)."""
+        ws = week_start.strftime("%Y-%m-%d")
+        we = week_end.strftime("%Y-%m-%d")
+        lines: list[str] = [
+            "你是代码质量分析师。下面是本周代码检视的真实产出聚合数据。",
+            "请自由发挥，写一段『本周代码质量扫描』综述：指出真正值得关注的高风险模块、质量趋势、",
+            "潜在技术债、以及建议团队跟进的方向。不要机械罗列规则命中，重点给出有判断力的总结，",
+            "可以引用具体文件/建议作为佐证。",
+            "输出严格 JSON：{\"markdown\": \"...\"}, markdown 用中文，可含 bullet，不要用 # 顶级标题。",
+            "",
+            f"数据范围：{ws} ~ {we}，目标分支 `{target_branch}`，本周共 {suggestion_total} 条检视建议。",
+            "",
+            "高风险模块（按 high/critical 加权）：",
+        ]
+        if high_risk:
+            for f in high_risk:
+                badge: list[str] = []
+                if f["critical"]:
+                    badge.append(f"critical {f['critical']}")
+                if f["high"]:
+                    badge.append(f"high {f['high']}")
+                badge_str = f"（{'、'.join(badge)}）" if badge else ""
+                summ = f.get("summary", "")
+                lines.append(f"- `{f['path']}`{badge_str}: {summ}")
+        else:
+            lines.append("- (无 high/critical)")
+        lines.append("")
+        sev_str = "、".join(f"{k}={v}" for k, v in severity.items()) if severity else "(无)"
+        lines.append(f"严重度分布：{sev_str}")
+        lines.append("")
+        lines.append("高频触发规则：")
+        if top_rules:
+            for rk, n in top_rules[:8]:
+                lines.append(f"- `{rk}` × {n}")
+        else:
+            lines.append("- (无)")
+        # 上周对比数据 (给 LLM 真实趋势基准, 避免编造)
+        if prev_data:
+            lines.append("")
+            lines.append("上周对比数据（用于趋势判断，不要编造）：")
+            lines.append(f"- 上周 suggestion 总数：{prev_data.get('suggestion_total', '?')}")
+            prev_sev = prev_data.get("severity") or {}
+            if prev_sev:
+                lines.append(f"- 上周严重度分布：{', '.join(f'{k}={v}' for k, v in prev_sev.items())}")
+            prev_hr = prev_data.get("high_risk_files") or []
+            if prev_hr:
+                lines.append("- 上周高风险模块：")
+                for f in prev_hr[:3]:
+                    lines.append(f"  - `{f.get('path', '?')}` (high={f.get('high', 0)}, critical={f.get('critical', 0)})")
+        return "\n".join(lines)
+
+    def _generate_llm_review(
+        self,
+        *,
+        target_branch: str,
+        week_start: datetime, week_end: datetime,
+        high_risk: list[dict[str, Any]],
+        severity: dict[str, int],
+        top_rules: list[tuple[str, int]],
+        suggestion_total: int,
+        prev_data: dict[str, Any] | None = None,
+    ) -> str:
+        """调 opencode weekly_quality_scan agent 生成综述；失败抛异常由调用方回退."""
+        prompt = self._build_llm_prompt(
+            target_branch=target_branch, week_start=week_start, week_end=week_end,
+            high_risk=high_risk, severity=severity, top_rules=top_rules,
+            suggestion_total=suggestion_total, prev_data=prev_data,
+        )
+        oc_result = opencode.run(
+            agent="weekly_quality_scan",
+            prompt=prompt,
+            workdir=Path.cwd(),
+            files=[],
+            timeout=max(120, int(config.rq_worker_timeout * 0.4)),
+        )
+        return (oc_result.data or {}).get("markdown", "") or ""
 
     @staticmethod
     def _render_markdown(
         *,
         target_branch: str,
         week_start: datetime, week_end: datetime,
-        mr_count: int, files_changed: int, additions: int, deletions: int,
         high_risk: list[dict[str, Any]],
         severity: dict[str, int],
         top_rules: list[tuple[str, int]],
+        suggestion_total: int,
     ) -> str:
         ws = week_start.strftime("%Y-%m-%d")
         we = week_end.strftime("%Y-%m-%d")
         lines: list[str] = []
-        lines.append(f"本周 (`{ws}` ~ `{we}`) 合并到 `{target_branch}` 的 MR 共 **{mr_count}** 个, "
-                     f"覆盖 **{files_changed}** 个文件, 新增代码 **{additions}** 行, "
-                     f"删除 **{deletions}** 行。\n")
+        lines.append(
+            f"本周 (`{ws}` ~ `{we}`) 共产生 **{suggestion_total}** 条检视建议, "
+            f"以下按文件聚合的高风险模块与高频触发规则:\n"
+        )
 
-        # 高风险模块
+        # 高风险模块 (不重复 merged_mrs 的 MR 计数, 直接切入文件级风险)
         lines.append("**高风险模块**")
         if high_risk:
-            for f in high_risk[:5]:
-                lines.append(f"- `{f['path']}` (变更 +{f['additions']}/-{f['deletions']})")
+            for f in high_risk:
+                badge: list[str] = []
+                if f["critical"]:
+                    badge.append(f"critical {f['critical']}")
+                if f["high"]:
+                    badge.append(f"high {f['high']}")
+                badge_str = f"（{'、'.join(badge)}）" if badge else ""
+                lines.append(f"- `{f['path']}`{badge_str}")
+                if f["summary"]:
+                    lines.append(f"  - {f['summary']}")
         else:
-            lines.append("- (本周 diff 不涉及明显高风险模块)")
+            lines.append("- (本周无 high/critical 严重度建议)")
         lines.append("")
 
         # 新增坏味道 (按规则聚合)
         lines.append("**新增坏味道**")
         if top_rules:
             for rule_key, count in top_rules[:5]:
-                lines.append(f"- `{rule_key}` × **{count}** (按 suggestion 聚合)")
+                lines.append(f"- `{rule_key}` × **{count}**")
         else:
             lines.append("- (本周无规则连续触发, 检视质量稳定)")
         lines.append("")
 
         # 测试覆盖与可靠性
         lines.append("**测试覆盖与可靠性**")
-        if mr_count > 0:
-            test_files = [f for f in high_risk if "test" in f["path"].lower()]
-            if test_files:
-                lines.append(f"- 本周改动覆盖测试目录的有 {len(test_files)} 处: "
-                             + ", ".join(f"`{f['path']}`" for f in test_files[:3]))
-            else:
-                lines.append("- 本周无直接命中测试目录 (`test*/spec*`) 的改动, 建议下周期补")
+        test_files = [f["path"] for f in high_risk
+                      if "test" in f["path"].lower() or "spec" in f["path"].lower()]
+        if test_files:
+            lines.append(
+                f"- 本周高风险改动命中测试目录的有 {len(test_files)} 处: "
+                + ", ".join(f"`{p}`" for p in test_files[:3])
+            )
         else:
-            lines.append("- 本周无合并 MR, 跳过可靠性评估")
+            lines.append("- 本周高风险模块未直接命中测试目录 (`test*/spec*`), 建议下周期补测试")
         lines.append("")
 
         # 建议跟进
         lines.append("**建议跟进**")
-        if severity:
-            hi = severity.get("high", 0)
-            crit = severity.get("critical", 0)
-            if hi + crit > 0:
-                lines.append(f"- 本周新增 **{hi + crit}** 条 high/critical 严重度建议, "
-                             "请优先 review 采纳或显式 dismiss")
+        hi = severity.get("high", 0)
+        crit = severity.get("critical", 0)
+        if hi + crit > 0:
+            lines.append(f"- 本周新增 **{hi + crit}** 条 high/critical 严重度建议, "
+                         "请优先 review 采纳或显式 dismiss")
         if top_rules and top_rules[0][1] >= 3:
             lines.append(f"- 规则 `{top_rules[0][0]}` 本周触发 {top_rules[0][1]} 次, "
                          "建议团队沉淀进 AGENTS.md 防再犯")
-        if not high_risk and mr_count == 0:
-            lines.append("- 本周交付较静默, 仍可考虑下周期规划少量专项检视")
         lines.append("")
 
         return "\n".join(lines).rstrip() + "\n"

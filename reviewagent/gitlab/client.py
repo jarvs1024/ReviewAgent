@@ -360,6 +360,7 @@ class GitLabClient:
         *,
         state: str = "merged",
         source_branch: str | None = None,
+        target_branch: str | None = None,
         updated_after: str | None = None,
         updated_before: str | None = None,
         per_page: int = 100,
@@ -369,12 +370,15 @@ class GitLabClient:
         Args:
             state: 'opened' | 'closed' | 'merged' | 'all'
             source_branch: 按 source branch 过滤（push hook 用）
+            target_branch: 按 target branch 过滤（周报用, 只看合并到 main 的）
             updated_after: ISO 8601 时间字符串（包含）
             updated_before: ISO 8601 时间字符串（不包含）
         """
         params: dict[str, Any] = {"state": state, "per_page": per_page}
         if source_branch:
             params["source_branch"] = source_branch
+        if target_branch:
+            params["target_branch"] = target_branch
         if updated_after:
             params["updated_after"] = updated_after
         if updated_before:

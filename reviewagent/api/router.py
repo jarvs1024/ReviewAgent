@@ -246,8 +246,13 @@ async def list_weekly_reports(
         return {"reports": []}
     files = []
     for p in sorted(base.glob("weekly-*.json"), reverse=True):
-        if project_id and f"-{project_id}-" not in p.name and "project_id" in p.read_text(errors='replace')[:200]:
-            pass
+        if project_id is not None:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if data.get("project_id") != project_id:
+                    continue
+            except (json.JSONDecodeError, OSError):
+                continue
         files.append({"name": p.name, "path": str(p), "size": p.stat().st_size,
                       "modified": p.stat().st_mtime})
     return {"total": len(files), "reports": files[:limit]}

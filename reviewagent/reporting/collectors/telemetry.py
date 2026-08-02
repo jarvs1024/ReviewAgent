@@ -58,7 +58,9 @@ class TelemetryCollector:
             all_metrics = store.suggestion_metrics(project_id=pid)
             suggestion_count = win_metrics["total"]
             suggestion_total = all_metrics["total"]
-            adoption_rate = (win_metrics["adoption_rate"] or 0.0) / 100.0
+            # 累计采纳率 = 全量已采纳 / 全量 (不看周窗口)
+            # store 返回 0~1 小数, renderer 再 *100 = %, 这里不要多除一次
+            adoption_rate = all_metrics.get("adoption_rate", 0.0) or 0.0
 
             # severity 重整: severity_counts -> severity_breakdown (按 high/medium/low/critical)
             sev = win_metrics.get("severity_counts") or {}
@@ -119,6 +121,28 @@ class TelemetryCollector:
                 "severity_breakdown": severity_breakdown,
                 "top_rules": top_rules,
             })
+
+            # ---- 环比 delta (从上周 artifact 计算, 给 renderer 显示趋势箭头) ----
+            prev_t = (ctx.prev_data.get("telemetry") or {}) if ctx.prev_data else {}
+            if prev_t:
+                def _delta(cur, p):
+                    return cur - p if (cur is not None and p is not None) else None
+                prev_sev = prev_t.get("severity_breakdown") or {}
+                prev_hc = (prev_sev.get("high", 0) + prev_sev.get("critical", 0))
+                cur_hc = severity_breakdown.get("high", 0) + severity_breakdown.get("critical", 0)
+                # adoption_rate: prev 可能不存在该字段, 用 None 表示"无对比基准"
+                prev_ar = prev_t.get("adoption_rate")
+                stats["deltas"] = {
+                    "mr_count": _delta(mr_count, prev_t.get("mr_count")),
+                    "suggestion_count": _delta(suggestion_count, prev_t.get("suggestion_count")),
+                    "adoption_rate_pct": _delta(
+                        round(adoption_rate * 100, 1),
+                        round(prev_ar * 100, 1) if prev_ar is not None else None,
+                    ),
+                    "high_critical": _delta(cur_hc, prev_hc if prev_sev else None),
+                }
+            else:
+                stats["deltas"] = {}
 
             return SectionResult(
                 status="ok",
@@ -234,10 +258,3 @@ class TelemetryCollector:
             "top_mrs": top_mrs_block,
             "failed_runs": failed_runs[:5],
         }
-
-
-def by_mr_count(by_mr: dict[tuple[int, int], dict], rec: dict) -> int:
-    """返 key 总 run 数 (用于 top_mrs)."""
-    target = (rec["project_id"], rec["mr_iid"])
-    return sum(1 for r in by_mr.values()
-               if (r["project_id"], r["mr_iid"]) == target)

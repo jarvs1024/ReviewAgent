@@ -40,6 +40,14 @@ AGENT_META: dict[str, dict[str, object]] = {
         "description": "对 MR diff 输出可 Apply 的代码改进建议（PR-Agent code-suggestion 风格）",
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
+    "weekly_change_summary": {
+        "description": "把本周合并 MR 列表汇总成有洞察的中文变更摘要（周报第二节）",
+        "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
+    },
+    "weekly_quality_scan": {
+        "description": "基于本周代码检视真实产出，自由发挥撰写有判断力的代码质量综述（周报第三节）",
+        "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
+    },
 }
 
 

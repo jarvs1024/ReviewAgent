@@ -38,6 +38,15 @@ def get_queue() -> Queue:
     return Queue(config.rq_queue_name, connection=get_redis())
 
 
+def get_weekly_queue() -> Queue:
+    """周报专用队列 — 与 review 命令队列 (improve/describe/suggestion) 物理隔离, 互不阻塞.
+
+    周报 job 含两次 opencode LLM 调用, 可能跑数分钟; 放进独立队列 + 独立 worker
+    后, 即使周报卡住也不会拖慢其他功能模块. Redis / opencode / 模型 / SQLite 共享.
+    """
+    return Queue(config.rq_weekly_queue_name, connection=get_redis())
+
+
 # ---------- 入队辅助（按命令） ----------
 def _enqueue(
     command: str,
@@ -117,6 +126,86 @@ def enqueue_suggestion_action(
         retry=Retry(max=2, interval=10),
     )
     return job.id
+
+
+# ---------- 周报（含 opencode LLM 调用） ----------
+def enqueue_weekly_report(
+    *,
+    week_offset: int = 0,
+    output_dir: str | None = None,
+    push: bool = False,
+    project_id: int | None = None,
+) -> str:
+    """把整份周报（含 opencode LLM 变更摘要 / 质量扫描）作为 1 个 RQ job 入队.
+
+    像 improve 一样: cron 只负责 fire-and-forget, 真正的采集 + LLM 调用 + 推送
+    都发生在 RQ worker 内 (worker 已能调 opencode). 带 Retry, 失败自动重试 2 次.
+
+    入队到独立的周报队列 (get_weekly_queue), 不与 improve/describe 主队列争抢.
+    """
+    q = get_weekly_queue()
+    job = q.enqueue(
+        "reviewagent.workers.tasks.run_weekly_report_job",
+        week_offset=week_offset,
+        output_dir=output_dir,
+        push=push,
+        project_id=project_id,
+        job_timeout=config.rq_worker_timeout * 2,  # 含两次 LLM 调用
+        result_ttl=3600,
+        failure_ttl=86400,
+        retry=Retry(max=2, interval=30),
+    )
+    logger.info(
+        "weekly_report.enqueued job={} week_offset={} push={}",
+        job.id, week_offset, push,
+    )
+    return job.id
+
+
+def run_weekly_report_job(
+    *,
+    week_offset: int = 0,
+    output_dir: str | None = None,
+    push: bool = False,
+    project_id: int | None = None,
+) -> dict[str, Any]:
+    """RQ job 体 — 在 worker 内跑整份周报 (含 opencode LLM 调用).
+
+    不直接 pickle WeeklyReportConfig, 而是按 env 重建 (与 improve worker 一致),
+    支持可选的 project_id 覆盖.
+    """
+    from pathlib import Path
+
+    from reviewagent.reporting.config import WeeklyReportConfig
+    from reviewagent.reporting.runner import run_weekly_job
+
+    cfg = WeeklyReportConfig.from_env()
+    if project_id is not None:
+        cfg = WeeklyReportConfig(
+            enabled=cfg.enabled,
+            target_project_id=project_id,
+            target_branch=cfg.target_branch,
+            timezone=cfg.timezone,
+            collectors=cfg.collectors,
+            notifier=cfg.notifier,
+            dingtalk_webhook_url=cfg.dingtalk_webhook_url,
+            dingtalk_secret=cfg.dingtalk_secret,
+            dingtalk_dry_run=cfg.dingtalk_dry_run,
+            dingtalk_retry_attempts=cfg.dingtalk_retry_attempts,
+            markdown_chunk_limit=cfg.markdown_chunk_limit,
+            cron_schedule=cfg.cron_schedule,
+        )
+
+    logger.info(
+        "worker.run_weekly_report_job week_offset={} push={} project_id={}",
+        week_offset, push, project_id,
+    )
+    return run_weekly_job(
+        cfg=cfg,
+        week_offset=week_offset,
+        output_dir=Path(output_dir) if output_dir else None,
+        push=push,
+    )
 
 
 # ---------- MR 命令链 ----------

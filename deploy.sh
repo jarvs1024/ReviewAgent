@@ -113,8 +113,64 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
+${SUDO} tee /etc/systemd/system/reviewagent-weekly-worker.service >/dev/null <<'EOF'
+[Unit]
+Description=ReviewAgent Weekly Report Worker (RQ, isolated queue)
+After=network.target redis-server.service
+
+[Service]
+Type=simple
+User=workflow
+WorkingDirectory=/home/workflow
+Environment="PATH=/home/workflow/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/workflow/.env
+# 周报专用队列, 与主 review 队列物理隔离, 互不阻塞 (共享 Redis / opencode / SQLite)
+ExecStart=/home/workflow/.venv/bin/rq worker review-weekly --url redis://127.0.0.1:6379/0
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 ${SUDO} systemctl daemon-reload
-${SUDO} systemctl enable --now reviewagent-webhook reviewagent-worker
+${SUDO} systemctl enable --now reviewagent-webhook reviewagent-worker reviewagent-weekly-worker
+
+# ---- 周报定时触发 (systemd timer, 用户可自定义时间) ----
+${SUDO} tee /etc/systemd/system/reviewagent-weekly-enqueue.service >/dev/null <<'EOF'
+[Unit]
+Description=ReviewAgent Weekly Report Enqueue (oneshot)
+After=network.target redis-server.service
+
+[Service]
+Type=oneshot
+User=workflow
+WorkingDirectory=/home/workflow
+Environment="PATH=/home/workflow/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/workflow/.env
+ExecStart=/home/workflow/.venv/bin/python /home/workflow/scripts/weekly_report.py --enqueue
+StandardOutput=journal
+StandardError=journal
+EOF
+
+${SUDO} tee /etc/systemd/system/reviewagent-weekly.timer >/dev/null <<'EOF'
+[Unit]
+Description=ReviewAgent Weekly Report Timer
+Requires=reviewagent-weekly-enqueue.service
+
+[Timer]
+# 默认每周一 09:00 触发; 用户可通过 systemctl edit reviewagent-weekly.timer 覆盖
+OnCalendar=Mon 09:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+${SUDO} systemctl daemon-reload
+${SUDO} systemctl enable --now reviewagent-weekly.timer
 sleep 2
 ${SUDO} systemctl status reviewagent-webhook --no-pager
 ${SUDO} systemctl status reviewagent-worker --no-pager
@@ -124,3 +180,6 @@ echo "==> 部署完成！"
 echo "  webhook health:  curl http://127.0.0.1:3000/health"
 echo "  webhook logs:    sudo journalctl -u reviewagent-webhook -f"
 echo "  worker logs:     sudo journalctl -u reviewagent-worker -f"
+echo "  周报 worker:     sudo journalctl -u reviewagent-weekly-worker -f"
+echo "  周报定时:        sudo systemctl list-timers reviewagent-weekly.timer"
+echo "  自定义时间:      sudo systemctl edit reviewagent-weekly.timer (改 OnCalendar)"

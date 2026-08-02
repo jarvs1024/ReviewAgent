@@ -40,6 +40,7 @@ class Config:
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
     rq_queue_name: str = "review"
+    rq_weekly_queue_name: str = "review-weekly"  # 周报专用队列，与 review 命令队列物理隔离
     rq_worker_timeout: int = 600  # 单任务超时（秒）
     rq_worker_count: int = 3  # 并发 worker 数
 
@@ -96,6 +97,10 @@ class Config:
     # ---------- 工厂 ----------
     @classmethod
     def from_env(cls) -> "Config":
+        rq_queue_name = _env("RQ_QUEUE_NAME", "review")
+        # 周报队列默认派生自主队列, 可通过 RQ_WEEKLY_QUEUE_NAME 覆盖.
+        # 独立队列 + 独立 worker, 保证周报 LLM job 不阻塞 improve/describe.
+        rq_weekly_queue_name = _env("RQ_WEEKLY_QUEUE_NAME", f"{rq_queue_name}-weekly")
         cfg = cls(
             gitlab_url=_env("GITLAB_URL", required=True),
             gitlab_pat=_env("GITLAB_PERSONAL_ACCESS_TOKEN", required=True),
@@ -106,7 +111,8 @@ class Config:
             opencode_password=_env("OPENCODE_PASSWORD", ""),
             opencode_model=_env("OPENCODE_MODEL", "minimax/MiniMax-M2.7"),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
-            rq_queue_name=_env("RQ_QUEUE_NAME", "review"),
+            rq_queue_name=rq_queue_name,
+            rq_weekly_queue_name=rq_weekly_queue_name,
             rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "600")),
             rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
             pr_commands=_env_tuple("PR_COMMANDS", "describe,improve"),

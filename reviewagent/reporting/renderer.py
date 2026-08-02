@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from typing import Any
 
 from .artifact import WeeklyArtifact
@@ -57,18 +58,50 @@ def _demote_llm_headings(md: str | None) -> str:
     return "\n".join(out)
 
 
+def _strip_leading_section_header(md: str | None, label: str) -> str:
+    """去掉 LLM 自带、与渲染层重复的节标题（如『变更摘要』『本周代码质量扫描』）.
+
+    LLM 有时仍会输出标题，这里防御性剥离首行, 让渲染层统一加标题, 避免重复.
+    """
+    if not md:
+        return md or ""
+    lines = md.splitlines()
+    if not lines:
+        return md
+    first = lines[0].strip()
+    if (re.match(rf"^#+\s*{label}\s*$", first)
+            or first == f"**{label}**"
+            or first == label):
+        return "\n".join(lines[1:]).lstrip("\n")
+    return md
+
+
 def _wrap(s: str, width: int = 22) -> str:
-    """长字符串按 word boundary 切, 用 `<br>` 拼回去 — DingTalk 单元格不会自动 wrap."""
+    """长字符串按 word boundary 切, 用 `<br>` 拼回去 — DingTalk 单元格不会自动 wrap.
+
+    对 CJK (无空格) 按字符宽度强制截断.
+    """
     if not s:
         return ""
     s = s.replace("|", "\\|").replace("\n", " ")
     if len(s) <= width:
         return s
+    # 先按空格分词 (英文), 再对超长 token (CJK) 按字符截断
     words = s.split(" ")
     out: list[str] = []
     cur: list[str] = []
     cur_len = 0
     for w in words:
+        # 单个 token 超过 width (通常是 CJK 无空格串), 按字符硬切
+        while len(w) > width:
+            if cur:
+                out.append(" ".join(cur))
+                cur = []
+                cur_len = 0
+            out.append(w[:width])
+            w = w[width:]
+        if not w:
+            continue
         if not cur:
             cur = [w]
             cur_len = len(w)
@@ -83,6 +116,49 @@ def _wrap(s: str, width: int = 22) -> str:
     if cur:
         out.append(" ".join(cur))
     return "<br>".join(out)
+
+
+_NATURE_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("修复", ("fix", "修复", "bug", "hotfix", "缺陷")),
+    ("新增", ("feat", "feature", "新增", "add", "实现", "支持", "introduce")),
+    ("重构", ("refactor", "重构", "restructure", "重命名", "rename")),
+    ("性能", ("perf", "性能", "optimize", "优化", "加速")),
+    ("测试", ("test", "测试", "spec", "用例")),
+    ("文档", ("doc", "文档", "readme", "comment", "注释")),
+    ("杂项", ("chore", "ci", "build", "deps", "依赖", "bump", "配置", "config")),
+    ("风格", ("style", "format", "格式", "lint")),
+]
+
+
+def _infer_nature(title: str) -> str:
+    """从 MR 标题推断变更性质 (确定性, 不调 LLM)."""
+    t = (title or "").lower()
+    for label, keys in _NATURE_KEYWORDS:
+        if any(k in t for k in keys):
+            return label
+    return "其他"
+
+
+def _build_change_summary(mr_list: list[dict], author_count: int) -> str:
+    """确定性变更概要: 合并数/作者数 + 按性质聚合 + 关键 MR 列举."""
+    if not mr_list:
+        return ""
+    nature_counter: dict[str, int] = {}
+    for m in mr_list:
+        n = _infer_nature(m.get("title", ""))
+        nature_counter[n] = nature_counter.get(n, 0) + 1
+    parts = [f"本周共合并 **{len(mr_list)}** 个 MR，涉及 **{author_count}** 位作者。"]
+    if nature_counter:
+        desc = "、".join(f"{k} {v} 个" for k, v in sorted(nature_counter.items(), key=lambda x: -x[1]))
+        parts.append(f"按性质看：{desc}。")
+    parts.append("")
+    parts.append("**关键变更**")
+    for m in mr_list[:5]:
+        nature = _infer_nature(m.get("title", ""))
+        title = (m.get("title") or "").replace("|", "\\|").replace("\n", " ")
+        author = m.get("author") or "?"
+        parts.append(f"- [{nature}] {title}（@{author}）")
+    return "\n".join(parts)
 
 
 def render_section(name: str, sr: SectionResult) -> str:
@@ -101,8 +177,17 @@ def render_section(name: str, sr: SectionResult) -> str:
     return "```json\n" + str(sr.data)[:1000] + "\n```"
 
 
+def _fmt_delta(delta, suffix: str = "", invert_good: bool = False) -> str:
+    """格式化环比 delta 为带箭头的短串; None 返回空串."""
+    if delta is None:
+        return ""
+    arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+    val = f"{arrow}{abs(delta)}{suffix}"
+    return val
+
+
 def _render_telemetry(d: dict[str, Any]) -> str:
-    """检视概况: 2 列 6 行指标表."""
+    """检视概况: 2 列 6 行指标表 (带环比趋势箭头)."""
     mr_count = d.get("mr_count", 0)
     mr_total = d.get("mr_total", 0)
     suggestion_count = d.get("suggestion_count", 0)
@@ -110,6 +195,7 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     adoption_rate = round(float(d.get("adoption_rate", 0)) * 100, 1)
     sev = d.get("severity_breakdown") or {}
     rules = d.get("top_rules") or []
+    deltas = d.get("deltas") or {}
 
     sev_value = "<br>".join(f"{k}={v}" for k, v in sev.items()) if sev else "(无)"
     if rules:
@@ -117,11 +203,19 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     else:
         rules_value = "(无)"
 
+    def _row(label: str, value: str, delta=None, suffix: str = "") -> tuple[str, str]:
+        if delta is not None and delta != 0:
+            value = f"{value} ({_fmt_delta(delta, suffix)})"
+        elif delta == 0:
+            value = f"{value} (→)"
+        return (label, value)
+
     rows: list[tuple[str, str]] = [
-        ("本周窗口 MR 数", str(mr_count)),
+        _row("本周窗口 MR 数", str(mr_count), deltas.get("mr_count")),
         ("项目累计 MR 数", str(mr_total)),
+        _row("本周 suggestion 数", str(suggestion_count), deltas.get("suggestion_count")),
         ("累计 suggestion 数", str(suggestion_total)),
-        ("本周采纳率", f"{adoption_rate}%"),
+        _row("累计采纳率", f"{adoption_rate}%", deltas.get("adoption_rate_pct"), "pp"),
         ("severity 分布", sev_value),
         ("触发最多规则", rules_value),
     ]
@@ -143,15 +237,28 @@ def _render_merged_mrs(d: dict[str, Any]) -> str:
 
     additions = d.get("additions", 0)
     deletions = d.get("deletions", 0)
+    files_changed = d.get("files_changed", 0)
     author_count = d.get("author_count", 0)
     mr_list = d.get("mr_list") or []
-    summary = _demote_llm_headings(d.get("llm_description_markdown", ""))
+
+    # 优先用 opencode 生成的 LLM 变更摘要; 为空(LLM 失败/未配置)才回退确定性拼装
+    llm_summary = (d.get("llm_description_markdown") or "").strip()
+    if llm_summary:
+        summary = _strip_leading_section_header(_demote_llm_headings(llm_summary), "变更摘要")
+    else:
+        summary = _build_change_summary(mr_list, author_count)
 
     head_line = (
         f"本周合并到 `{target_branch}` 的 MR 共 **{merge_count}** 个, "
-        f"涉及作者 **{author_count}** 位, "
-        f"新增代码 **{additions}** 行, 删除 **{deletions}** 行。"
+        f"涉及作者 **{author_count}** 位"
     )
+    # GitLab list API 不返回 additions/deletions (恒 0), 有 files_changed 就用它
+    if additions or deletions:
+        head_line += f", 新增代码 **{additions}** 行, 删除 **{deletions}** 行。"
+    elif files_changed:
+        head_line += f", 涉及文件变更 **{files_changed}** 个。"
+    else:
+        head_line += "。"
 
     lines: list[str] = [head_line, ""]
     if summary:
@@ -178,7 +285,8 @@ def _render_merged_mrs(d: dict[str, Any]) -> str:
 def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
     """代码质量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
     if pre_rendered:
-        return pre_rendered
+        # 防御性: 去掉 LLM 自带的节标题(渲染层已加), 并把 # 降级为粗体
+        return _strip_leading_section_header(_demote_llm_headings(pre_rendered), "本周代码质量扫描")
     # 兜底: 由 data 合成 markdown
     target_branch = d.get("target_branch", "?")
     stats = d.get("diff_stats", {})
@@ -214,7 +322,7 @@ def render_markdown(artifact: WeeklyArtifact) -> str:
     parts.append(
         f"> 生成时间: {(artifact.generated_at or '').isoformat()[:16].replace('T', ' ')}"
         f"<br>数据范围: {artifact.week_start.isoformat()[:10].replace('-', '/')} "
-        f"~ {artifact.week_end.isoformat()[:10].replace('-', '/')}\n"
+        f"~ {(artifact.week_end - timedelta(days=1)).isoformat()[:10].replace('-', '/')}\n"
     )
 
     # 按 pr_agent 顺序拼装
@@ -227,8 +335,9 @@ def render_markdown(artifact: WeeklyArtifact) -> str:
             continue
 
         title = SECTION_TITLES.get(name, name)
-        if name == "merged_mrs" and section.data:
-            branch = (section.data.get("target_branch") or "main")
+        # merged_mrs 标题含 {branch} 占位符, 即使数据缺失也要用默认值替换, 避免残留字面量
+        if name == "merged_mrs":
+            branch = (section.data or {}).get("target_branch") or "main"
             title = title.format(branch=branch)
 
         parts.append(f"\n## {title}\n")

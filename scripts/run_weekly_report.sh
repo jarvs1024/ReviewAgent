@@ -19,5 +19,11 @@ if [ "${WEEKLY_PUSH:-false}" = "true" ]; then
   PUSH_FLAG="--push"
 fi
 
+# 队列模式: 只入 RQ 队列, 由 worker 异步执行 (含 opencode LLM 调用)
+ENQUEUE_FLAG=""
+if [ "${WEEKLY_ENQUEUE:-false}" = "true" ]; then
+  ENQUEUE_FLAG="--enqueue"
+fi
+
 # 透传额外参数
-exec .venv/bin/python scripts/weekly_report.py $PUSH_FLAG "$@"
+exec .venv/bin/python scripts/weekly_report.py $PUSH_FLAG $ENQUEUE_FLAG "$@"
