@@ -254,23 +254,38 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _build_inspection_summary(d: dict[str, Any]) -> str:
-    """叙事性汇总本周检视结果: 问题分布范围 + 严重度情况.
+def _categorize(friendly: str, rule_key: str) -> str:
+    """把一条规则归类: 正确性/稳定性类(优先) 或 代码规范类. 仅用于确定性兜底."""
+    nl = (friendly or "").lower()
+    key = rule_key or ""
+    # 通用/跨文件规则前缀基本都是正确性类
+    if key.startswith(("R-OTHER-IMPACT", "R-LOOP", "R-RES", "R-SHELL", "R-ERR")):
+        return "正确性/稳定性类"
+    correctness_kw = ("接口", "参数", "循环", "资源", "内存", "泄漏", "注入",
+                      "异常", "未释放", "并发", "竞态", "运行", "行为",
+                      "caller", "loop", "res", "shell")
+    if any(k in nl for k in correctness_kw):
+        return "正确性/稳定性类"
+    return "代码规范类"
 
-    替代原概况表里 'severity 分布' / '触发最多规则' 两行裸数据,
-    用一段话把严重度占比与规则命中分布讲清楚.
+
+def _build_inspection_summary(d: dict[str, Any]) -> str:
+    """本周检视汇总(确定性兜底): 固定三小节 **概述** / **问题类型** / **跟进建议**.
+
+    与 opencode 生成的 llm_summary_markdown 使用同一套固定排版, 保证周报布局稳定.
+    正常链路由 LLM 产出; 仅当 LLM 不可用/失败才走此处.
     """
     sev = d.get("severity_breakdown") or {}
     # 优先用已翻译的中文类别名; 旧数据缺字段时现场翻译兜底
-    raw_rules = d.get("top_rules_friendly") or [
+    friendly = d.get("top_rules_friendly") or [
         (translate_rule_key(rk), n) for rk, n in (d.get("top_rules") or [])
     ]
-    rules = raw_rules
+    raw_rules = d.get("top_rules") or []
     suggestion_count = int(d.get("suggestion_count", 0) or 0)
     mr_count = int(d.get("mr_count", 0) or 0)
 
     if suggestion_count == 0:
-        return "本周窗口内无检视建议产生，暂无问题分布与严重度数据。"
+        return "**概述**\n本周窗口内无检视建议产生，暂无问题分布与严重度数据。"
 
     total = sum(sev.values()) or suggestion_count
 
@@ -281,44 +296,62 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
     med = sev.get("medium", 0)
     low = sev.get("low", 0) + sev.get("warning", 0) + sev.get("other", 0)
     hc_p, med_p, low_p = _pct(hc), _pct(med), _pct(low)
-    crit = sev.get("critical", 0)
 
     if hc_p >= 50:
-        sev_judge = "整体偏高，问题不限于随手风格瑕疵，相当部分是有实际行为影响的缺陷"
+        judge = "超过一半的问题被标为 high，整体偏重，不能只当风格问题看待"
     elif med_p >= 50:
-        sev_judge = "以中等严重度为主，多为需人工判断的逻辑/规范问题"
+        judge = "以中等严重度为主，多为需人工判断的逻辑/规范问题"
     else:
-        sev_judge = "整体偏轻，多为风格与规范类问题"
+        judge = "整体偏轻，多为风格与规范类问题"
 
-    # 规则分布: 取 top5, 粗略归类规范类 vs 正确性类
-    if rules:
-        top_str = "、".join(f"{rk} ×{n}" for rk, n in rules[:5])
-        rule_line = f"触发最集中的规则为 {top_str}。"
-        style_kw = ("TYPEHINT", "DOCSTRING", "MUTABLE", "WILDCARD", "IMPORT", "NAMING", "SSD-RULE")
-        logic_kw = ("R-", "IMPACT", "LOOP", "CALLER")
-        has_style = any(any(k in rk.upper() for k in style_kw) for rk, _ in rules[:5])
-        has_logic = any(any(k in rk.upper() for k in logic_kw) for rk, _ in rules[:5])
-        if has_style and has_logic:
-            rule_line += ("其中规范类（类型注解/docstring/可变默认参数等，可下沉 CI 机械拦截）"
-                          "与正确性问题类（caller_param、R-LOOP 等导致运行期错误的接口/循环纪律问题）"
-                          "并存，后者应优先跟进。")
-        elif has_style:
-            rule_line += "以代码规范类问题为主，可考虑下沉到 CI lint 机械拦截，减少人肉 review 噪音。"
-        elif has_logic:
-            rule_line += "以接口/循环等正确性问题为主，应优先跟进排查运行期风险。"
+    overview = (
+        f"严重度上 high {hc} 条（{hc_p}%）、medium {med} 条（{med_p}%）、"
+        f"low 及以下 {low} 条（{low_p}%），{judge}。"
+    )
+
+    # 规则归类: 规范类 vs 正确性/稳定性类
+    style_items: list[tuple[str, int]] = []
+    logic_items: list[tuple[str, int]] = []
+    for i, (name, n) in enumerate(friendly):
+        key = raw_rules[i][0] if i < len(raw_rules) else ""
+        cat = _categorize(name, key)
+        (logic_items if cat == "正确性/稳定性类" else style_items).append((name, n))
+
+    def _fmt(items: list[tuple[str, int]]) -> str:
+        items = sorted(items, key=lambda x: -x[1])
+        return "、".join(f"{nm} {n} 条" for nm, n in items[:3])
+
+    style_total = sum(n for _, n in style_items)
+    logic_total = sum(n for _, n in logic_items)
+    if style_items and logic_items:
+        dom = "代码规范类" if style_total >= logic_total else "正确性/稳定性类"
+        problem_types = (
+            f"主要归为两类：代码规范类（{_fmt(style_items)}）"
+            f"和正确性/稳定性类（{_fmt(logic_items)}），后者会直接影响运行行为。"
+            f"{dom}出现次数最多。"
+        )
+    elif style_items:
+        problem_types = (
+            f"以代码规范类为主（{_fmt(style_items)}），可下沉到 CI 机械拦截，"
+            f"减少人肉 review 噪音。"
+        )
+    elif logic_items:
+        problem_types = (
+            f"以正确性/稳定性类为主（{_fmt(logic_items)}），应优先人工跟进排查运行期风险。"
+        )
     else:
-        rule_line = "本周未捕捉到具体规则命中的分布。"
+        problem_types = "本周未捕捉到具体规则命中的分布。"
 
-    avg = f"{suggestion_count / mr_count:.1f}" if mr_count else "—"
-    parts = [
-        f"本周共产生 **{suggestion_count}** 条检视建议，覆盖 **{mr_count}** 个 MR"
-        + (f"，平均每个 MR 约 {avg} 条" if mr_count else "") + "。",
-        f"**严重度**：high {hc}（{hc_p}%）"
-        + (f"、含 critical {crit} 条" if crit else "")
-        + f"、medium {med}（{med_p}%），low/warning/other 共 {low}（{low_p}%）；{sev_judge}。",
-        f"**问题分布**：{rule_line}",
-    ]
-    return "\n".join(parts)
+    follow = (
+        "类型标注、docstring 等规范问题可下沉到 CI 机械拦截；"
+        "接口参数、循环、资源等正确性问题应优先人工确认修复。"
+    )
+
+    return "\n\n".join([
+        f"**概述**\n{overview}",
+        f"**问题类型**\n{problem_types}",
+        f"**跟进建议**\n{follow}",
+    ])
 
 
 def _render_merged_mrs(d: dict[str, Any]) -> str:
