@@ -14,7 +14,7 @@
         变更摘要 (LLM 或本系统拼接) +
         涉及 MR 列表
 
-    ## 三、本周代码质量扫描            (repo_scan section)
+    ## 三、本周代码质量全量扫描        (repo_scan section)
         高风险模块 / 新增坏味道 / 测试覆盖与可靠性 / 建议跟进
 
 每段标题用 `##` 而 LLM 可能产出 `#` — 渲染前 demote.
@@ -33,7 +33,7 @@ from .rule_translate import translate_rule_key
 SECTION_TITLES: dict[str, str] = {
     "telemetry":   "一、本周检视概况",
     "merged_mrs":  "二、本周 {branch} 变更汇总",
-    "repo_scan":   "三、本周代码质量扫描",
+    "repo_scan":   "三、本周代码质量全量扫描",
 }
 
 
@@ -60,7 +60,7 @@ def _demote_llm_headings(md: str | None) -> str:
 
 
 def _strip_leading_section_header(md: str | None, label: str) -> str:
-    """去掉 LLM 自带、与渲染层重复的节标题（如『变更摘要』『本周代码质量扫描』）.
+    """去掉 LLM 自带、与渲染层重复的节标题（如『变更摘要』『本周代码质量全量扫描』）.
 
     LLM 有时仍会输出标题，这里防御性剥离首行, 让渲染层统一加标题, 避免重复.
     """
@@ -409,10 +409,10 @@ def _render_merged_mrs(d: dict[str, Any]) -> str:
 
 
 def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
-    """代码质量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
+    """本周代码质量全量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
     if pre_rendered:
         # 防御性: 去掉 LLM 自带的节标题(渲染层已加), 并把 # 降级为粗体
-        return _strip_leading_section_header(_demote_llm_headings(pre_rendered), "本周代码质量扫描")
+        return _strip_leading_section_header(_demote_llm_headings(pre_rendered), "本周代码质量全量扫描")
     # 兜底: 由 data 合成 markdown
     target_branch = d.get("target_branch", "?")
     stats = d.get("diff_stats", {})

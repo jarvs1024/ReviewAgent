@@ -1,4 +1,4 @@
-"""Layer-C1 collector: 本周代码质量扫描 (确定性 / 规则引擎版).
+"""Layer-C1 collector: 本周代码质量全量扫描 (独立于本周检视概况的全局体检; 确定性 / 规则引擎版).
 
 设计:
 - 不再拉 MR 的 unified diff 去解析行数 (GitLab 返回 unified diff, 旧的正则按
@@ -31,10 +31,11 @@ from reviewagent.opencode.client import client as opencode
 from reviewagent.telemetry.store import get_store
 
 from .base import CollectorContext, SectionResult
+from ..rule_translate import RuleNameResolver
 
 
 class RepoScanCollector:
-    """本周代码质量扫描 (确定性, 基于 suggestions 聚合)."""
+    """本周代码质量全量扫描 (确定性, 基于 suggestions 聚合; 独立于本周检视概况)."""
 
     name: str = "repo_scan"
 
@@ -110,11 +111,16 @@ class RepoScanCollector:
         if "unspecified" in sev:
             severity["other"] = sev["unspecified"]
 
+        # 规则 key 翻译为可读类别名 (动态解析 .agents/rules + 提示词模板), 与本周检视汇总一致
+        resolver = RuleNameResolver.from_repo(project_id)
+        top_rules_friendly = [(resolver.translate(rk), n) for rk, n in top_rules]
+
         deterministic_md = self._render_markdown(
             target_branch=target_branch,
             week_start=week_start, week_end=week_end,
             high_risk=high_risk, severity=severity,
-            top_rules=top_rules, suggestion_total=len(suggestions),
+            top_rules=top_rules, top_rules_friendly=top_rules_friendly,
+            suggestion_total=len(suggestions),
         )
 
         # 调 opencode 生成"代码质量扫描"综述 (让 LLM 自由发挥, 不限制规则命中)
@@ -126,7 +132,8 @@ class RepoScanCollector:
                 target_branch=target_branch,
                 week_start=week_start, week_end=week_end,
                 high_risk=high_risk, severity=severity,
-                top_rules=top_rules, suggestion_total=len(suggestions),
+                top_rules=top_rules, top_rules_friendly=top_rules_friendly,
+                suggestion_total=len(suggestions),
                 prev_data=prev_repo,
             )
             if not llm_md or not llm_md.strip():
@@ -163,20 +170,37 @@ class RepoScanCollector:
         high_risk: list[dict[str, Any]],
         severity: dict[str, int],
         top_rules: list[tuple[str, int]],
+        top_rules_friendly: list[tuple[str, int]],
         suggestion_total: int,
         prev_data: dict[str, Any] | None = None,
     ) -> str:
-        """构造发给 weekly_quality_scan agent 的 user prompt (聚合数据)."""
+        """构造发给 weekly_quality_scan agent 的 user prompt (聚合数据).
+
+        定位: 独立于『本周检视概况』的全量代码体检, 从整个项目出发看本周所有代码变动。
+        输出固定 4 小节: 高风险模块 / 新增坏味道 / 测试覆盖与可靠性 / 建议跟进。
+        """
         ws = week_start.strftime("%Y-%m-%d")
         we = week_end.strftime("%Y-%m-%d")
         lines: list[str] = [
-            "你是代码质量分析师。下面是本周代码检视的真实产出聚合数据。",
-            "请自由发挥，写一段『本周代码质量扫描』综述：指出真正值得关注的高风险模块、质量趋势、",
-            "潜在技术债、以及建议团队跟进的方向。不要机械罗列规则命中，重点给出有判断力的总结，",
-            "可以引用具体文件/建议作为佐证。",
-            "输出严格 JSON：{\"markdown\": \"...\"}, markdown 用中文，可含 bullet，不要用 # 顶级标题。",
+            "你是代码质量分析师。下面是本周代码检视的真实聚合数据，请做一次**全量代码体检**。",
             "",
-            f"数据范围：{ws} ~ {we}，目标分支 `{target_branch}`，本周共 {suggestion_total} 条检视建议。",
+            "【定位说明】这是独立于『本周检视概况』的全量代码扫描：后者是逐 MR 的 diff 级检视汇总（只看改动行），"
+            "本段从整个项目出发，对本周**所有代码变动**做一次全局体检，弥补 diff 检视只看局部、看不到跨文件影响与全局趋势的劣势。",
+            "",
+            "请输出一段『本周代码质量全量扫描』综述，严格按以下 4 个小节组织"
+            "（用 **加粗** 作小标题，顺序不变，小节之间空一行）：",
+            "**高风险模块** —— 从整体项目视角，指出本周风险最集中 / 最该关注的模块与文件，说明为什么"
+            "（结合 high/critical 严重度、改动面、模块间耦合与影响半径），不要逐条罗列 diff。",
+            "**新增坏味道** —— 本周新出现或反复出现的代码坏味道；从全局看哪些趋势值得警惕（不要只报规则命中次数）。",
+            "**测试覆盖与可靠性** —— 本周改动是否有对应测试覆盖、异常路径是否验证、可靠性风险（资源泄漏 / 并发 / 超时 / 幂等等）如何。",
+            "**建议跟进** —— 具体、可执行的跟进项（补哪些测试、沉淀哪些规范、重构优先级）。",
+            "",
+            "要求：严格输出 JSON：{\"markdown\": \"...\"}, markdown 用中文，可含 bullet，不要用 # 顶级标题，"
+            "不要写『本周代码质量全量扫描』标题（渲染层已加）。markdown 内换行用 \\n 转义。"
+            "不要机械罗列 R-XXX 原始规则键，规则命中只是信号，重点是你的判断。数字准确使用我给的数据，不要编造。",
+            "",
+            f"数据范围：{ws} ~ {we}，目标分支 `{target_branch}`，本周共 {suggestion_total} 条检视建议"
+            "（全量视角，覆盖本周所有代码变动）。",
             "",
             "高风险模块（按 high/critical 加权）：",
         ]
@@ -196,10 +220,10 @@ class RepoScanCollector:
         sev_str = "、".join(f"{k}={v}" for k, v in severity.items()) if severity else "(无)"
         lines.append(f"严重度分布：{sev_str}")
         lines.append("")
-        lines.append("高频触发规则：")
-        if top_rules:
-            for rk, n in top_rules[:8]:
-                lines.append(f"- `{rk}` × {n}")
+        lines.append("高频触发的规则（已转为可读类别名，可能为中文 / 英文描述；不要回退到原始机器 key）：")
+        if top_rules_friendly:
+            for rk, n in top_rules_friendly[:8]:
+                lines.append(f"- {rk} × {n}")
         else:
             lines.append("- (无)")
         # 上周对比数据 (给 LLM 真实趋势基准, 避免编造)
@@ -225,6 +249,7 @@ class RepoScanCollector:
         high_risk: list[dict[str, Any]],
         severity: dict[str, int],
         top_rules: list[tuple[str, int]],
+        top_rules_friendly: list[tuple[str, int]],
         suggestion_total: int,
         prev_data: dict[str, Any] | None = None,
     ) -> str:
@@ -232,6 +257,7 @@ class RepoScanCollector:
         prompt = self._build_llm_prompt(
             target_branch=target_branch, week_start=week_start, week_end=week_end,
             high_risk=high_risk, severity=severity, top_rules=top_rules,
+            top_rules_friendly=top_rules_friendly,
             suggestion_total=suggestion_total, prev_data=prev_data,
         )
         oc_result = opencode.run(
@@ -251,6 +277,7 @@ class RepoScanCollector:
         high_risk: list[dict[str, Any]],
         severity: dict[str, int],
         top_rules: list[tuple[str, int]],
+        top_rules_friendly: list[tuple[str, int]] | None = None,
         suggestion_total: int,
     ) -> str:
         ws = week_start.strftime("%Y-%m-%d")
@@ -278,11 +305,12 @@ class RepoScanCollector:
             lines.append("- (本周无 high/critical 严重度建议)")
         lines.append("")
 
-        # 新增坏味道 (按规则聚合)
+        # 新增坏味道 (按规则聚合, 用翻译后的可读类别名)
         lines.append("**新增坏味道**")
-        if top_rules:
-            for rule_key, count in top_rules[:5]:
-                lines.append(f"- `{rule_key}` × **{count}**")
+        friendly = top_rules_friendly or [(rk, n) for rk, n in top_rules]
+        if friendly:
+            for name, count in friendly[:5]:
+                lines.append(f"- {name} × **{count}**")
         else:
             lines.append("- (本周无规则连续触发, 检视质量稳定)")
         lines.append("")
