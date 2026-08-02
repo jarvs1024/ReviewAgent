@@ -6,7 +6,7 @@ output_schema:
   properties:
     title:
       type: string
-      description: 优化后的 MR title（≤ 60 字，保留原意）
+      description: 优化后的 MR title（≤ 60 字，按策略判断保留 / 润色 / 重写）
     description_md:
       type: string
       description: MR description Markdown，以 "## 变更概览" 开头 + 4-8 行中文 bullet
@@ -39,6 +39,45 @@ tools:
   "description_md": "## 变更概览\n\n- 含文件/函数名 + 关键行为的中文 bullet\n\n- 同上"
 }
 ```
+
+# title 优化策略（**先判断再决策**）
+
+拿到原 title + diff 后，**先判断**原 title 属于哪一类，**再决定**输出策略：
+
+## 分类判断
+
+| 类别 | 判定信号 | 输出策略 |
+|---|---|---|
+| **A. 已具体 + 与 diff 一致** | 原 title 已含具体模块 / 函数名 / 行为动词（如 "新增 `probe.py` 提供健康检查"），与 diff 改动吻合 | **轻度润色**：保留主体，仅修剪冗词、调整语序、统一术语 |
+| **B. 模糊 / 模板化** | 纯测试标签（"E2E 8-bug"、"test"、"W24 测试"）、WIP、编号（"#123"）、纯英文缩写（"refactor"、"update"）、emoji 开头 | **按 diff 重写**：用动词 + 反引号对象 + 关键结果 |
+| **C. 与 diff 不符 / 误导** | 原 title 说 "fix X" 但 diff 是新增；或提到模块与实际改动文件无关；或夸大/缩小实际范围 | **按 diff 完全重写**，可保留 1-2 个原 title 中的关键词作为衔接 |
+
+## 字面要求
+
+1. **≤ 60 字**（含标点，**不含反引号内文**）；超长必须压缩
+2. **动词开头**：首选 `新增 / 调整 / 重构 / 修复 / 优化 / 移除 / 拆分 / 合并`，按 diff 实际动作选
+3. **必含反引号对象**：文件名 / 函数名 / 类名 / 参数名 / 配置项至少 1 个，反引号包裹
+4. **避免空泛**：不要写 "代码优化"、"性能提升"、"bug 修复" 这类无主语短语；必须点到具体模块
+5. **避免测试标签残留**：原 title 是 "E2E 8-bug test" 这种，重写时**不要保留** "test / E2E / 8-bug"，但可在 description 第一条点出测试覆盖范围
+6. **避免 emoji 装饰**（🎉 / ✨ / 🔥 等），除非原 title 已有
+7. **GitLab MR title 兼容**：不强制 conventional commit 前缀（feat:/fix:），但允许加
+
+## 反例 vs 正例
+
+- ❌ "E2E 8-bug test: 4 categories × 2" → ✅ "新增 `services/probe.py` 提供健康检查，`dispatcher` 未透传 `timeout`/`retry`"
+- ❌ "update" → ✅ "调整 `dispatch_email` 透传 `channel`/`retries` 参数"
+- ❌ "fix typo" → ✅ "修正 `lookup_recipient` 拼写错误并补 `tenant_id` 参数"
+- ❌ "W24 refactor" → ✅ "重构 `auth_v2.py` 拆分为 `validate` / `sign` / `verify` 三个职责"
+- ⚠️ "新增 marker 错位回归验证脚本"（已具体 + 与 diff 一致）→ ✅ "新增 marker 错位回归脚本"（仅删"验证"二字）
+
+## 输出决策记录（仅自己判断，不写进 JSON）
+
+```
+if 原title in [A类]: 输出 = 原title 去冗 + 润色
+elif 原title in [B类]: 输出 = 按 diff 重写
+elif 原title in [C类]: 输出 = 按 diff 完全重写
+```
+
 
 ## description_md 字面格式（**必须遵守**）
 
