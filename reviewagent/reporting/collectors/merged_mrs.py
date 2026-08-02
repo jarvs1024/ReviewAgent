@@ -157,9 +157,21 @@ class MergedMrsCollector:
         items = data.get("items") or []
         lines: list[str] = [
             "你是技术周报编辑。下面是本周合并到目标分支的 MR 清单。",
-            "请据此写一段『变更摘要』：按主题/模块归纳团队本周的主要交付，用自然语言讲清楚做了什么、",
-            "有什么值得注意的趋势。不要只罗列 MR，要有洞察。",
-            "输出严格 JSON：{\"markdown\": \"...\"}, markdown 用中文，可含 bullet，不要用 # 顶级标题。",
+            "请据此写一段『变更摘要』，结构固定为：概述 + 新增 + 修改 + 删除 四部分。",
+            "",
+            "【格式要求】",
+            "- 概述：1~2 句自然语言，讲清本周主要交付与趋势，不要流水账。",
+            "- 新增：本周新增的功能/模块/文件/接口。",
+            "- 修改：修复/重构/优化/配置/测试/文档等（非新增非删除的都归这）。",
+            "- 删除：本周删除的代码/文件/模块/接口。",
+            "- 若能从 MR 判断所属模块/服务，可在条目后标注，例如『（io 工具模块）』或『新增 services 基础服务模块（root）』。",
+            "- 不要 @ 作者（不要出现 @username）。",
+            "- 不要输出 # 顶级标题，不要输出『变更摘要』标题（渲染层会加）。",
+            "- 列表项用 • 开头。",
+            "",
+            "【输出要求】只输出一个 JSON 对象 {\"markdown\": \"...\"}。",
+            "重要：markdown 值里所有换行必须用 \\n 表示，不要出现真实换行符；内部双引号用 \\\" 转义。",
+            "示例：{\"markdown\": \"概述\\n本周...\\n\\n新增\\n• 新增 xxx（io 工具模块）\\n\\n修改\\n• 修复 ...\\n\\n删除\\n• 移除 ...\"}",
             "",
             f"目标分支：`{target_branch}`",
             f"本周合并 MR 数：{len(items)}，涉及作者：{data.get('author_count', 0)} 位。",
@@ -168,12 +180,12 @@ class MergedMrsCollector:
             prev_count = prev_data.get("merge_count", prev_data.get("total", 0))
             lines.append(f"上周合并 MR 数：{prev_count}（用于趋势对比，不要编造）。")
         lines.append("")
-        lines.append("MR 清单（iid | 标题 | 作者 | +增/-删 | 描述摘要）：")
+        lines.append("MR 清单（iid | 标题 | 作者 | 描述摘要）：")
         for m in items[:40]:
             desc = (m.get("description") or "").strip().replace("\n", " ")[:300]
+            author = m.get("author") or "?"
             lines.append(
-                f"- [{m.get('iid')}] {m.get('title')} | @{m.get('author')} "
-                f"| +{m.get('additions')}/-{m.get('deletions')} | {desc}"
+                f"- [{m.get('iid')}] {m.get('title')} | 作者: {author} | {desc}"
             )
         return "\n".join(lines)
 
@@ -187,5 +199,6 @@ class MergedMrsCollector:
             workdir=Path.cwd(),
             files=[],
             timeout=max(120, int(config.rq_worker_timeout * 0.4)),
+            tolerant_markdown=True,  # JSON 解析失败时把原文当 markdown 兜底, 保证新格式生效
         )
         return (oc_result.data or {}).get("markdown", "") or ""

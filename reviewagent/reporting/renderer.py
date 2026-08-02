@@ -140,25 +140,40 @@ def _infer_nature(title: str) -> str:
 
 
 def _build_change_summary(mr_list: list[dict], author_count: int) -> str:
-    """确定性变更概要: 合并数/作者数 + 按性质聚合 + 关键 MR 列举."""
+    """确定性变更概要（与 LLM 同款格式）: 概述 + 新增/修改/删除 归类，不 @ 作者."""
     if not mr_list:
         return ""
+    # 按 新增 / 修改 / 删除 三段归类
+    groups: dict[str, list[str]] = {"新增": [], "修改": [], "删除": []}
     nature_counter: dict[str, int] = {}
     for m in mr_list:
-        n = _infer_nature(m.get("title", ""))
-        nature_counter[n] = nature_counter.get(n, 0) + 1
-    parts = [f"本周共合并 **{len(mr_list)}** 个 MR，涉及 **{author_count}** 位作者。"]
+        title = (m.get("title") or "").replace("|", "\\|").replace("\n", " ")
+        nature = _infer_nature(m.get("title", ""))
+        nature_counter[nature] = nature_counter.get(nature, 0) + 1
+        if nature == "新增":
+            groups["新增"].append(title)
+        elif nature == "删除":
+            groups["删除"].append(title)
+        else:
+            groups["修改"].append(title)
+
+    parts = [
+        "概述",
+        f"本周共合并 **{len(mr_list)}** 个 MR，涉及 **{author_count}** 位作者。",
+    ]
     if nature_counter:
         desc = "、".join(f"{k} {v} 个" for k, v in sorted(nature_counter.items(), key=lambda x: -x[1]))
         parts.append(f"按性质看：{desc}。")
     parts.append("")
-    parts.append("**关键变更**")
-    for m in mr_list[:5]:
-        nature = _infer_nature(m.get("title", ""))
-        title = (m.get("title") or "").replace("|", "\\|").replace("\n", " ")
-        author = m.get("author") or "?"
-        parts.append(f"- [{nature}] {title}（@{author}）")
-    return "\n".join(parts)
+    for label in ("新增", "修改", "删除"):
+        items = groups[label]
+        if not items:
+            continue
+        parts.append(label)
+        for t in items[:8]:
+            parts.append(f"- {t}")
+        parts.append("")
+    return "\n".join(parts).strip()
 
 
 def render_section(name: str, sr: SectionResult) -> str:

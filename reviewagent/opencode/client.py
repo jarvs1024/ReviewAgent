@@ -94,6 +94,7 @@ class OpencodeClient:
         workdir: Path,
         files: list[Path] | None = None,
         timeout: int | None = None,
+        tolerant_markdown: bool = False,
     ) -> OpencodeResult:
         """通过 HTTP API 调用 opencode serve 执行 agent；返回 OpencodeResult.
 
@@ -103,6 +104,9 @@ class OpencodeClient:
             workdir: opencode 进程的工作目录（一般是 git worktree）
             files: 附加为文件 context 的路径列表
             timeout: 超时秒数；默认 self.default_timeout
+            tolerant_markdown: 为 True 时，若响应不是合法 JSON 且非截断导致，
+                则把 assistant 原文（去掉 ``` 围栏）当作 {"markdown": "..."} 兜底返回，
+                便于周报类 agent 在模型偶发不守 JSON 约束时仍能产出内容。
 
         Returns:
             OpencodeResult — 包含解析后的 dict 和 token 统计
@@ -188,6 +192,22 @@ class OpencodeClient:
                         model=msg.get("info", {}).get("modelID", ""),
                     )
                 except OpencodeOutputError as e:
+                    # 容错：非截断导致的 JSON 解析失败，把原文当 markdown 兜底
+                    if tolerant_markdown and "finish=length" not in str(e):
+                        raw = self._extract_text(msg)
+                        if raw:
+                            md = _strip_fence(raw).strip()
+                            if md:
+                                logger.warning(
+                                    "opencode.run agent={} JSON 解析失败, 兜底把原文当 markdown",
+                                    agent,
+                                )
+                                return OpencodeResult(
+                                    data={"markdown": md},
+                                    prompt_tokens=0,
+                                    completion_tokens=0,
+                                    model=msg.get("info", {}).get("modelID", ""),
+                                )
                     # 检查是否是 finish=length（模型输出被截断）
                     if "finish=length" in str(e) and attempt == 0:
                         logger.warning(
@@ -280,6 +300,33 @@ class OpencodeClient:
             "input": tokens.get("input", 0) or tokens.get("prompt", 0) or 0,
             "output": tokens.get("output", 0) or tokens.get("completion", 0) or 0,
         }
+
+
+    @staticmethod
+    def _extract_text(msg: dict[str, Any]) -> str:
+        """提取 assistant 最后一个 text part 的纯文本（忽略 reasoning）."""
+        parts = msg.get("parts") or []
+        text = ""
+        for part in reversed(parts):
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                text = part["text"]
+                break
+        if not text:
+            for part in reversed(parts):
+                if isinstance(part, dict) and part.get("text") and part.get("type") != "reasoning":
+                    text = part["text"]
+                    break
+        return (text or "").strip()
+
+
+def _strip_fence(text: str) -> str:
+    """去掉首尾的 ```json ... ``` / ``` ... ``` 围栏，返回内部文本."""
+    if not text:
+        return ""
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    return text.strip()
 
 
 def _extract_json_block(text: str) -> str:
