@@ -1199,6 +1199,18 @@ class ImproveCommand(BaseCommand):
                         "```suggestion", _warn_block + "```suggestion", 1
                     )
 
+                # === 统一修正 suggestion modifier: GitLab -N+M 语义是 [target-N, target+M] 全删
+                # LLM 通常写 :-0+N (N=improved 行数), 但 N 实际是 below=删除后续 N 行, 会多删 N-1 行
+                # 正确: 强制 :-0+0 (above=0, below=0), 只删注释行 1 行, 插入改进代码块所有行
+                # 例: caller.py:11 docstring (existing 1 行 improved 2 行) -> suggestion:-0+0
+                #     删 line 11 (1 行), 插入 def + docstring (2 行), 不破坏 line 10/12/13
+                body_to_post = re.sub(
+                    r"```suggestion:-?\d*\+?\d*",
+                    "```suggestion:-0+0",
+                    body_to_post,
+                    count=1,
+                )
+
                 note_id = self.gitlab.post_mr_discussion(
                     self.project_id,
                     self.mr_iid,
