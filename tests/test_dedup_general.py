@@ -376,3 +376,83 @@ def test_token_adoption_match_empty_inputs():
     assert not _token_adoption_match("a", "", line=1, line_end=1, improved_code="x")
     assert not _token_adoption_match("a", "b", line=1, line_end=1, improved_code="")
     assert not _token_adoption_match("a", "b", line=1, line_end=1, improved_code=None)
+
+
+def test_different_rule_keys_not_deduped_at_close_lines(tmp_telemetry):
+    """Regression: rule_keys 不重叠的建议即使 (file, line±2) 重叠也不应 dedup.
+
+    场景: account_helpers.py L10 已发 SSD-RULE-NO-MUTABLE-DEFAULT,
+    LLM 又识别出 L12 SSD-RULE-NO-LOG-EXC (snap_to_existing 调整到 12).
+    修复前: line_at (L10±2 = 8~12) 命中 → 误 dedup → NO-LOG-EXC 漏发.
+    修复后: rule_keys LIKE 不重叠 → 放行 → NO-LOG-EXC 正常发布.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.telemetry.store import get_store
+
+    head_sha = "feedface" * 5
+    s = get_store()
+    # Pre-seed: NO-MUTABLE-DEFAULT at L10
+    s.record_suggestion(
+        project_id=34, mr_iid=166, note_id="seed-mut",
+        file_path="services/account_helpers.py", target_line=10,
+        target_line_end=10,
+        existing_code="def format_record(rec, tenant_id=None, items=[]):",
+        improved_code="def format_record(rec, tenant_id=None, items=None):",
+        header="可变默认实参", label="potential bug",
+        severity="high",
+        rule_keys=["SSD-RULE-NO-MUTABLE-DEFAULT"],
+        fingerprint="mutfp001", cohort_key="mutcohort",
+        severity_source="rule",
+        head_sha=head_sha,
+    )
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute(
+        "UPDATE suggestions SET head_sha=?, state='open' WHERE note_id='seed-mut'",
+        (head_sha,),
+    )
+    conn.commit()
+    conn.close()
+
+    # 新建议: NO-LOG-EXC at L12 (与 seed 不同规则)
+    new_raw = {
+        "file": "services/account_helpers.py",
+        "line": 12,
+        "new_line": 12,
+        "header": "静默吞异常",
+        "label": "potential bug",
+        "rationale": "违反 SSD-RULE-NO-LOG-EXC: except Exception: pass 静默吞错",
+        "severity": "high",
+        "improved_code": "except Exception:\n    logging.exception(...)\n    raise",
+        "existing_code": "except Exception:\n    pass",
+        "rule_keys": ["SSD-RULE-NO-LOG-EXC"],
+    }
+
+    # 验证 dedup 查询不命中
+    s2 = get_store()
+    exists = s2.suggestion_exists_at_line(
+        project_id=34, mr_iid=166,
+        file_path="services/account_helpers.py",
+        target_line=12, severity="high",
+        head_sha=head_sha, line_tolerance=2,
+        rule_keys="SSD-RULE-NO-LOG-EXC",
+    )
+    assert exists is False, "不同 rule_keys 不应被 line_at dedup 误杀"
+
+    # 反向验证: 同 rule_keys 仍会 dedup
+    exists_same = s2.suggestion_exists_at_line(
+        project_id=34, mr_iid=166,
+        file_path="services/account_helpers.py",
+        target_line=12, severity="high",
+        head_sha=head_sha, line_tolerance=2,
+        rule_keys="SSD-RULE-NO-MUTABLE-DEFAULT",
+    )
+    assert exists_same is True, "同 rule_keys 应被 dedup"
+
+    # 反向验证: 不传 rule_keys 时走旧 (file, line) 兜底
+    exists_none = s2.suggestion_exists_at_line(
+        project_id=34, mr_iid=166,
+        file_path="services/account_helpers.py",
+        target_line=12, severity="high",
+        head_sha=head_sha, line_tolerance=2,
+    )
+    assert exists_none is True, "不传 rule_keys 应走旧 (file, line) 兜底"

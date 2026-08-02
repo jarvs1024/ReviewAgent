@@ -480,6 +480,7 @@ class Store:
         severity: str = "",  # 保留参数仅为向后兼容, 当前实现不再按 severity 过滤
         head_sha: str = "",
         line_tolerance: int = 0,
+        rule_keys: str | None = None,  # 逗号分隔字符串, 命中任一即视为同规则 dedup
     ) -> bool:
         """跨次去重 (heuristic): 同 (file, line[±tolerance][, head_sha]) 已发布则返回 True.
 
@@ -502,6 +503,13 @@ class Store:
 
         - 状态过滤: 任何状态都视为"已存在" — dismissed 也算, 用户已经明确
           拒绝过这条建议, 不应该重复推送骚扰.
+
+        rule_keys 维度 (None = 兼容旧行为): 调用方传入新建议的 rule_keys
+        (逗号分隔字符串, 如 "SSD-RULE-NO-MUTABLE-DEFAULT,SSD-RULE-TYPEHINTS"),
+        若已有建议 rule_keys 与传入 rule_keys 有任一重叠 (LIKE 匹配), 才
+        视为同规则 dedup. **完全不同的规则即使在同 line ±tolerance 内也
+        不应误杀** (例: SSD-RULE-NO-MUTABLE-DEFAULT L10 与
+        SSD-RULE-NO-LOG-EXC L12 是两条独立建议, 不应 dedup).
         """
         del severity  # 静默未使用, 保持向后兼容的调用签名
         lo = target_line - max(0, line_tolerance)
@@ -513,16 +521,41 @@ class Store:
         # Why: 之前用 head_sha 限定导致跨 V dedup 失效 (V1 V2 V3 同一 file:line
         # 都会重新发, 引起 GitLab 重复评论).
         with self._conn() as conn:
-            row = conn.execute(
-                """
-                SELECT 1 FROM suggestions
-                WHERE project_id=? AND mr_iid=?
-                  AND file_path=? AND target_line BETWEEN ? AND ?
-                  AND state=\'open\'
-                LIMIT 1
-                """,
-                (project_id, mr_iid, file_path, lo, hi),
-            ).fetchone()
+            # 基础 (file, line, state=open) 过滤
+            base_sql = (
+                "SELECT 1 FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? "
+                "  AND file_path=? AND target_line BETWEEN ? AND ? "
+                "  AND state='open'"
+            )
+            base_params: list = [project_id, mr_iid, file_path, lo, hi]
+            # rule_keys 比对策略 (2 选 1):
+            #   A) 已有建议 rule_keys 为空/None (旧数据 / 未分类) → 视为 dedup 命中
+            #      (兼容旧 dedup 行为, 避免新规则绕过旧建议)
+            #   B) 已有建议 rule_keys 与新建议 rule_keys 任一重叠 → 视为 dedup 命中
+            #      (用 ',<rk>,' 包裹 LIKE 避免前缀误匹配, 如 SSD-RULE-NO-LOG
+            #      不能误命中 SSD-RULE-NO-LOG-EXC)
+            rk_clauses = (
+                " AND ("
+                "(COALESCE(rule_keys,'') = '')"          # 情况 A: 旧数据
+                " OR "
+                "(" + " OR ".join(
+                    "(',' || COALESCE(rule_keys,'') || ',') LIKE ?"
+                    for _ in (rule_keys.split(",") if rule_keys else [])
+                    if _.strip()
+                ) + ")"
+                ")"
+            )
+            rk_params = []
+            if rule_keys:
+                rks = [rk.strip() for rk in rule_keys.split(",") if rk.strip()]
+                rk_params = [f"%,{rk},%" for rk in rks]
+            # 没有 rks 时, 第二个 OR 内空, SQL 变成 "... OR ()" → SQLite 不允许
+            # 退化处理: 没传 rule_keys 时直接走 (file, line) 兜底, 不加 rule_keys 子句
+            if not rk_params:
+                row = conn.execute(base_sql + " LIMIT 1", base_params).fetchone()
+            else:
+                row = conn.execute(base_sql + rk_clauses + " LIMIT 1", base_params + rk_params).fetchone()
         if head_sha:  # 保留参数以避免破坏调用方, 但不使用
             pass
             return row is not None

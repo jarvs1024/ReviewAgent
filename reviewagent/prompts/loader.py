@@ -52,5 +52,26 @@ def load(name: str) -> dict[str, Any]:
 
 
 def available() -> list[str]:
-    """列出所有可用 prompt 名称（不含 .md 后缀）."""
-    return [p.stem for p in PROMPTS_DIR.glob("*.md")]
+    """列出所有可用 prompt 名称（不含 .md 后缀）.
+
+    排除以下划线开头的私有片段 (如 `_general_rules_block.md`),
+    这些是给 chunk prompt 用的可复用 block, 不是独立 prompt.
+    """
+    return sorted(
+        p.stem for p in PROMPTS_DIR.glob("*.md") if not p.stem.startswith("_")
+    )
+
+
+def load_block(name: str) -> str:
+    """加载私有 block (下划线开头的 .md), 返回正文.
+
+    用于把通用规则 / SSD 规则表等可复用片段注入到 chunk prompt 里,
+    避免 system prompt 与 chunk prompt 引用脱节.
+    """
+    if not name.startswith("_"):
+        raise ValueError(f"load_block 只接受下划线开头的 block 名, got: {name}")
+    path = PROMPTS_DIR / f"{name}.md"
+    if not path.exists():
+        raise FileNotFoundError(f"block file not found: {path}")
+    md = frontmatter.load(path)
+    return md.content

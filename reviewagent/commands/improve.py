@@ -199,8 +199,16 @@ class ImproveCommand(BaseCommand):
             idents.add(m.group(1))
         for m in re.finditer(r"^\s*([A-Z][A-Z0-9_]{2,})\s*[:=]", added, re.MULTILINE):
             idents.add(m.group(1))
-        for m in re.finditer(r"^\s*from\s+\S+\s+import\s+([A-Za-z_]\w{2,})", added, re.MULTILINE):
+        # `from X import A` (单 ident)
+        for m in re.finditer(r"^\s*from\s+\S+\s+import\s+([A-Za-z_]\w{2,})\s*(?:$|#)", added, re.MULTILINE):
             idents.add(m.group(1))
+        # `from X import A, B, C` (多 ident, 不带括号)
+        # 匹配 import 后第一个 ident 后所有逗号分隔 ident
+        for m in re.finditer(r"^\s*from\s+\S+\s+import\s+([A-Za-z_]\w{2,})((?:\s*,\s*[A-Za-z_]\w{2,})*)", added, re.MULTILINE):
+            idents.add(m.group(1))
+            for sub in re.findall(r"\s*,\s*([A-Za-z_]\w{2,})", m.group(2)):
+                idents.add(sub)
+        # `from X import (A, B)` (括号多 ident)
         for m in re.finditer(r"^\s*from\s+\S+\s+import\s+\(([^)]+)\)", added, re.MULTILINE):
             for part in m.group(1).split(","):
                 name = part.strip().split(" as ")[0].strip()
@@ -436,29 +444,25 @@ class ImproveCommand(BaseCommand):
         vl_sorted = sorted(valid_lines)
         vl_str = f"{file_path}: {vl_sorted}"
 
-        # 通用规则清单 + 仓库规则 — 与 system prompt 保持一致
+        # 通用规则清单 — **inline 进 chunk prompt**, 不再引用 system prompt.
+        # Why: chunk prompt 跟 system prompt 分开发给 LLM, 引用式提示会被
+        #      LLM 跳过或被长上下文稀释注意力 → R-XXX 19 类基本不被识别.
+        #      把清单 inline 后, LLM 能直接看到每条规则的命中条件.
+        from reviewagent.prompts.loader import load_block as _load_block
+        _general_rules_block = _load_block("_general_rules_block")
+
         rules_block = ""
         if self.repo_context:
             rules_block = (
                 f"## 🔴 优先 1 — SSD 自定义规则 (项目方定义, 最高优先级)\n\n"
                 f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
                 f"{self.repo_context}\n\n"
-                f"## 🟡 优先 2 — 通用规则 (R-XXX 19 条, 详见 system prompt 的 `## 通用规则使用方式` 段)\n\n"
-
-                f"完成 SSD 规则扫描后, 按 system prompt 中的 19 条 R-XXX 清单覆盖剩余问题, rationale 以 R-XXX 开头.\n\n"
-
-                f"### 兜底: 野生问题 (不在 R-XXX 19 类内但有价值的)\n"
-
-                f"仅当 high severity (潜在 bug / 安全隐患) 才强制产 suggestion, rationale 以 `R-OTHER:<简短描述>` 开头, 例:\n"
-                f"- `R-OTHER:magic_number` 硬编码魔法数 (端口/超时/重试等)\n"
-                f"- `R-OTHER:typo` 标识符 / 注释拼写错误\n"
-                f"- `R-OTHER:dead_code` diff 引入后立即未使用\n"
-                f"- `R-OTHER:naming_inconsistency` 与同模块命名风格不一致\n"
-                f"- `R-OTHER:duplicated_definition` 与已有常量 / 函数重复\n"
-                f"- `R-OTHER:stale_comment` 注释与代码实际行为已不一致\n"
-                f"rationale 末尾加一句 '未命中 R-XXX 19 类, 原因: ...', 真的没找到就空着, 不要硬编.\n\n"
-                f"命中不要求必给 suggestion, 只在能直接 Apply 时才给 (无法 Apply → summary_md 文字描述).\n\n"
+                f"---\n\n"
+                f"{_general_rules_block}\n\n"
             )
+        else:
+            # 无 SSD 规则时也要给 LLM 通用规则清单
+            rules_block = _general_rules_block + "\n\n"
 
         # 跨文件 caller 引用: 优先用 _call_agent 预计算的全局结果, fallback 到 per-file 调用
         if cross_file_refs is None:
@@ -936,10 +940,18 @@ class ImproveCommand(BaseCommand):
                 try:
                     from reviewagent.telemetry.store import get_store as _dedup_store
                     _dedup_db = _dedup_store()
+                    # rule_keys 用于 dedup 精确化: 不同规则即使 (file, line±2) 重叠
+                    # 也不应误杀 (例: NO-MUTABLE-DEFAULT L10 vs NO-LOG-EXC L12)
+                    _raw_rks = (raw.get("rule_keys") if isinstance(raw, dict) else None)
+                    if isinstance(_raw_rks, list):
+                        _dedup_rks = ",".join(str(x) for x in _raw_rks if x)
+                    else:
+                        _dedup_rks = _raw_rks or ""
                     if _dedup_db.suggestion_exists_at_line(
                         self.project_id, self.mr_iid, file_path,
                         decision["new_line"], _sev, head_sha=_head_sha,
                         line_tolerance=2,
+                        rule_keys=_dedup_rks or None,
                     ):
                         logger.info(
                             "improve.skip_at_line project={} mr={} file={} line={} severity={} head_sha={}",
