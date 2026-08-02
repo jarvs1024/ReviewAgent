@@ -21,7 +21,7 @@ from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
 
 from .base import CollectorContext, SectionResult
-from ..rule_translate import translate_rule_key
+from ..rule_translate import RuleNameResolver, translate_rule_key
 
 
 class TelemetryCollector:
@@ -114,8 +114,10 @@ class TelemetryCollector:
             stats["dismissal_reasons"] = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
 
             # ---- 新增 pr_agent 风格字段 (放在 data 顶层) ----
-            # 规则 key 翻译为直观中文类别名, 供 LLM 汇总 + 兜底渲染都用
-            top_rules_friendly = [(translate_rule_key(rk), n) for rk, n in top_rules]
+            # 规则 key 翻译为直观类别名(动态解析: SSD 来自 .agents/rules, R-* 来自提示词模板),
+            # 供 LLM 汇总 + 兜底渲染都用
+            resolver = RuleNameResolver.from_repo(pid)
+            top_rules_friendly = [(resolver.translate(rk), n) for rk, n in top_rules]
             stats.update({
                 "mr_count": mr_count,
                 "mr_total": mr_overview_total["total"],
@@ -188,7 +190,7 @@ class TelemetryCollector:
 
         lines = [
             "你是技术周报「本周检视概况」里「本周检视汇总」一段的编辑。",
-            "下面给你本周自动化代码检视的聚合数据（规则名已翻译为直观中文，不要出现 SSD-RULE-* / R-* 这类原始机器 key）。",
+            "下面给你本周自动化代码检视的聚合数据（规则已转为可读的类别名或说明，可能为中文或英文描述；不要出现 SSD-RULE-* / R-* 这类原始机器 key，请用中文归纳）。",
             "",
             "请输出一段「本周检视汇总」：用 2~4 句中文、自然流畅地讲清三件事：",
             "1) 问题分布范围：本周共产生多少条检视建议、覆盖多少个 MR、平均每个 MR 几条（用数据说话）。",
