@@ -391,7 +391,7 @@ class ImproveCommand(BaseCommand):
                 "- 改了 SQL / ORM schema (model/migration 可能未同步)\n\n"
                 "确认无风险 → 在 summary_md 注明 '未发现 cross-file 关联'。**不要为凑数硬编 R-OTHER-IMPACT**。\n\n"
             )
-        section = "## 🔍 跨文件影响分析 (Python 端已 grep, **优先级 P1, 在所有规则检查之前**)\n\n"
+        section = "## 🟠 优先 1 — 跨文件影响分析 (Python 端已 grep, **P1, 在所有规则检查之前**)\n\n"
         section += f"在 worktree 找到 {len(refs)} 条其他文件对本文件改动的引用:\n\n"
         for ref in refs:
             section += (
@@ -454,7 +454,7 @@ class ImproveCommand(BaseCommand):
         rules_block = ""
         if self.repo_context:
             rules_block = (
-                f"## 🔴 优先 1 — SSD 自定义规则 (项目方定义, 最高优先级)\n\n"
+                f"## 🔴 优先 2 — SSD 自定义规则 (项目方定义)\n\n"
                 f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
                 f"{self.repo_context}\n\n"
                 f"---\n\n"
