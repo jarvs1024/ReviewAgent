@@ -1194,6 +1194,7 @@ class ImproveCommand(BaseCommand):
                     )
                 body_to_post = normalised["body"]
                 nc = decision.get("normalised_code") or normalised["improved_code"]
+                n_lines = len(nc.split("\n"))
                 if nc != normalised["improved_code"]:
                     logger.info(
                         "improve.fix_indent project={} mr={} file={} line={}",
