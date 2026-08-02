@@ -506,28 +506,25 @@ class Store:
         del severity  # 静默未使用, 保持向后兼容的调用签名
         lo = target_line - max(0, line_tolerance)
         hi = target_line + max(0, line_tolerance)
+        # dedup 策略: 跨 head_sha 共享 (file, line) dedup, 但只看 state=open.
+        # 已 applied / dismissed 的视为"已处理", 允许重新检视
+        # (例: 用户 push 改了内容让 auto_detect 标 applied, 然后又撤回
+        # 原始内容 → 系统应能重新检视出新 issue).
+        # Why: 之前用 head_sha 限定导致跨 V dedup 失效 (V1 V2 V3 同一 file:line
+        # 都会重新发, 引起 GitLab 重复评论).
         with self._conn() as conn:
-            if head_sha:
-                row = conn.execute(
-                    """
-                    SELECT 1 FROM suggestions
-                    WHERE project_id=? AND mr_iid=?
-                      AND file_path=? AND target_line BETWEEN ? AND ?
-                      AND head_sha=?
-                    LIMIT 1
-                    """,
-                    (project_id, mr_iid, file_path, lo, hi, head_sha),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    """
-                    SELECT 1 FROM suggestions
-                    WHERE project_id=? AND mr_iid=?
-                      AND file_path=? AND target_line BETWEEN ? AND ?
-                    LIMIT 1
-                    """,
-                    (project_id, mr_iid, file_path, lo, hi),
-                ).fetchone()
+            row = conn.execute(
+                """
+                SELECT 1 FROM suggestions
+                WHERE project_id=? AND mr_iid=?
+                  AND file_path=? AND target_line BETWEEN ? AND ?
+                  AND state=\'open\'
+                LIMIT 1
+                """,
+                (project_id, mr_iid, file_path, lo, hi),
+            ).fetchone()
+        if head_sha:  # 保留参数以避免破坏调用方, 但不使用
+            pass
             return row is not None
 
     def list_suggestion_headers(
