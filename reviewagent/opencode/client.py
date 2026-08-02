@@ -63,7 +63,7 @@ class OpencodeClient:
         model: str | None = None,
     ):
         self.base_url = (base_url or config.opencode_url).rstrip("/")
-        self.default_timeout = default_timeout
+        self.default_timeout = default_timeout or config.opencode_timeout
         # 默认模型：deepseek-v4-flash（deepseek provider 已配置）
         self.model = model or config.opencode_model
         # Basic Auth（如果配了 OPENCODE_PASSWORD）

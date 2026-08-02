@@ -36,6 +36,7 @@ class Config:
     opencode_username: str = "opencode"
     opencode_password: str = ""
     opencode_model: str = "minimax/MiniMax-M2.7"
+    opencode_timeout: int = 900  # opencode HTTP 请求默认超时（秒）
 
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
@@ -110,6 +111,7 @@ class Config:
             opencode_username=_env("OPENCODE_USERNAME", "opencode"),
             opencode_password=_env("OPENCODE_PASSWORD", ""),
             opencode_model=_env("OPENCODE_MODEL", "minimax/MiniMax-M2.7"),
+            opencode_timeout=int(_env("OPENCODE_TIMEOUT", "900")),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=rq_queue_name,
             rq_weekly_queue_name=rq_weekly_queue_name,
