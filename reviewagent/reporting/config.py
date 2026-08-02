@@ -75,6 +75,8 @@ class WeeklyReportConfig:
             dingtalk_retry_attempts=_env_int("REVIEWAGENT_WEEKLY_DINGTALK_RETRY", 3),
             markdown_chunk_limit=_env_int("REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT", 18000),
             cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 09:00"),
+            report_title=_env_str("REVIEWAGENT_WEEKLY_REPORT_TITLE", "SSD自动化代码检视周报"),
+            report_emoji=_env_str("REVIEWAGENT_WEEKLY_REPORT_EMOJI", "📊"),
         )
 
 

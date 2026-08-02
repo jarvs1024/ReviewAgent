@@ -189,21 +189,25 @@ class TelemetryCollector:
         rules = data.get("top_rules_friendly") or []
 
         lines = [
-            "请输出「本周检视汇总」，必须严格使用下面三个固定小节（粗体小标题，顺序不变，小节之间空一行）：",
+            "请输出「本周检视汇总」，必须严格使用下面三个固定小节（粗体小标题，顺序不变，小节之间空一行，标题与正文之间也必须空一行）：",
             "",
             "**概述**",
+            "",
             "1~2 句讲严重度分布：high / medium / low 及以下 各多少条、占百分比，整体是否偏重（是否超过一半被标为 high）、能否只当风格问题看待。要有判断。",
             "",
             "**问题类型**",
+            "",
             "把下面「中文问题类别 × 次数」归纳为两类，并各自列出命中最多的 1~3 条（带次数）：",
             "  · 代码规范类：类型注解、docstring、命名、导入、格式等风格/规范问题，可下沉 CI 机械拦截；",
             "  · 正确性/稳定性类：接口参数、循环、资源、运行期行为相关的问题，会直接影响运行行为。",
             "指出出现最多的那一类。",
             "",
             "**跟进建议**",
+            "",
             "一句话：规范类问题可下沉 CI 拦截；正确性问题应优先人工确认修复。",
             "",
             "要求：严格输出 JSON：{\"markdown\": \"...\"}, markdown 用中文；必须用上述 **概述**/**问题类型**/**跟进建议** 三小节；",
+            "每个小节标题独占一行，标题与正文之间用空行分隔（JSON 中是 \\n\\n）；",
             "不要用 # 顶级标题，不要写\"本周检视汇总\"标题(外层已加)；markdown 内换行用 \\n 转义；",
             "不要机械罗列所有类别，要有归纳判断；数字准确使用我给的数据，不要编造。",
             "",
@@ -231,7 +235,7 @@ class TelemetryCollector:
     ) -> str:
         """调 opencode(agent=weekly_inspection_summary) 生成叙事性检视汇总; 失败返回空串."""
         from reviewagent.config import config
-        from reviewagent.opencode.client import OpencodeError, client as opencode
+        from reviewagent.opencode.client import client as opencode
 
         prompt = self._build_llm_prompt(data, prev_data)
         try:
@@ -244,8 +248,8 @@ class TelemetryCollector:
                 tolerant_markdown=True,
             )
             return (oc_result.data or {}).get("markdown", "") or ""
-        except (OpencodeError, Exception) as e:  # noqa: BLE001 - 兜底交给确定性汇总
-            logger.warning("telemetry.opencoe summary failed: {}", e)
+        except Exception as e:  # noqa: BLE001 - 兜底交给确定性汇总
+            logger.warning("telemetry.opencode summary failed: {}", e)
             return ""
 
     @staticmethod
@@ -290,7 +294,6 @@ class TelemetryCollector:
             if day:
                 by_day[day] += 1
 
-            dur = r.get("duration_ms") or 0
             duration_total += dur
 
             key = (r["project_id"], r["mr_iid"])

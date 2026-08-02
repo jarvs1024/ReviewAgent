@@ -473,8 +473,10 @@ class RepoScanCollector:
         lines: list[str] = [
             f"本周 (`{ws}` ~ `{we}`) 合并到 `{target_branch}` 的 MR 共 **{total_mrs}** 个，"
             f"去重变更文件 **{total_files}** 个，新增 **{total_additions}** 行、删除 **{total_deletions}** 行。"
-            "以下基于变更热力图做全局判断：\n",
+            "以下基于变更热力图做全局判断：",
+            "",
             "**高风险模块**",
+            "",
         ]
         core_changed = [f for f in top_files if RepoScanCollector._is_core_path(f["path"])]
         if core_changed:
@@ -496,6 +498,7 @@ class RepoScanCollector:
         lines.append("")
 
         lines.append("**新增坏味道**")
+        lines.append("")
         new_or_deleted = [f for f in top_files if f.get("is_new") or f.get("is_deleted")]
         if new_or_deleted:
             lines.append("- 以下文件为新增或删除，可能引入结构性变化，建议全局审视：")
@@ -507,6 +510,7 @@ class RepoScanCollector:
         lines.append("")
 
         lines.append("**测试覆盖与可靠性**")
+        lines.append("")
         test_files = [f for f in top_files if "test" in f["path"].lower() or "spec" in f["path"].lower()]
         if test_files:
             paths = ", ".join(f"`{f['path']}`" for f in test_files[:3])
@@ -520,6 +524,7 @@ class RepoScanCollector:
         lines.append("")
 
         lines.append("**建议跟进**")
+        lines.append("")
         if total_additions + total_deletions > 1000:
             lines.append("- 本周代码变动量较大，建议对核心模块做专项 review，避免跨文件破坏。")
         if core_changed:

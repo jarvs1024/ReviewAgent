@@ -142,7 +142,6 @@ class OpencodeClient:
             MAX_DIFF_CHARS = config.opencode_max_diff_chars
             
             # 重试逻辑：若 finish=length（模型输出被截断），减小 diff 后重试
-            last_error = None
             for attempt in range(2):  # 最多重试 1 次
                 prompt_text = prompt
                 current_max = MAX_DIFF_CHARS // (2 ** attempt)  # 第 1 次: 原值, 第 2 次: 减半
@@ -208,13 +207,11 @@ class OpencodeClient:
                                     completion_tokens=0,
                                     model=msg.get("info", {}).get("modelID", ""),
                                 )
-                    # 检查是否是 finish=length（模型输出被截断）
                     if "finish=length" in str(e) and attempt == 0:
                         logger.warning(
                             "opencode.finish=length, retrying with smaller diff ({} -> {})",
                             current_max, current_max // 2,
                         )
-                        last_error = e
                         continue  # 重试
                     raise  # 其他错误或重试后仍失败，抛出
 

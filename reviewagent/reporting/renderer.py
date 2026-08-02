@@ -196,7 +196,7 @@ def render_section(name: str, sr: SectionResult) -> str:
     return "```json\n" + str(sr.data)[:1000] + "\n```"
 
 
-def _fmt_delta(delta, suffix: str = "", invert_good: bool = False) -> str:
+def _fmt_delta(delta, suffix: str = "") -> str:
     """格式化环比 delta 为带箭头的短串; None 返回空串."""
     if delta is None:
         return ""
@@ -288,7 +288,7 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
     mr_count = int(d.get("mr_count", 0) or 0)
 
     if suggestion_count == 0:
-        return "**概述**\n本周窗口内无检视建议产生，暂无问题分布与严重度数据。"
+        return "**概述**\n\n本周窗口内无检视建议产生，暂无问题分布与严重度数据。"
 
     total = sum(sev.values()) or suggestion_count
 
@@ -351,9 +351,9 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
     )
 
     return "\n\n".join([
-        f"**概述**\n{overview}",
-        f"**问题类型**\n{problem_types}",
-        f"**跟进建议**\n{follow}",
+        f"**概述**\n\n{overview}",
+        f"**问题类型**\n\n{problem_types}",
+        f"**跟进建议**\n\n{follow}",
     ])
 
 
@@ -435,8 +435,11 @@ def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
     top_files = d.get("top_files", []) or d.get("file_changes", [])[:5]
     lines = [
         f"本周合并到 `{target_branch}` 的 MR 共 **{total_mrs}** 个，"
-        f"去重变更文件 **{total_files}** 个，新增 **{total_additions}** 行、删除 **{total_deletions}** 行。\n",
+        f"去重变更文件 **{total_files}** 个，新增 **{total_additions}** 行、删除 **{total_deletions}** 行。"
+        "以下基于变更热力图做全局判断：",
+        "",
         "**高风险模块**",
+        "",
     ]
     core_files = [f for f in top_files if f.get("path") and _is_core_path_for_scan(f["path"])]
     display_files = core_files[:5] if core_files else top_files[:5]
@@ -449,6 +452,7 @@ def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
         lines.append("- (无显著变更)")
     lines.append("")
     lines.append("**新增坏味道**")
+    lines.append("")
     new_files = [f for f in top_files if f.get("is_new")]
     if new_files:
         lines.append("- 新增文件 / 模块需关注：")
@@ -458,6 +462,7 @@ def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
         lines.append("- 本周以现有文件修改为主，未观察到新增模块。")
     lines.append("")
     lines.append("**测试覆盖与可靠性**")
+    lines.append("")
     test_files = [f for f in top_files if "test" in (f.get("path") or "").lower()]
     if test_files:
         lines.append(f"- 测试文件有 {len(test_files)} 处变更，建议确认核心逻辑是否配套覆盖。")
@@ -465,6 +470,7 @@ def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
         lines.append("- 本周变更未明显命中测试目录，建议检查核心逻辑是否补充测试。")
     lines.append("")
     lines.append("**建议跟进**")
+    lines.append("")
     lines.append("- 关注核心模块变更的接口兼容性与回归测试覆盖。")
     return "\n".join(lines) + "\n"
 

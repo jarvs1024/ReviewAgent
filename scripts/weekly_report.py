@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -65,20 +66,7 @@ def main() -> int:
 
     cfg = WeeklyReportConfig.from_env()
     if args.project_id is not None:
-        cfg = WeeklyReportConfig(
-            enabled=cfg.enabled,
-            target_project_id=args.project_id,
-            target_branch=cfg.target_branch,
-            timezone=cfg.timezone,
-            collectors=cfg.collectors,
-            notifier=cfg.notifier,
-            dingtalk_webhook_url=cfg.dingtalk_webhook_url,
-            dingtalk_secret=cfg.dingtalk_secret,
-            dingtalk_dry_run=cfg.dingtalk_dry_run,
-            dingtalk_retry_attempts=cfg.dingtalk_retry_attempts,
-            markdown_chunk_limit=cfg.markdown_chunk_limit,
-            cron_schedule=cfg.cron_schedule,
-        )
+        cfg = dataclasses.replace(cfg, target_project_id=args.project_id)
 
     result = run_weekly_job(
         cfg=cfg,
