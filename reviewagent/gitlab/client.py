@@ -300,12 +300,16 @@ class GitLabClient:
             return []
 
     def list_repository_tree(
-        self, project_id: int, path: str, ref: str
+        self, project_id: int, path: str, ref: str, *, recursive: bool = True
     ) -> list[dict[str, Any]]:
-        """列出某 ref 下指定目录的文件树 (recursive)."""
+        """列出某 ref 下指定目录的文件树.
+
+        Args:
+            recursive: True 则递归列出所有子目录文件 (默认 True)
+        """
         try:
             project = self._get_project(project_id)
-            return project.repository_tree(path=path, ref=ref, all=True)
+            return project.repository_tree(path=path, ref=ref, all=True, recursive=recursive)
         except gitlab.exceptions.GitlabError as e:
             logger.warning(
                 "gitlab.list_repository_tree failed project={} path={} ref={}: {}",

@@ -46,6 +46,12 @@ class RepoScanCollector:
     MAX_DIFF_CHARS = 15000
     MAX_DIFF_LINES_PER_FILE = 120
 
+    # 固有代码概览控制
+    MAX_TREE_FILES = 300          # 文件树最多扫多少个文件
+    MAX_KEY_FILE_SNIPPETS = 15    # 最多拉多少个关键文件摘要
+    MAX_KEY_FILE_LINES = 30       # 每个关键文件最多取多少行
+    MAX_OVERVIEW_CHARS = 6000     # 固有代码概览总字符上限
+
     def collect(
         self,
         *,
@@ -192,6 +198,12 @@ class RepoScanCollector:
         )
         top_files = sorted_files[: self.MAX_FILES_IN_HEATMAP]
 
+        # 3.5 拉取项目固有代码结构概览（非本周变更的已有代码）
+        project_overview = self._collect_project_overview(project_id, target_branch)
+        logger.info("repo_scan.project_overview modules={} key_files={}",
+                    len(project_overview.get("modules", [])),
+                    len(project_overview.get("key_file_snippets", [])))
+
         # 4. 构造确定性回退 + LLM prompt
         deterministic_md = self._render_markdown(
             target_branch=target_branch,
@@ -220,6 +232,7 @@ class RepoScanCollector:
                 mr_summaries=mr_summaries,
                 file_changes=file_changes_plain,
                 prev_data=prev_repo,
+                project_overview=project_overview,
             )
             if not llm_md or not llm_md.strip():
                 logger.warning("repo_scan.llm_review empty -> fallback to deterministic")
@@ -240,6 +253,7 @@ class RepoScanCollector:
                 "total_deletions": total_deletions,
                 "file_changes": list(file_changes_plain.values()),
                 "top_files": top_files,
+                "project_overview": project_overview,
                 "llm_review_markdown": llm_md,
                 "truncated": False,
             },
@@ -262,6 +276,93 @@ class RepoScanCollector:
             elif line.startswith("-") and not line.startswith("---"):
                 deletions += 1
         return additions, deletions
+
+    def _collect_project_overview(
+        self, project_id: int, ref: str
+    ) -> dict[str, Any]:
+        """拉取项目固有代码结构概览（非本周变更的已有代码）.
+
+        目的: 让全量扫描不仅看本周新增/变更, 也结合项目固有代码结构做全局判断。
+        产出:
+        - modules: 按 top-level 目录分组的文件统计
+        - key_file_snippets: 核心模块关键入口文件的前 N 行摘要
+        """
+        # 1. 拉取文件树
+        try:
+            tree = gl.list_repository_tree(project_id, path="", ref=ref)
+        except Exception as e:
+            logger.warning("repo_scan.project_overview tree failed: {}", e)
+            return {"modules": [], "key_file_snippets": [], "total_files": 0}
+
+        # 2. 过滤代码文件、按 top-level 目录分组
+        code_exts = (".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".sh")
+        all_files: list[str] = []
+        for item in tree:
+            if item.get("type") == "blob":
+                p = item.get("path", "")
+                if p.endswith(code_exts):
+                    all_files.append(p)
+            if len(all_files) >= self.MAX_TREE_FILES:
+                break
+
+        # 按 top-level 目录分组
+        from collections import defaultdict
+        module_files: dict[str, list[str]] = defaultdict(list)
+        for p in all_files:
+            top = p.split("/")[0] if "/" in p else "(root)"
+            module_files[top].append(p)
+
+        modules = [
+            {"name": name, "file_count": len(files), "is_core": self._is_core_path(name + "/")}
+            for name, files in sorted(module_files.items(), key=lambda x: -len(x[1]))
+        ]
+
+        # 3. 对核心模块的关键入口文件拉取摘要
+        key_file_snippets: list[dict[str, Any]] = []
+        used_chars = 0
+        # 优先 __init__.py, 其次 main.py / app.py / config.py 等
+        priority_names = ("__init__.py", "main.py", "app.py", "config.py", "settings.py")
+        candidates: list[str] = []
+        for p in all_files:
+            basename = p.rsplit("/", 1)[-1]
+            if basename in priority_names and self._is_core_path(p):
+                candidates.append(p)
+        # 补充: 核心模块下最大的几个 .py 文件（按路径排序取前几个）
+        for p in sorted(all_files):
+            if p not in candidates and self._is_core_path(p):
+                candidates.append(p)
+            if len(candidates) >= self.MAX_KEY_FILE_SNIPPETS * 2:
+                break
+
+        for path in candidates[: self.MAX_KEY_FILE_SNIPPETS]:
+            if used_chars >= self.MAX_OVERVIEW_CHARS:
+                break
+            try:
+                content = gl.get_file_at_sha(project_id, path, ref)
+            except Exception:
+                content = None
+            if not content:
+                continue
+            lines = content.splitlines()[: self.MAX_KEY_FILE_LINES]
+            preview = "\n".join(lines)
+            if used_chars + len(preview) > self.MAX_OVERVIEW_CHARS:
+                remaining = self.MAX_OVERVIEW_CHARS - used_chars
+                if remaining > 100:
+                    preview = preview[:remaining] + "\n[... 截断 ...]"
+                else:
+                    break
+            key_file_snippets.append({
+                "path": path,
+                "lines": len(lines),
+                "preview": preview,
+            })
+            used_chars += len(preview)
+
+        return {
+            "total_files": len(all_files),
+            "modules": modules,
+            "key_file_snippets": key_file_snippets,
+        }
 
     @staticmethod
     def _is_core_path(path: str) -> bool:
@@ -336,28 +437,32 @@ class RepoScanCollector:
         mr_summaries: list[dict[str, Any]],
         file_changes: dict[str, dict[str, Any]],
         prev_data: dict[str, Any] | None = None,
+        project_overview: dict[str, Any] | None = None,
     ) -> str:
         """构造发给 weekly_quality_scan agent 的 user prompt.
 
-        输入是本周所有 MR 的变更数据（diff），不是 telemetry 检视建议。
+        输入包含两部分：
+        1. 本周所有 MR 的变更数据（diff）—— 用于判断本周变更引发的新风险
+        2. 项目固有代码结构概览（模块文件统计 + 关键入口文件摘要）—— 用于结合固有代码做全局判断
         """
         ws = week_start.strftime("%Y-%m-%d")
         we = week_end.strftime("%Y-%m-%d")
 
         lines: list[str] = [
-            "你是代码质量分析师。下面是本周合并到目标分支的所有 MR 的变更数据（含 MR 摘要、文件热力图与关键 diff 片段）。",
-            "请基于这些真实变更数据，对项目做一次**全量代码质量扫描**。",
+            "你是代码质量分析师。下面给你两部分数据：(1) 本周合并到目标分支的所有 MR 变更数据（MR 摘要、文件热力图、关键 diff 片段）；(2) 项目固有代码结构概览（模块文件统计 + 核心入口文件代码摘要）。",
+            "请基于这两部分数据，对项目做一次**全量代码质量扫描**。",
             "",
             "【定位说明】这是独立于『本周检视概况』的全局代码扫描：",
             "- 『本周检视概况』是逐 MR diff 级检视汇总的建议条数与规则命中。",
-            "- 本段只看你眼前的『本周所有变更数据』，从整个项目视角判断：这些改动叠加后，全局代码质量走向如何、有哪些跨文件/跨模块风险被 diff 视角漏掉。",
+            "- 本段从整个项目视角判断：本周改动叠加后全局代码质量走向如何、有哪些跨文件/跨模块风险被 diff 视角漏掉。",
+            "- **同时结合固有代码做判断**：本周变更是否与固有代码存在耦合冲突、固有代码中是否有本周变更会触发/暴露的已知问题、固有代码的技术债务趋势等。",
             "- **不要引用或复述任何 telemetry 检视数据**（如 high/medium 建议条数、SSD-RULE-* 规则命中次数等）。",
             "",
-            "【输出格式】严格输出 JSON：{\"markdown\": \"...\"}。markdown 用中文，固定 4 个小节（用 **加粗** 作小标题，顺序不变，小节之间空一行）：",
-            "**高风险模块** —— 从整个项目视角，指出本周风险最集中 / 最该关注的模块与文件，说明为什么（结合改动面、模块间耦合、影响半径、新增/删除的大文件、核心接口签名变化等）。",
-            "**新增坏味道** —— 本周新出现或反复出现的代码坏味道趋势；从全局看哪些模式值得警惕（不要只报文件变更次数）。",
-            "**测试覆盖与可靠性** —— 本周改动是否有对应测试覆盖、异常路径是否验证、可靠性风险（资源泄漏 / 并发 / 超时 / 幂等 / 回滚等）如何。",
-            "**建议跟进** —— 具体、可执行的跟进项（补哪些测试、沉淀哪些规范、重构优先级），可以引用具体文件 / 模块作为佐证。",
+            "【输出格式】严格输出 JSON：{\"markdown\": \"...\"}。markdown 用中文，固定 4 个小节（用 **加粗** 作小标题，顺序不变，小节之间空一行，标题与正文之间也必须空一行）：",
+            "**高风险模块** —— 从整个项目视角，指出本周风险最集中 / 最该关注的模块与文件，说明为什么（结合改动面、模块间耦合、影响半径、新增/删除的大文件、核心接口签名变化等）。**既要看本周变更引入的风险，也要看固有代码中已有的风险被本周变更暴露/放大的情况**。",
+            "**新增坏味道** —— 本周新出现或反复出现的代码坏味道趋势；从全局看哪些模式值得警惕（不要只报文件变更次数）。可以结合固有代码判断某些坏味道是否是项目长期遗留的。",
+            "**测试覆盖与可靠性** —— 本周改动是否有对应测试覆盖、异常路径是否验证、可靠性风险（资源泄漏 / 并发 / 超时 / 幂等 / 回滚等）如何。结合固有代码结构判断测试覆盖的全局盲区。",
+            "**建议跟进** —— 具体、可执行的跟进项（补哪些测试、沉淀哪些规范、重构优先级），可以引用具体文件 / 模块作为佐证。对固有代码的债务也可以提出重构建议。",
             "",
             "要求：",
             "- 不要输出 # 顶级标题，不要写『本周代码质量全量扫描』标题（渲染层已加）。",
@@ -402,6 +507,23 @@ class RepoScanCollector:
             for path, diff in snippets:
                 lines.append(f"\n### `{path}`\n```diff\n{diff}\n```")
 
+        # 项目固有代码结构概览
+        if project_overview and (project_overview.get("modules") or project_overview.get("key_file_snippets")):
+            lines.extend(["", "项目固有代码结构概览（非本周变更的已有代码，用于结合固有代码做全局判断）："])
+            lines.append(f"代码文件总数：{project_overview.get('total_files', 0)}")
+            modules = project_overview.get("modules") or []
+            if modules:
+                lines.append("模块分布（按文件数降序）：")
+                for mod in modules[:15]:
+                    core_tag = " [核心]" if mod.get("is_core") else ""
+                    lines.append(f"  - {mod['name']}{core_tag}: {mod['file_count']} 个代码文件")
+            key_snippets = project_overview.get("key_file_snippets") or []
+            if key_snippets:
+                lines.append("核心模块关键入口文件摘要（前 30 行）：")
+                for ks in key_snippets:
+                    lines.append(f"\n### `{ks['path']}` ({ks['lines']} 行)")
+                    lines.append(f"```python\n{ks['preview']}\n```")
+
         # 上周对比
         if prev_data:
             lines.append("")
@@ -429,6 +551,7 @@ class RepoScanCollector:
         mr_summaries: list[dict[str, Any]],
         file_changes: dict[str, dict[str, Any]],
         prev_data: dict[str, Any] | None = None,
+        project_overview: dict[str, Any] | None = None,
     ) -> str:
         """调 opencode weekly_quality_scan agent 生成综述；失败抛异常由调用方回退."""
         prompt = self._build_llm_prompt(
@@ -443,6 +566,7 @@ class RepoScanCollector:
             mr_summaries=mr_summaries,
             file_changes=file_changes,
             prev_data=prev_data,
+            project_overview=project_overview,
         )
         oc_result = opencode.run(
             agent="weekly_quality_scan",
