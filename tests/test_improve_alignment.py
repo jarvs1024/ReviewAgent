@@ -612,8 +612,12 @@ def test_build_summary_v2_empty_inline_posted_with_only_dup_skipped():
     assert "已发过的 2 条跳过" in out
 
 
-def test_build_summary_v2_truly_empty_returns_empty_string():
-    """LLM 啥也没输出 → 返回空字符串 (不发任何 summary 注释)"""
+def test_build_summary_v2_truly_empty_returns_no_problem_placeholder():
+    """LLM 啥也没输出 → 返回 "未发现新问题" 占位 (placeholder 一定被 update).
+
+    Why: 之前返回 "" → placeholder 永远停在 "_加载中…_" → 用户分不清是 bot
+    还在跑 / 已完成 / 报错. 改为永远返回有意义字符串, 即使空也要 update.
+    """
     from reviewagent.commands.improve import ImproveCommand
     cmd = ImproveCommand.__new__(ImproveCommand)
     cmd.project_id = 34
@@ -623,7 +627,9 @@ def test_build_summary_v2_truly_empty_returns_empty_string():
         inline_skipped=[],
         total_agent_suggestions=0,
     )
-    assert out == ""
+    # 返回非空字符串, 含"未发现新问题"标记
+    assert out != ""
+    assert "未发现新问题" in out
 
 
 def test_build_summary_v2_lists_only_inline_posted_not_skipped():

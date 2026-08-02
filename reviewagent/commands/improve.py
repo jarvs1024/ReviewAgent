@@ -827,17 +827,29 @@ class ImproveCommand(BaseCommand):
             version = 1
 
         if not inline_posted:
-            # 没有新发布: 不发空 summary, 避免和"已发过的"混淆
+            # 没有新发布: 区分两种情况
             skipped_dup = sum(1 for s in inline_skipped if s.get("reason") in ("duplicate_at_line", "duplicate_fingerprint"))
-            if skipped_dup and not any(
-                s.get("reason") not in ("duplicate_at_line", "duplicate_fingerprint")
-                for s in inline_skipped
-            ):
+            skipped_other = len(inline_skipped) - skipped_dup
+            if skipped_dup and not skipped_other:
+                # 全部是重复 (LLM 跟之前识别了同样问题) — 表示本次确实没新发现
                 return (
                     f"## 改进总览 V{version}\n\n"
-                    f"本次未发现新问题（已发过的 {skipped_dup} 条跳过，重复 issue 不重复发）"
+                    f"✅ 本次未发现新问题（已发过的 {skipped_dup} 条跳过，重复 issue 不重复发）\n\n"
+                    f"如需主动清理历史建议, 可逐条 `/dismiss [理由]` 或合并 MR 后由下轮触发重检视."
                 )
-            return ""  # 真的没有输出, 跳过 summary
+            if skipped_other and not skipped_dup:
+                # 全部是校验失败 (LLM 给的建议但都没通过校验) — 表示 LLM 想提但都提不出
+                return (
+                    f"## 改进总览 V{version}\n\n"
+                    f"ℹ️ 本次未发布建议（{skipped_other} 条建议因行号/校验未通过未发布）\n\n"
+                    f"如果反复看到此提示, 检视能力可能需调整 (见 PR-Agent 文档)."
+                )
+            # 都没 inline_posted 也没 skipped — 真的空
+            return (
+                f"## 改进总览 V{version}\n\n"
+                f"✅ 本次未发现新问题.\n\n"
+                f"如需主动发现潜在问题, 可在 MR 评论中 `/improve` 强制重检视."
+            )
 
         items: list[str] = []
         for entry in inline_posted:

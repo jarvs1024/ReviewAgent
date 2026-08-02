@@ -53,7 +53,7 @@ class Config:
 
     # ---- 限制 ----
     mr_cooldown_seconds: int = 30
-    max_review_calls_per_mr: int = 0  # 0 = 不限；>0 强制上限
+    max_review_calls_per_mr: int = 30  # 同 MR 最多 30 轮 review, 防无限循环; 0=不限
 
     # ---- Diff 限制 ----
     max_diff_chars: int = 50000              # 超过则跳过检视并评论告知
@@ -114,7 +114,7 @@ class Config:
             data_dir=Path(_env("REVIEWAGENT_DATA_DIR", "./data")),
             log_level=_env("REVIEWAGENT_LOG_LEVEL", "INFO"),
             mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "30")),
-            max_review_calls_per_mr=int(_env("MAX_REVIEW_CALLS_PER_MR", "0")),
+            max_review_calls_per_mr=int(_env("MAX_REVIEW_CALLS_PER_MR", "30")),
             max_diff_chars=int(_env("MAX_DIFF_CHARS", "50000")),
             opencode_max_diff_chars=int(_env("OPENCODE_MAX_DIFF_CHARS", "20000")),
             repo_context_files=_env_tuple("REPO_CONTEXT_FILES", "AGENTS.md"),

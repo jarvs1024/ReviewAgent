@@ -110,7 +110,62 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                 mr.project_id, mr.mr_iid, e,
             )
 
-    # 5. cooldown
+    # 5a. max review calls — 防无限循环
+    skip_max, current_count = locks.should_skip_max_review_calls(
+        mr.project_id, mr.mr_iid, commands,
+    )
+    if skip_max:
+        from reviewagent.config import config as _config
+        logger.info(
+            "webhook.skip max_review_calls project={} mr={} count={} limit={}",
+            mr.project_id, mr.mr_iid, current_count, _config.max_review_calls_per_mr,
+        )
+        # 一次性发 "no more review" 提示 (用 telemetry 记 flag, 避免重复刷屏)
+        try:
+            from reviewagent.telemetry.store import get_store
+            store = get_store()
+            with store._conn() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM mr_activity "
+                    "WHERE project_id=? AND mr_iid=? AND title LIKE '%no_more_review%' "
+                    "LIMIT 1",
+                    (mr.project_id, mr.mr_iid),
+                ).fetchone()
+                already_posted = row is not None
+            if not already_posted:
+                msg = (
+                    f"ℹ️ 本 MR 已达最大检视次数 ({current_count} 次, 上限 "
+                    f"{_config.max_review_calls_per_mr}); 后续 push 不再触发自动检视. "
+                    f"如需新一轮检视, 评论 `/improve` 手动触发."
+                )
+                try:
+                    mr.gitlab if hasattr(mr, "gitlab") else None
+                except Exception:
+                    pass
+                # 用直接的 gitlab client (mr 对象没暴露 .gitlab)
+                from reviewagent.gitlab.client import GitLabClient
+                _gl = GitLabClient()
+                _gl.post_mr_comment(mr.project_id, mr.mr_iid, msg)
+                # 在 mr_activity.title 末尾加个标记 (cosmetic)
+                try:
+                    with store._conn() as conn:
+                        conn.execute(
+                            "UPDATE mr_activity SET title = title || ' [no_more_review]' "
+                            "WHERE project_id=? AND mr_iid=?",
+                            (mr.project_id, mr.mr_iid),
+                        )
+                        conn.commit()
+                except Exception:
+                    pass
+                logger.info(
+                    "webhook.no_more_review_notice posted project={} mr={}",
+                    mr.project_id, mr.mr_iid,
+                )
+        except Exception as e:
+            logger.warning("webhook.no_more_review_notice failed (non-fatal): {}", e)
+        return {"status": "skipped", "reason": f"max_review_calls={current_count}"}
+
+    # 5b. cooldown
     first_cmd = commands[0]
     if locks.should_skip_cooldown(mr.project_id, mr.mr_iid, first_cmd):
         logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)

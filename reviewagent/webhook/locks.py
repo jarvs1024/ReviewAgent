@@ -63,6 +63,51 @@ class MRLockManager:
         bare = username.rsplit("@", 1)[-1] if "@" in username else username
         return bare.lower() == config.gitlab_bot_username.lower()
 
+    def should_skip_max_review_calls(
+        self,
+        project_id: int,
+        mr_iid: int,
+        commands: tuple[str, ...] | list[str],
+        max_calls: int | None = None,  # None = 读 config; 单测可 override
+    ) -> tuple[bool, int]:
+        """检查 MR 的 review 次数是否已达上限.
+
+        Returns:
+            (should_skip, current_count): should_skip=True 时表示已达上限
+
+        Why: 没有上限的话, 每次 push / Apply 都触发一次 chain → 用户每次
+        都能看到 V{N} 递增; 即使代码已修复完所有问题, 也会无止境轮转.
+        加上限 (默认 8 次) 后, 达到上限 → skip + 在 MR 评论里发一次性
+        "无更多检视 (已达 N 次上限)" 提示, 避免用户以为 bot 还在跑.
+
+        Count 范围: 所有 commands (describe / improve / review) 合并计数,
+        这样 pr_commands=(describe,improve) 一次 chain 也只算 1 轮 review,
+        而不是 2 个 (避免描述 + 检视被算成 2 次).
+        """
+        from reviewagent.config import config as _config
+        # 默认从 config 读, 调用方可 override (用于单测)
+        if max_calls is None:
+            max_calls = _config.max_review_calls_per_mr
+        if max_calls <= 0:
+            return False, 0  # 0 = 不限
+        try:
+            from reviewagent.telemetry.store import get_store
+            store = get_store()
+            # 取 command IN (commands) 的总计数
+            placeholders = ",".join("?" for _ in commands)
+            with store._conn() as conn:
+                row = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM review_runs "
+                    f"WHERE project_id=? AND mr_iid=? "
+                    f"AND command IN ({placeholders})",
+                    (project_id, mr_iid, *commands),
+                ).fetchone()
+            current = int(row["n"])
+            return current >= max_calls, current
+        except Exception as e:
+            logger.warning("locks.max_review_calls redis/sqlite failed (fail-open): {}", e)
+            return False, 0
+
     def should_skip_cooldown(
         self,
         project_id: int,

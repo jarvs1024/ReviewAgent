@@ -456,3 +456,37 @@ def test_different_rule_keys_not_deduped_at_close_lines(tmp_telemetry):
         head_sha=head_sha, line_tolerance=2,
     )
     assert exists_none is True, "不传 rule_keys 应走旧 (file, line) 兜底"
+
+
+def test_max_review_calls_limit(tmp_telemetry, monkeypatch):
+    """Regression: 同一 MR 的 review 次数超 max_review_calls_per_mr 应被 skip.
+
+    场景: max=3, MR 34/167 已记录 3 个 improve runs, 再次 push → 应被 skip.
+    """
+    import sqlite3
+    from reviewagent.webhook.locks import locks
+
+    # 触发 store init schema (fixture 已把 sqlite_path 切到 tmp_telemetry)
+    from reviewagent.telemetry.store import get_store
+    store = get_store()  # 建表
+    # 用 store._conn() 而非 sqlite3.connect, 保证 store 的连接跟 tmp 一致
+    with store._conn() as conn:
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO review_runs (project_id, mr_iid, command, triggered_by, status, started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+                (34, 167, "improve", "test", "success"),
+            )
+
+    # max=3, 当前 3 → 应被 skip
+    skip, current = locks.should_skip_max_review_calls(34, 167, ("describe", "improve"), max_calls=3)
+    assert skip is True, f"应被 skip, got skip={skip} current={current}"
+    assert current == 3
+
+    # max=0 → 不限 (快速 return, 不查 DB, 所以 cur0=0)
+    skip0, cur0 = locks.should_skip_max_review_calls(34, 167, ("describe", "improve"), max_calls=0)
+    assert skip0 is False, "max=0 应永不限"
+
+    # 降到 max=5 → 不超限
+    skip5, cur5 = locks.should_skip_max_review_calls(34, 167, ("describe", "improve"), max_calls=5)
+    assert skip5 is False
