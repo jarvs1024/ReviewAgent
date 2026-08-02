@@ -14,12 +14,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
 
 from .base import CollectorContext, SectionResult
+from ..rule_translate import translate_rule_key
 
 
 class TelemetryCollector:
@@ -112,6 +114,8 @@ class TelemetryCollector:
             stats["dismissal_reasons"] = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
 
             # ---- 新增 pr_agent 风格字段 (放在 data 顶层) ----
+            # 规则 key 翻译为直观中文类别名, 供 LLM 汇总 + 兜底渲染都用
+            top_rules_friendly = [(translate_rule_key(rk), n) for rk, n in top_rules]
             stats.update({
                 "mr_count": mr_count,
                 "mr_total": mr_overview_total["total"],
@@ -120,7 +124,22 @@ class TelemetryCollector:
                 "adoption_rate": adoption_rate,
                 "severity_breakdown": severity_breakdown,
                 "top_rules": top_rules,
+                "top_rules_friendly": top_rules_friendly,
             })
+
+            # ---- LLM 检视汇总 (把翻译后的规则名 + 严重度交给 opencode 润色) ----
+            # 失败/不可用时回退到确定性 _build_inspection_summary (renderer 侧)
+            prev_telemetry = (ctx.prev_data.get("telemetry") or {}) if ctx.prev_data else {}
+            try:
+                llm_summary = self._generate_llm_summary(stats, prev_telemetry)
+                stats["llm_summary_markdown"] = llm_summary or ""
+                if llm_summary:
+                    logger.info("telemetry.llm_summary ok chars={}", len(llm_summary))
+                else:
+                    logger.warning("telemetry.llm_summary empty -> fallback to deterministic")
+            except Exception as e:
+                logger.warning("telemetry.llm_summary failed (fallback to deterministic): {}", e)
+                stats["llm_summary_markdown"] = ""
 
             # ---- 环比 delta (从上周 artifact 计算, 给 renderer 显示趋势箭头) ----
             prev_t = (ctx.prev_data.get("telemetry") or {}) if ctx.prev_data else {}
@@ -153,6 +172,71 @@ class TelemetryCollector:
         except Exception as e:
             logger.exception("telemetry collector failed: {}", e)
             return SectionResult(status="failed", error=str(e), data=None, meta={})
+
+    def _build_llm_prompt(self, data: dict[str, Any], prev_data: dict[str, Any] | None = None) -> str:
+        """构造发给 weekly_inspection_summary agent 的 user prompt (已翻译的聚合数据)."""
+        sev = data.get("severity_breakdown") or {}
+        total = sum(sev.values()) or int(data.get("suggestion_count", 0) or 0) or 1
+
+        def _p(n: int) -> int:
+            return round(n / total * 100) if total else 0
+
+        hc = sev.get("critical", 0) + sev.get("high", 0)
+        med = sev.get("medium", 0)
+        low = sev.get("low", 0) + sev.get("warning", 0) + sev.get("other", 0)
+        rules = data.get("top_rules_friendly") or []
+
+        lines = [
+            "你是技术周报「本周检视概况」里「本周检视汇总」一段的编辑。",
+            "下面给你本周自动化代码检视的聚合数据（规则名已翻译为直观中文，不要出现 SSD-RULE-* / R-* 这类原始机器 key）。",
+            "",
+            "请输出一段「本周检视汇总」：用 2~4 句中文、自然流畅地讲清三件事：",
+            "1) 问题分布范围：本周共产生多少条检视建议、覆盖多少个 MR、平均每个 MR 几条（用数据说话）。",
+            "2) 严重情况：high/medium/low 的大致占比，整体是偏重（有实际行为影响的缺陷）还是偏轻（风格类问题）。",
+            "3) 问题类型：把下面「中文问题类别 × 次数」归纳成几类（如 代码规范类、正确性问题类、安全风险类），点出最常出现的 1~2 类，并给一句跟进建议（规范类可下沉 CI、正确性问题/安全类应优先跟进）。",
+            "",
+            "要求：严格输出 JSON：{\"markdown\": \"...\"}, markdown 用中文可含 bullet，不要用 # 顶级标题，不要写\"本周检视汇总\"标题(外层已加)。markdown 内换行用 \\n 转义。不要机械罗列所有类别，要有归纳和判断。数字准确使用我给的数据，不要编造。",
+            "",
+            "数据：",
+            f"- 本周 suggestion 数：{data.get('suggestion_count', 0)}",
+            f"- 本周窗口 MR 数：{data.get('mr_count', 0)}",
+            f"- 严重度：high {hc}（{_p(hc)}%）、medium {med}（{_p(med)}%）、low/warning/other 共 {low}（{_p(low)}%）",
+        ]
+        if rules:
+            lines.append("- 问题类别(已翻译, 按次数降序)：")
+            for name, n in rules:
+                lines.append(f"    · {name} ×{n}")
+        else:
+            lines.append("- 问题类别：无")
+        if prev_data:
+            prev_sev = prev_data.get("severity_breakdown") or {}
+            prev_hc = prev_sev.get("high", 0) + prev_sev.get("critical", 0)
+            lines.append(
+                f"- 上周参考：high+critical 共 {prev_hc} 条（用于趋势语感，不要编造具体对比）"
+            )
+        return "\n".join(lines)
+
+    def _generate_llm_summary(
+        self, data: dict[str, Any], prev_data: dict[str, Any] | None = None
+    ) -> str:
+        """调 opencode(agent=weekly_inspection_summary) 生成叙事性检视汇总; 失败返回空串."""
+        from reviewagent.config import config
+        from reviewagent.opencode.client import OpencodeError, client as opencode
+
+        prompt = self._build_llm_prompt(data, prev_data)
+        try:
+            oc_result = opencode.run(
+                agent="weekly_inspection_summary",
+                prompt=prompt,
+                workdir=Path.cwd(),
+                files=[],
+                timeout=max(120, int(config.rq_worker_timeout * 0.4)),
+                tolerant_markdown=True,
+            )
+            return (oc_result.data or {}).get("markdown", "") or ""
+        except (OpencodeError, Exception) as e:  # noqa: BLE001 - 兜底交给确定性汇总
+            logger.warning("telemetry.opencoe summary failed: {}", e)
+            return ""
 
     @staticmethod
     def _aggregate(rows: list[dict]) -> dict[str, Any]:

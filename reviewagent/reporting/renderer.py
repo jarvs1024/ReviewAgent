@@ -27,6 +27,7 @@ from typing import Any
 
 from .artifact import WeeklyArtifact
 from .collectors.base import SectionResult
+from .rule_translate import translate_rule_key
 
 
 SECTION_TITLES: dict[str, str] = {
@@ -202,13 +203,34 @@ def _fmt_delta(delta, suffix: str = "", invert_good: bool = False) -> str:
 
 
 def _render_telemetry(d: dict[str, Any]) -> str:
-    """检视概况: 2 列指标表 + 叙事性检视汇总 (替代原 severity/规则 两行裸数据)."""
+    """检视概况: 叙事性检视汇总(LLM 润色) 在上, 核心指标表在下.
+
+    - 汇总段优先用 opencode 生成的 llm_summary_markdown; 为空(LLM 失败/未配置)
+      回退到确定性 _build_inspection_summary.
+    - 指标表仅保留 5 行核心指标, 不再堆 severity 分布 / 触发最多规则 两行裸数据.
+    """
     mr_count = d.get("mr_count", 0)
     mr_total = d.get("mr_total", 0)
     suggestion_count = d.get("suggestion_count", 0)
     suggestion_total = d.get("suggestion_total", suggestion_count)
     adoption_rate = round(float(d.get("adoption_rate", 0)) * 100, 1)
     deltas = d.get("deltas") or {}
+
+    # 汇总段: LLM 润色版优先, 否则确定性兜底
+    llm_summary = (d.get("llm_summary_markdown") or "").strip()
+    if llm_summary:
+        summary = _strip_leading_section_header(
+            _demote_llm_headings(llm_summary), "本周检视汇总"
+        )
+    else:
+        summary = _build_inspection_summary(d)
+
+    lines: list[str] = []
+    if summary:
+        lines.append("**本周检视汇总**")
+        lines.append("")
+        lines.append(summary.strip())
+        lines.append("")
 
     def _row(label: str, value: str, delta=None, suffix: str = "") -> tuple[str, str]:
         if delta is not None and delta != 0:
@@ -224,20 +246,10 @@ def _render_telemetry(d: dict[str, Any]) -> str:
         ("累计 suggestion 数", str(suggestion_total)),
         _row("累计采纳率", f"{adoption_rate}%", deltas.get("adoption_rate_pct"), "pp"),
     ]
-    lines: list[str] = [
-        "| 指标 | 数值 |",
-        "|---|---|",
-    ]
+    lines.append("| 指标 | 数值 |")
+    lines.append("|---|---|")
     for label, value in rows:
         lines.append(f"| {label} | {value} |")
-
-    # 叙事性汇总: 问题分布范围 + 严重度情况 (替代原 severity 分布 / 触发最多规则 两行)
-    summary = _build_inspection_summary(d)
-    if summary:
-        lines.append("")
-        lines.append("**本周检视汇总**")
-        lines.append("")
-        lines.append(summary)
 
     return "\n".join(lines) + "\n"
 
@@ -249,7 +261,11 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
     用一段话把严重度占比与规则命中分布讲清楚.
     """
     sev = d.get("severity_breakdown") or {}
-    rules = d.get("top_rules") or []
+    # 优先用已翻译的中文类别名; 旧数据缺字段时现场翻译兜底
+    raw_rules = d.get("top_rules_friendly") or [
+        (translate_rule_key(rk), n) for rk, n in (d.get("top_rules") or [])
+    ]
+    rules = raw_rules
     suggestion_count = int(d.get("suggestion_count", 0) or 0)
     mr_count = int(d.get("mr_count", 0) or 0)
 

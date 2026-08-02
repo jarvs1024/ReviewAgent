@@ -48,6 +48,10 @@ AGENT_META: dict[str, dict[str, object]] = {
         "description": "基于本周代码检视真实产出，自由发挥撰写有判断力的代码质量综述（周报第三节）",
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
+    "weekly_inspection_summary": {
+        "description": "把本周检视聚合数据(含翻译后的中文问题类别)润色成叙事性「本周检视汇总」（周报第一节）",
+        "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
+    },
 }
 
 
