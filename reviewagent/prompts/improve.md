@@ -89,7 +89,14 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
   - `R-OTHER-IMPACT:schema_drift` — schema 改了, model/migration 没同步
   - `R-OTHER-IMPACT:import_path` — import 旧路径还有引用
   - `R-OTHER-IMPACT:fixture_break` — fixture 改了, 引用它的 test 失配
+- **每个 missing parameter 独立产一条 suggestion** — `probe()` 加了 3 个新参数 (timeout, retry, attempts) 而 caller 一个都没传, 必须发 3 条独立 suggestion, 不要合并为 1 条
 - 优先级: **P1**(与 SSD 自定义规则同级), 不要被 R-XXX / R-OTHER 检查顺序压后
+
+**R-OTHER:magic_number 覆盖范围 (含 inline 循环)**:
+- module-level 常量 (例: `MAX_BUFFER = 4096`) ✓
+- 函数体内硬编码 (例: `time.sleep(0.1)`) ✓
+- **循环边界字面量** (例: `for i in range(3):`, `while attempt < 3:`) ✓ — 计数上限也算 magic
+- 字符串字面量 (例: `print("ERROR")`) 不算, 除非带数字/配置含义
 
 **软约束 — 优先用更精确的规则键**:
 - 跨文件影响类问题 (`R-OTHER-IMPACT:*`) 是**兜底标签** — 如果问题能精确归到 R-XXX (R-RES / R-LOOP / R-ERR / R-SHELL 等) → **优先用 R-XXX 标签**, 不用 R-OTHER-IMPACT

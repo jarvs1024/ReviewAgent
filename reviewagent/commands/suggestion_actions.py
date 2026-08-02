@@ -729,6 +729,32 @@ def auto_detect_applied(
                         note_id[:8], e,
                     )
 
+        # delete_range 特殊判定: improved_code 为空 + existing_code 非空 →
+        # 这条建议是"删除一段代码", 必须验证 target 行在 current 文件中**消失**
+        # 才算采纳. 否则用户只是改了 L33 内容, 不算"删".
+        if not changed:
+            sug_existing = (sug.get("existing_code") or "").strip()
+            sug_improved_full = (sug.get("improved_code") or "").strip()
+            if not sug_improved_full and sug_existing and current_content is not None:
+                # 用 posted_content 拿到 target 行的实际内容, 检查 current 是否还有这段
+                src_content = posted_content if posted_content is not None else current_content
+                src_lines = src_content.splitlines()
+                lo = max(0, target_line - 1)
+                hi = min(len(src_lines), target_line_end)
+                if lo < hi:
+                    deleted_block = "\n".join(src_lines[lo:hi]).strip()
+                    if deleted_block and deleted_block not in current_content:
+                        changed = True
+                        logger.info(
+                            "auto_detect_applied delete_range_confirmed note={} file={} line={}",
+                            note_id[:8], file_path, target_line,
+                        )
+                    elif deleted_block:
+                        logger.info(
+                            "auto_detect_applied delete_range_not_confirmed note={} file={} line={} (block still present)",
+                            note_id[:8], file_path, target_line,
+                        )
+
         if not changed:
             result["unchanged"] += 1
             continue

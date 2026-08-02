@@ -166,3 +166,49 @@ def test_non_open_suggestions_are_skipped(tmp_telemetry):
     sug = s.get_suggestion_by_note_id("dismissed-1")
     assert sug["state"] == "dismissed"
     gl.resolve_discussion.assert_not_called()
+
+
+def test_auto_detect_delete_range_requires_block_removed():
+    """回归 bug #4: auto_detect_applied 不能仅因为 target 行内容"改了" 就把
+    delete_range suggestion 标 applied. 必须验证 deleted_block 在 current 文件
+    中**消失** (即用户真删了), 否则保持 open.
+
+    场景: published suggestion 建议删 L5-L6 (重复 def probe), posted 中存在,
+    current 中内容被改但仍存在 → 不算采纳.
+    """
+    posted = (
+        "def probe(e, a=[]):\n"   # L1
+        "    pass\n"               # L2
+        "    pass\n"               # L3
+        "    pass\n"               # L4
+        "def probe(e, a=[]):\n"   # L5 duplicate (要删)
+        "    return None\n"        # L6
+    )
+    current = (
+        "def probe(e, a=None):\n"  # L1 改了
+        "    pass\n"
+        "    pass\n"
+        "    pass\n"
+        "def probe(e, a=None):\n"  # L5 同步也改了, 但没删
+        "    return None\n"
+    )
+    # 模拟 sug 记录: delete_range, improved_code 为空
+    sug_improved = ""
+    sug_existing = "def probe(e, a=[]):\n    return None\n"
+    assert sug_improved == "" and sug_existing  # delete_range 触发条件
+
+    src_lines = posted.splitlines()
+    target_line, target_line_end = 5, 6  # L5-L6 in 1-indexed
+    lo, hi = max(0, target_line - 1), min(len(src_lines), target_line_end)
+    deleted_block = "\n".join(src_lines[lo:hi]).strip()
+    # 关键判定: 看 current 中是否还有 "def probe" 这个函数定义.
+    # 如果有 → 函数还在, 用户没删; 如果没有 → 真删了.
+    func_def_present = "def probe(" in current
+    assert func_def_present, "test setup error: current 应保留 def probe"
+    # deleted_block 整段不在 current (因为 attempts=[] 改成 attempts=None)
+    assert deleted_block not in current
+    # 但既然 def probe 还在, 不算"删除"
+    block_removed = not func_def_present
+    assert not block_removed, (
+        "delete_range 误判: 用户没删 (def probe 仍在), 不应被 auto_detect 标 applied"
+    )

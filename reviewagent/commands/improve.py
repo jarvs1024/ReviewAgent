@@ -1017,9 +1017,16 @@ class ImproveCommand(BaseCommand):
                         import hashlib as _hl
                         # LLM 不输出 rule_keys 字段 → 从 rationale 文本里抽 R-XXX / R-OTHER / SSD-RULE-* 前缀
                         _rationale = (normalised.get("rationale") or "") if isinstance(normalised, dict) else ""
+                        _header = (normalised.get("header") or "") if isinstance(normalised, dict) else ""
                         _rk = re.findall(r"(?:^|[^A-Z0-9-])(R-OTHER-IMPACT:[a-z0-9_]+|R-OTHER:[a-z0-9_]+|R-[A-Z]+(?:-[A-Z0-9_]+)*|SSD-RULE-[A-Z0-9-]+)", _rationale)
                         _rk = list(dict.fromkeys(_rk))  # 去重保序
                         rule_keys = (raw.get("rule_keys") if isinstance(raw, dict) else None) or _rk
+                        # 后处理: SSD 硬规则 violation 优先用 SSD-RULE-* key.
+                        # 常见情况: LLM 看到 `from X import *` 但 rule_keys 输出 R-OTHER-IMPACT:wildcard_import,
+                        # 应该是 SSD-RULE-FORBIDDEN-WILDCARD-IMPORT (hard-stop).
+                        if "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT" not in rule_keys:
+                            if "wildcard" in _header.lower() or "wildcard" in _rationale.lower() or "from " in _rationale and "import *" in _rationale:
+                                rule_keys = list(rule_keys) + ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
                         fingerprint = _hl.sha256(
                             (existing or "").strip().encode("utf-8")
                         ).hexdigest()[:24]
