@@ -61,13 +61,16 @@ tools:
 
 ```json
 {
-  "markdown": "**高风险模块**\n\n本周风险集中在 `framework/disk/` 与 `framework/network/`，前者被 3 个 MR 同时改动边界接口，叠加后资源生命周期管理的风险被放大……\n\n**新增坏味道**\n\n`framework/disk/sata.py` 的未释放句柄模式本周反复出现，呈累积趋势，说明团队还没形成统一范式……\n\n**测试覆盖与可靠性**\n\n核心改动 `auth_v2.py::send_bulk` 新增了必填参数，但 `test_auth*` 未见对应用例，异常路径（超时 / 部分失败回滚）缺乏验证，存在运行期破坏风险……\n\n**建议跟进**\n\n1) 优先给 `send_bulk` 补异常路径与回滚用例；2) 在 AGENTS.md 沉淀资源释放范式；3) 下周期对 `framework/disk/` 做一次专项重构评审。"
+  "markdown": "**高风险模块**\n\n本周风险集中在 `framework/disk/` 与 `framework/network/`，前者被 3 个 MR 同时改动边界接口，叠加后资源生命周期管理的风险被放大：\n\n- `framework/disk/sata.py` 被 3 个 MR 同时改边界，叠加后释放顺序被破坏\n- `framework/network/socket_pool.py` 新增连接超时但未配降级回调\n- 跨文件耦合：`auth_v2.py` → `disk/handler.py` → `network/pool.py` 任一处异常都会拖垮整条链\n\n**新增坏味道**\n\n`framework/disk/sata.py` 的未释放句柄模式本周反复出现，呈累积趋势，说明团队还没形成统一范式：\n\n- 手动 `open()/close()` 出现 7 次，同一周内 `RESOURCE-CONTEXT-MANAGER` 规则刚发布就被违反\n- 静默吞异常：`runner.py` 的裸 `except: pass` 把 `KeyboardInterrupt` 也吃掉\n- 注释与实现矛盾：`parse_total_3` 的 docstring 说\"replacing dangerous eval()\"，函数体却直接 `eval()`\n\n**测试覆盖与可靠性**\n\n本周改动对应的测试覆盖几乎为零，异常路径未验证，可靠性风险集中在运行期破坏：\n\n- 核心改动 `auth_v2.py::send_bulk` 新增必填参数，但 `test_auth*` 未见对应用例\n- `file_reader.py` 在 `f.read()` 抛异常时句柄泄漏，长跑会累积到 `Too many open files`\n- `stats.py` 空输入直接除零，无守卫\n- 降级缺失：`poller.py` 30s 超时后只返回 `False`，无告警、无重试\n\n**建议跟进**\n\n1. 优先给 `send_bulk` 补异常路径与回滚用例；将 `file_reader.py` 改 `with open(...)`\n2. 在 AGENTS.md 沉淀资源释放范式；把裸 `except: pass` 列入 review 红线\n3. 把 MR !145 三条规则接入 CI 合并检查清单\n4. 下周期对 `framework/disk/` 做一次专项重构评审"
 }
 ```
 
 ## 字段约束
 
-- `markdown`：中文 Markdown；直接给正文（不要输出「本周代码质量全量扫描」标题，渲染层会统一加），**必须包含且仅包含上述 4 个 `**加粗**` 小节**，可含 bullet 与 `###` 子标题。
+- `markdown`：中文 Markdown；直接给正文（不要输出「本周代码质量全量扫描」标题，渲染层会统一加），**必须包含且仅包含上述 4 个 `**加粗**` 小节**。
 - 每个小节标题独占一行，标题与正文之间必须空一行（JSON 中是 `\n\n`）。
+- **每个小节下面的正文必须拆成 markdown bullet 列表**（`- ` 开头），每点独立一行；不要写成一整段流水账。bullet 之间用单个换行（`\n`）。
+- 「建议跟进」可用编号列表（`1. ` `2. ` …）替代 bullet，更醒目；其他三节统一用 bullet。
+- 每个小节建议 3~6 个要点：超过 6 个要点合并同类项；少于 3 个要点说明数据确实简单，不要硬凑。
 - 不要使用 `#` 顶级标题。
 - 行内代码用反引号包裹（文件 / 函数 / 模块名）。
