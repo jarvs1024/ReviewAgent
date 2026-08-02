@@ -159,20 +159,23 @@ def _build_change_summary(mr_list: list[dict], author_count: int) -> str:
             groups["修改"].append(title)
 
     parts = [
-        "概述",
+        "**概述**",
+        "",
         f"本周共合并 **{len(mr_list)}** 个 MR，涉及 **{author_count}** 位作者。",
     ]
     if nature_counter:
         desc = "、".join(f"{k} {v} 个" for k, v in sorted(nature_counter.items(), key=lambda x: -x[1]))
         parts.append(f"按性质看：{desc}。")
-    parts.append("")
     for label in ("新增", "修改", "删除"):
         items = groups[label]
-        if not items:
-            continue
-        parts.append(label)
-        for t in items[:8]:
-            parts.append(f"- {t}")
+        parts.append("")
+        parts.append(f"**{label}**")
+        parts.append("")
+        if items:
+            for t in items[:8]:
+                parts.append(f"- {t}")
+        else:
+            parts.append(f"- 本周无{label}类变更")
         parts.append("")
     return "\n".join(parts).strip()
 
