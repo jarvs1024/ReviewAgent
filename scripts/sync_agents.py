@@ -45,7 +45,7 @@ AGENT_META: dict[str, dict[str, object]] = {
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
     "weekly_quality_scan": {
-        "description": "基于本周代码检视真实产出，自由发挥撰写有判断力的代码质量综述（周报第三节）",
+        "description": "基于本周所有 MR 变更数据（MR 摘要+文件热力图+关键 diff），从整个项目出发做全局代码质量扫描（周报第三节）",
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
     "weekly_inspection_summary": {

@@ -408,34 +408,61 @@ def _render_merged_mrs(d: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _is_core_path_for_scan(path: str) -> bool:
+    """判断文件是否属于核心模块（repo_scan 兜底渲染用）."""
+    core_prefixes = (
+        "services/", "framework/", "src/", "app/", "core/", "lib/",
+        "reviewagent/",
+    )
+    lower = path.lower()
+    return any(lower.startswith(p) for p in core_prefixes)
+
+
 def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
     """本周代码质量全量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
     if pre_rendered:
         # 防御性: 去掉 LLM 自带的节标题(渲染层已加), 并把 # 降级为粗体
         return _strip_leading_section_header(_demote_llm_headings(pre_rendered), "本周代码质量全量扫描")
-    # 兜底: 由 data 合成 markdown
+    # 兜底: 由 data 合成 markdown (与新 collector 返回字段保持一致)
     target_branch = d.get("target_branch", "?")
-    stats = d.get("diff_stats", {})
-    high_risk = d.get("high_risk_files", [])
-    top_rules = d.get("top_rules", [])
-    severity = d.get("severity", {})
+    total_mrs = d.get("total_mrs", 0)
+    total_files = d.get("total_files", 0)
+    total_additions = d.get("total_additions", 0)
+    total_deletions = d.get("total_deletions", 0)
+    top_files = d.get("top_files", []) or d.get("file_changes", [])[:5]
     lines = [
-        f"目标分支 `{target_branch}` 本周 {stats.get('mr_count', 0)} 个合并 MR, "
-        f"覆盖 {stats.get('files_changed', 0)} 个文件, +{stats.get('additions', 0)}/-"
-        f"{stats.get('deletions', 0)} 行。\n",
+        f"本周合并到 `{target_branch}` 的 MR 共 **{total_mrs}** 个，"
+        f"去重变更文件 **{total_files}** 个，新增 **{total_additions}** 行、删除 **{total_deletions}** 行。\n",
         "**高风险模块**",
     ]
-    if high_risk:
-        for f in high_risk[:5]:
-            lines.append(f"- `{f.get('path')}` (变更 +{f.get('additions', 0)}/-{f.get('deletions', 0)})")
+    core_files = [f for f in top_files if f.get("path") and _is_core_path_for_scan(f["path"])]
+    display_files = core_files[:5] if core_files else top_files[:5]
+    if display_files:
+        for f in display_files:
+            lines.append(
+                f"- `{f.get('path')}` | +{f.get('additions', 0)} -{f.get('deletions', 0)}"
+            )
     else:
-        lines.append("- (无)")
-    lines.append("\n**新增坏味道**")
-    if top_rules:
-        for rk, n in top_rules[:5]:
-            lines.append(f"- `{rk}` × **{n}**")
+        lines.append("- (无显著变更)")
+    lines.append("")
+    lines.append("**新增坏味道**")
+    new_files = [f for f in top_files if f.get("is_new")]
+    if new_files:
+        lines.append("- 新增文件 / 模块需关注：")
+        for f in new_files[:5]:
+            lines.append(f"  - `{f.get('path')}`")
     else:
-        lines.append("- (无)")
+        lines.append("- 本周以现有文件修改为主，未观察到新增模块。")
+    lines.append("")
+    lines.append("**测试覆盖与可靠性**")
+    test_files = [f for f in top_files if "test" in (f.get("path") or "").lower()]
+    if test_files:
+        lines.append(f"- 测试文件有 {len(test_files)} 处变更，建议确认核心逻辑是否配套覆盖。")
+    else:
+        lines.append("- 本周变更未明显命中测试目录，建议检查核心逻辑是否补充测试。")
+    lines.append("")
+    lines.append("**建议跟进**")
+    lines.append("- 关注核心模块变更的接口兼容性与回归测试覆盖。")
     return "\n".join(lines) + "\n"
 
 

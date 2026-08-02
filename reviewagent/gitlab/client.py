@@ -79,8 +79,10 @@ class GitLabClient:
         return f"{base}/{path}/-/merge_requests/{mr_iid}"
 
     # ---------- MR diff ----------
-    def get_mr_diff(self, project_id: int, mr_iid: int) -> str:
-        """拉取 MR 的 unified diff（Python 端不解析，原文返回给 agent）.
+    def get_mr_changes(
+        self, project_id: int, mr_iid: int
+    ) -> list[dict[str, Any]]:
+        """拉取 MR 的变更文件列表（结构化数据，含 old/new path / additions / deletions / diff）.
 
         优先用 /changes 端点（单次返回元信息 + diffs），简化逻辑.
         """
@@ -88,9 +90,16 @@ class GitLabClient:
             project = self._get_project(project_id)
             changes = project.mergerequests.get(mr_iid, lazy=True).changes(get_all=True)
         except gitlab.exceptions.GitlabError as e:
-            raise GitLabError(f"get_mr_diff failed: {e}") from e
+            raise GitLabError(f"get_mr_changes failed: {e}") from e
 
         diffs = changes.get("changes", [])
+        logger.info("gitlab.get_mr_changes project={} mr={} files={}",
+                    project_id, mr_iid, len(diffs))
+        return [dict(d) if not isinstance(d, dict) else d for d in diffs]
+
+    def get_mr_diff(self, project_id: int, mr_iid: int) -> str:
+        """拉取 MR 的 unified diff（Python 端不解析，原文返回给 agent）."""
+        diffs = self.get_mr_changes(project_id, mr_iid)
         # 拼接所有文件的 unified diff（agent 会读懂）
         parts: list[str] = []
         for d in diffs:
