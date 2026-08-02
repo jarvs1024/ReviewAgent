@@ -42,5 +42,9 @@ logs/
 # 工作树（Claude Code）
 .claude/worktrees/
 
+# WorkBuddy 本地记忆与临时截图
+.workbuddy/
+tmp_clip.png
+
 # Python 字节码
 *.pyc
