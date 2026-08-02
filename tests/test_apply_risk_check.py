@@ -15,13 +15,14 @@ def _cmd() -> ImproveCommand:
     return obj
 
 
-def _risk(improved, file_src=None, file_path="svc.py"):
+def _risk(improved, file_src=None, file_path="svc.py", suggestion_text=""):
     if file_src is None:
         file_src = ["def run():\n", "    pass\n"]
     return _cmd()._detect_apply_risk(
         file_path=file_path,
         improved_code=improved,
         file_sources={file_path: file_src},
+        suggestion_text=suggestion_text,
     )
 
 
@@ -193,3 +194,75 @@ def test_decorator_name_not_missing():
     improved = "@dataclass\nclass Item:\n    y: int\n"
     level, msgs = _risk(improved, file_src)
     assert "dataclass" not in (", ".join(msgs)), f"decorator 'dataclass' should not be missing: {msgs}"
+
+
+# ---- P4: 建议正文已声明补救 (补 import / 定义) → 降级提示, 不再错位 (MR178 4923) ----
+
+def test_remediated_symbol_in_suggestion_text():
+    """建议正文已说补 `from typing import Any` → 不再报 '目标文件未定义/NameError'."""
+    improved = "def run_job(job: Any) -> None:\n    \"\"\"doc\"\"\"\n"
+    text = "需在文件顶部补 `from typing import Any`；若存在具体类型可把 Any 换成该类型。"
+    level, msgs = _risk(improved, suggestion_text=text)
+    assert level == "warn", f"expected warn, got {level}: {msgs}"
+    joined = ", ".join(msgs)
+    assert "Any" in joined
+    assert "建议要求补充" in joined, f"expected remedied hint, got: {msgs}"
+    assert "目标文件未定义" not in joined, f"should not be hard-missing: {msgs}"
+    assert "add Any" not in joined, f"should not suggest add Any: {msgs}"
+
+
+def test_mixed_remediated_and_hard_missing():
+    """建议只声明补 Any, 另一符号 MISSING_CONST 未声明 → 分开两条提示."""
+    improved = "def run_job(job: Any) -> int:\n    return MISSING_CONST\n"
+    text = "需在文件顶部补 `from typing import Any`。"
+    level, msgs = _risk(improved, suggestion_text=text)
+    assert level == "warn"
+    assert any("MISSING_CONST" in m and "NameError" in m for m in msgs), f"got: {msgs}"
+    assert any("建议要求补充" in m and "Any" in m for m in msgs), f"got: {msgs}"
+
+
+def test_import_logging_remediated():
+    """建议正文已说补 `import logging` → logging 降级提示."""
+    improved = "logging.exception('x')\n"
+    text = "请在文件顶部补 `import logging`。"
+    level, msgs = _risk(improved, suggestion_text=text)
+    assert level == "warn"
+    joined = ", ".join(msgs)
+    assert "logging" in joined
+    assert "建议要求补充" in joined, f"got: {msgs}"
+    assert "目标文件未定义" not in joined, f"got: {msgs}"
+
+
+def test_hard_missing_without_suggestion_text():
+    """不传 suggestion_text → 保持原 NameError 强提示 (兼容旧行为)."""
+    improved = "port = RETRY_PORT\n"
+    level, msgs = _risk(improved)
+    assert level == "warn"
+    assert any("RETRY_PORT" in m and "NameError" in m for m in msgs)
+
+
+# ---- P5: from __future__ import annotations 下, 注解符号不求值 → 豁免 ----
+
+def test_future_annotations_annotation_only_ok():
+    """文件有 future annotations, Any 只出现在注解 → 不标 (运行时不求值)."""
+    file_src = ["from __future__ import annotations\n", "def run() -> None:\n", "    pass\n"]
+    improved = "def run_job(job: Any) -> None:\n    pass\n"
+    level, msgs = _risk(improved, file_src)
+    assert level == "ok", f"annotation-only Any should be ok, got {level}: {msgs}"
+
+
+def test_future_annotations_annotation_plus_usage_warn():
+    """future annotations 存在, 但符号同时在表达式里用 → 仍标 missing."""
+    file_src = ["from __future__ import annotations\n", "def run() -> None:\n", "    pass\n"]
+    improved = "def run_job(job: Any) -> Any:\n    return Any\n"
+    level, msgs = _risk(improved, file_src)
+    assert level == "warn", f"Any used in expr should warn, got {level}: {msgs}"
+    assert any("Any" in m for m in msgs)
+
+
+def test_no_future_annotations_annotation_used_warn():
+    """无 future annotations, 注解中的符号仍会求值 → 保留 warn."""
+    file_src = ["def run() -> None:\n", "    pass\n"]
+    improved = "def run_job(job: Any) -> None:\n    pass\n"
+    level, msgs = _risk(improved, file_src)
+    assert level == "warn", f"without future annotations should warn, got {level}: {msgs}"

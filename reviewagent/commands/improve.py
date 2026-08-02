@@ -873,6 +873,7 @@ class ImproveCommand(BaseCommand):
         file_path: str,
         improved_code: str,
         file_sources: dict[str, list[str]],
+        suggestion_text: str = "",
     ) -> tuple[str, list[str]]:
         """识别 improved_code 中引用了 file_sources 未定义的符号.
 
@@ -883,6 +884,9 @@ class ImproveCommand(BaseCommand):
 
         排除: builtins / 关键字 / self / cls / 已定义 (def/class/import/赋值/函数参数/
         lambda/AnnAssign/NamedExpr/For target/With as/global/nonlocal/decorator).
+        suggestion_text: 建议正文 (rationale/header). 若某个 missing 符号在建议正文里
+        已声明补救方式 (补 import / 定义), 则降级为 "按建议手动补上" 的提示, 不再误报
+        "apply 后会 NameError" (避免提醒与建议内容错位, MR178 4923 场景).
         改进片段本身 AST 解析 syntax error → 尝试 textwrap.dedent + 补 pass 再 parse,
         仍失败则视为 ok (治本靠 prompt 约束 8).
         """
@@ -935,6 +939,56 @@ class ImproveCommand(BaseCommand):
         #   - Attribute: base 是 self/cls → 跳过 (实例属性动态)
         #              base 是已定义 Name (e.g. logger) → 跳过
         #              base 是未定义 Name → 标 base (避免重复标 attr)
+        # 注解上下文豁免: 目标文件有 `from __future__ import annotations` 时,
+        # 注解在运行时不被求值, 只出现在注解里的符号不会触发 NameError
+        # (e.g. def f(x: Any) -> None, Any 未 import 也能正常运行).
+        has_future_annotations = False
+        try:
+            mod = _ast.parse(file_src)
+            for n in mod.body:
+                if isinstance(n, _ast.ImportFrom) and n.module == "__future__":
+                    if any(alias.name == "annotations" for alias in n.names):
+                        has_future_annotations = True
+        except SyntaxError:
+            pass
+
+        annot_use: dict[str, int] = {}
+        total_use: dict[str, int] = {}
+        if has_future_annotations:
+            for node in _ast.walk(tree):
+                _ann_nodes: list[_ast.AST] = []
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    if node.returns:
+                        _ann_nodes.append(node.returns)
+                    for arg in (
+                        list(node.args.posonlyargs) + list(node.args.args)
+                        + list(node.args.kwonlyargs)
+                    ):
+                        if arg.annotation:
+                            _ann_nodes.append(arg.annotation)
+                    if node.args.vararg and node.args.vararg.annotation:
+                        _ann_nodes.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation:
+                        _ann_nodes.append(node.args.kwarg.annotation)
+                elif isinstance(node, _ast.AnnAssign) and node.annotation:
+                    _ann_nodes.append(node.annotation)
+                else:
+                    continue
+                for _an in _ann_nodes:
+                    for _n in _ast.walk(_an):
+                        if isinstance(_n, _ast.Name) and not isinstance(_n.ctx, _ast.Store):
+                            annot_use[_n.id] = annot_use.get(_n.id, 0) + 1
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Name) and not isinstance(node.ctx, _ast.Store):
+                    total_use[node.id] = total_use.get(node.id, 0) + 1
+
+        def _is_annotation_only(name: str) -> bool:
+            return (
+                has_future_annotations
+                and annot_use.get(name, 0) > 0
+                and annot_use.get(name, 0) == total_use.get(name, 0)
+            )
+
         missing: list[str] = []
         seen_attr_bases: set[int] = set()
         for node in _ast.walk(tree):
@@ -943,6 +997,8 @@ class ImproveCommand(BaseCommand):
                     continue
                 if node.id in all_defined:
                     continue
+                if _is_annotation_only(node.id):
+                    continue
                 missing.append(node.id)
             elif isinstance(node, _ast.Attribute):
                 base = node.value
@@ -950,7 +1006,7 @@ class ImproveCommand(BaseCommand):
                     continue
                 if isinstance(base, _ast.Name) and id(base) not in seen_attr_bases:
                     seen_attr_bases.add(id(base))
-                    if base.id not in all_defined:
+                    if base.id not in all_defined and not _is_annotation_only(base.id):
                         missing.append(base.id)
 
         # 去重保序
@@ -964,18 +1020,65 @@ class ImproveCommand(BaseCommand):
         if not uniq_missing:
             return "ok", []
 
-        # 统一处理: 所有 missing 符号都用同一条 actionable 提示
-        # (之前 likely_module 启发式把 data/config/result 等常见变量名误分类为"疑似模块",
-        #  反而削弱了警告力度. 现在统一用 NameError 提示, 文案里包含 import/add 两个方向.)
-        symbols_str = ", ".join(uniq_missing[:8])
-        first = uniq_missing[0]
-        msgs: list[str] = [
-            f"**目标文件未定义** ({symbols_str}) — "
-            f"apply 后会 `NameError`；请先在文件里 `add {first} = <value>` "
-            f"或 `import {first}` 后再 apply"
-        ]
+        # 建议正文已声明补救的符号 (补 import / from-import / 定义 X): 降级提示,
+        # 避免"目标文件未定义/NameError"与建议内容打架 (MR178 4923 错位场景).
+        remedied = self._extract_remedied_symbols(suggestion_text)
+        remedied_missing = [n for n in uniq_missing if n in remedied]
+        hard_missing = [n for n in uniq_missing if n not in remedied]
+
+        msgs: list[str] = []
+        if hard_missing:
+            symbols_str = ", ".join(hard_missing[:8])
+            first = hard_missing[0]
+            msgs.append(
+                f"**目标文件未定义** ({symbols_str}) — "
+                f"apply 后会 `NameError`；请先在文件里 `add {first} = <value>` "
+                f"或 `import {first}` 后再 apply"
+            )
+        if remedied_missing:
+            syms_str = ", ".join(remedied_missing[:8])
+            msgs.append(
+                f"**建议要求补充** ({syms_str}) — 建议正文已说明补救方式 "
+                f"(补 import / 定义)；Apply 只替换当前行，请按建议手动补上后再运行"
+            )
 
         return "warn", msgs
+
+    @staticmethod
+    def _extract_remedied_symbols(text: str) -> set[str]:
+        """从建议正文里提取"已声明补救"的符号.
+
+        命中模式: `from X import A` / `import A` / `补 A` / `添加 A` / `定义 A` 等.
+        这些符号虽然当前不在目标文件中, 但建议正文已经明确给出补救方式,
+        静态检测不应再报 "apply 后会 NameError" 的错位警告.
+        """
+        found: set[str] = set()
+        if not text:
+            return found
+        # from X import A, B as C / from X import (A, B)
+        for m in re.finditer(r"\bfrom\s+[\w.]+\s+import\s+\(?([^()（）\n]+)\)?", text):
+            for part in m.group(1).split(","):
+                name = part.strip().split(" as ")[0].strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", name):
+                    found.add(name)
+        # import X / import X.Y / import X as Y / import X, Y
+        for m in re.finditer(
+            r"\bimport\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s+as\s+[A-Za-z_]\w*)?"
+            r"(?:\s*,\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s+as\s+[A-Za-z_]\w*)?)*)",
+            text,
+        ):
+            for part in m.group(1).split(","):
+                name = part.strip().split(" as ")[0].strip()
+                base = name.split(".")[0]
+                if re.fullmatch(r"[A-Za-z_]\w*", base):
+                    found.add(base)
+        # 中文: 补/添加/定义/引入/新增/补充 X (可带反引号 / import 前缀)
+        for m in re.finditer(
+            r"(?:补|添加|定义|引入|新增|补充)\s+[`\s]*(?:(?:from\s+[\w.]+\s+import\s+)|(?:import\s+))?([A-Za-z_]\w*)",
+            text,
+        ):
+            found.add(m.group(1))
+        return found
 
     def _build_summary_v2(
         self,
@@ -1179,11 +1282,15 @@ class ImproveCommand(BaseCommand):
                     file_path=file_path,
                     improved_code=decision.get("normalised_code") or normalised["improved_code"],
                     file_sources=file_sources,
+                    suggestion_text=(
+                        f"{normalised.get('rationale') or ''}\n"
+                        f"{normalised.get('header') or ''}"
+                    ),
                 )
                 _warn_block = ""
                 if _risk_level == "warn" and _risk_msgs:
                     _warn_block = (
-                        "> ⚠️ **apply 前请确认** — 这条建议引用了目标文件中未定义的符号；\n"
+                        "> ⚠️ **apply 前请确认** — 建议引入了目标文件中尚未存在的符号；\n"
                         + "\n".join(f"> • {m}" for m in _risk_msgs) + "\n"
                         + "> 💡 apply 后请补全缺失的 import / 常量 / 方法, 否则会 NameError 或 ImportError.\n\n"
                     )
