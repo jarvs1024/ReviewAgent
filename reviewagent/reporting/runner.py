@@ -74,13 +74,19 @@ def _build_collector(name: str) -> Collector | None:
     return cls()
 
 
-def _build_notifier(cfg: WeeklyReportConfig) -> Notifier:
+def _build_notifier(cfg: WeeklyReportConfig, *, dry_run: bool | None = None) -> Notifier:
+    """构造 notifier.
+
+    Args:
+        dry_run: 显式覆盖 cfg.dingtalk_dry_run (None = 用配置值)。
+                 CLI `--push` 需要传 False, 否则 notifier 内部仍会 dry_run 空跑。
+    """
     if cfg.notifier == "dingtalk":
         return DingTalkNotifier(
             webhook_url=cfg.dingtalk_webhook_url,
             secret=cfg.dingtalk_secret,
             retry_attempts=cfg.dingtalk_retry_attempts,
-            dry_run=cfg.dingtalk_dry_run,
+            dry_run=cfg.dingtalk_dry_run if dry_run is None else dry_run,
         )
     raise RuntimeError(f"unsupported notifier: {cfg.notifier!r}")
 
@@ -177,7 +183,8 @@ def run_weekly_job(
     # 4. notify
     delivery: dict[str, Any] = {"skipped": True}
     if push or not cfg.dingtalk_dry_run:
-        notifier = _build_notifier(cfg)
+        # 显式关掉 dry_run: --push 时即使 env 配置了 DRY_RUN=true 也要真发
+        notifier = _build_notifier(cfg, dry_run=False)
         chunks = split_markdown(md_text, chunk_limit=cfg.markdown_chunk_limit)
         result = notifier.send(
             title=f"{cfg.report_emoji} {cfg.report_title} ({artifact.week_label})",
@@ -193,7 +200,7 @@ def run_weekly_job(
         }
     else:
         # 总是走一次 notifier.send (dry_run), 让 log 看到分片
-        notifier = _build_notifier(cfg)
+        notifier = _build_notifier(cfg, dry_run=True)
         chunks = split_markdown(md_text, chunk_limit=cfg.markdown_chunk_limit)
         result = notifier.send(
             title=f"{cfg.report_emoji} {cfg.report_title} ({artifact.week_label})",
