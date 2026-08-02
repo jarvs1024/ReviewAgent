@@ -1,49 +1,54 @@
-# 86 服务器部署全记录
+# 部署文档
 
-> 更新日期：2026-07-28 · PoC 部署 + 端到端跑通
+> 更新日期：2026-08-02 · 两环境并存（86 服务器 + 本地 v2）
 
-## 概览
+ReviewAgent 目前有**两套并存**的部署目标，互相隔离（与旧 `pr-agent v1` 也完全隔离）。本文档记录两者的真实配置与踩坑。
 
-| 项 | 值 |
-|---|---|
-| 主机 | `ops-host` (ssh-remote alias) → `root@ops-host.internal:22` |
-| OS | Anolis OS 23.4（RHEL 兼容） |
-| GitLab 实例 | `http://gitlab.internal`（10.20.27.x 子网，与 86 不同段） |
-| Python | 3.12.13（dnf install） |
-| Redis | 复用 `testmate-redis` Docker 容器 db=1 |
-| opencode | `/usr/local/bin/opencode v1.15.10`，deepseek provider |
-| ReviewAgent webhook | systemd `reviewagent-webhook.service`，监听 `0.0.0.0:3000` |
-| ReviewAgent worker | systemd `reviewagent-worker.service`，RQ `review` queue |
-| 数据目录 | `/home/workflow/data/`（bind）· `/tmp/reviewagent-worktrees/`（tmpfs） |
+| 维度 | 86 服务器（生产向 PoC） | 本地 v2（macOS 开发向） |
+|---|---|---|
+| 主机 | `ops-host`（root@ops-host.internal） | 本机 `/Users/jarvs`（macOS） |
+| OS | Anolis OS 23.4（RHEL 兼容） | macOS + Docker Desktop |
+| webhook 端口 | `:3000` | `:5052`（前接 socat bridge `:5051`） |
+| RQ 队列 | `review` | `review-v2` |
+| Redis | `redis://127.0.0.1:6379/1`（testmate-redis 容器） | `redis://127.0.0.1:63790/2`（testmate-redis 容器） |
+| opencode | `:4096`，模型 `deepseek-v4-flash` | `:4096`，模型 `minimax/MiniMax-M2.7` |
+| GitLab bot | `review-bot`（id=35） | `review-bot-v2`（id=40） |
+| 进程管理 | systemd unit | `scripts/run_*.sh` 后台 + socat 容器 |
+| firewalld | 放行 3000 / 4096 | Docker 网络（GitLab 容器经 bridge 可达） |
 
 ---
 
-## 部署步骤（PoC 实测顺序）
+## 一、86 服务器部署（生产向）
 
+### 1. 基础依赖
 ```bash
-# 1. 基础依赖
 dnf install -y python3.12 python3.12-devel git
+```
 
-# 2. 项目代码（从本地 scp / rsync）
+### 2. 项目代码 + venv
+```bash
 mkdir -p /home/workflow/ReviewAgent
-# ... 把 D:\Code\ReviewAgent 内容传过来 ...
-
-# 3. Python venv + 依赖
+# 把仓库同步到 /home/workflow/ReviewAgent
 cd /home/workflow/ReviewAgent
 python3.12 -m venv .venv
-.venv/bin/pip install --upgrade pip   # 必须先升！Anolis 默认 pip 23.3.1 有 urllib3 bug
+.venv/bin/pip install --no-cache-dir 'urllib3<2'   # 先修 Anolis pip/urllib3 bug
+.venv/bin/pip install --upgrade pip
 .venv/bin/pip install -e ".[dev]"
+```
 
-# 4. firewalld 放行端口（**最关键**——不开放外部永远调不到）
+### 3. firewalld 放行（最关键）
+```bash
 firewall-cmd --zone=public --add-port=3000/tcp --permanent
 firewall-cmd --zone=public --add-port=4096/tcp --permanent
 firewall-cmd --reload
+```
 
-# 5. systemd unit（PATH 必须含 /usr/bin，否则 worker 找不到 git）
-cat > /etc/systemd/system/reviewagent-webhook.service <<'EOF'
+### 4. systemd unit
+`/etc/systemd/system/reviewagent-webhook.service` 与 `reviewagent-worker.service`，**PATH 必须含 `/usr/bin`**（否则 worker 找不到 `git`）：
+```ini
 [Unit]
 Description=ReviewAgent Webhook (FastAPI)
-After=network.target
+After=network.target redis-server.service
 
 [Service]
 Type=simple
@@ -54,297 +59,108 @@ EnvironmentFile=/home/workflow/ReviewAgent/.env
 ExecStart=/home/workflow/ReviewAgent/.venv/bin/uvicorn reviewagent.main:app --host 0.0.0.0 --port 3000
 Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-EOF
-# (worker service 类似，ExecStart 改为 rq worker review)
+```
+worker 同理，`ExecStart` 改为：
+```
+/home/workflow/ReviewAgent/.venv/bin/rq worker review --url redis://127.0.0.1:6379/1
+```
+```bash
 systemctl daemon-reload
 systemctl enable --now reviewagent-webhook reviewagent-worker
+```
 
-# 6. opencode 配置（**绕开 models.dev 必查**——必须用 HTTP API 路径）
+### 5. opencode serve（注意：未进 systemd）
+```bash
 mkdir -p /root/.config/opencode/agents
-cp /home/workflow/ReviewAgent/reviewagent/prompts/describe.md /root/.config/opencode/agents/pr-describer.md
-
-cat > /root/.config/opencode/opencode.jsonc <<'JSONEOF'
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "deepseek": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "DeepSeek",
-      "options": {
-        "baseURL": "https://api.deepseek.com/v1",
-        "apiKey": "sk-YOUR_DEEPSEEK_KEY"
-      },
-      "models": {
-        "deepseek-chat":     { "name": "DeepSeek Chat" },
-        "deepseek-reasoner": { "name": "DeepSeek Reasoner" },
-        "deepseek-v4-flash": { "name": "DeepSeek v4 Flash" }
-      }
-    }
-  }
-}
-JSONEOF
-chmod 600 /root/.config/opencode/opencode.jsonc
-
-# 7. 起 opencode serve（用 setsid 完全脱离 ssh session）
-cd /root
+# 把 reviewagent/prompts/{describe,improve}.md 同步到 agent 目录（用 scripts/sync_agents.py）
 setsid bash -c 'nohup /usr/local/bin/opencode serve --port 4096 --hostname 0.0.0.0 >/var/log/opencode.log 2>&1 &' < /dev/null
-sleep 5
-curl http://127.0.0.1:4096/global/health   # 期望 {"healthy":true,"version":"1.15.10"}
+curl http://127.0.0.1:4096/global/health   # {"healthy":true,...}
+```
 
-# 8. GitLab webhook 配置（GitLab 那侧手动）
-#    URL: http://ops-host.internal:3000/webhook
-#    Secret token: 与 .env GITLAB_WEBHOOK_SECRET 一致
-#    Trigger: Merge request events + Comments
+### 6. GitLab webhook（GitLab 侧手动）
+- URL：`http://ops-host.internal:3000/webhook`
+- Secret token：与 `.env` 的 `GITLAB_WEBHOOK_SECRET` 一致
+- Trigger：☑ Merge request events  ☑ Comments
+
+---
+
+## 二、本地 v2 部署（macOS）
+
+直接使用仓库内置脚本（已写死 v2 环境变量，含 Redis `:63790/2`、队列 `review-v2`、模型 minimax）：
+```bash
+bash scripts/run_webhook.sh      # 后台 uvicorn :5052
+bash scripts/run_worker.sh       # 后台 rq worker review-v2（含 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES）
+```
+
+因 macOS Docker Desktop 无法直接 `host.docker.internal:port` 访问宿主进程，需起 socat bridge 让 GitLab 容器可达 `:5051`：
+```bash
+docker run -d --name reviewagent-bridge \
+  --network gitlab-stack_net \
+  -p 5051:5051 \
+  alpine/socat \
+  TCP-LISTEN:5051,fork,reuseaddr TCP:host.docker.internal:5052
+```
+GitLab webhook URL 配 `http://<host>:5051/webhook`。
+
+opencode agent 文件须与仓库 `prompts/*.md` 同步：
+```bash
+python scripts/sync_agents.py    # reviewagent/prompts/*.md → ~/.config/opencode/agent/*.md
 ```
 
 ---
 
-## 踩坑全记录（按时间顺序）
+## 踩坑全记录（按时间顺序，仍适用）
 
-### 坑 1：pip install 失败 — urllib3 / Python 3.12 bug
-
-**症状**：`TypeError: '>=' not supported between instances of 'int' and 'NoneType'`
-
-**根因**：Anolis OS 自带 pip 23.3.1 + urllib3 1.26.x 处理内网 mirror 的 Content-Length 缺失有 bug
-
-**解决**：
-```bash
-.venv/bin/pip install --no-cache-dir 'urllib3<2'   # 先装 urllib3 1.26.20
-.venv/bin/pip cache purge
-.venv/bin/pip install --upgrade pip                 # 升到 26.x
-.venv/bin/pip install -e ".[dev]"
-```
-
-### 坑 2：GitLab webhook 报 "No route to host"
-
-**症状**：GitLab (gitlab.internal) → 86 (ops-host.internal:3000) 完全不通
-
-**根因**：firewalld `public zone` 默认只放行 `dhcpv6-client` + `ssh`，**3000/4096 被挡**
-
-**诊断**：
-```bash
-firewall-cmd --zone=public --query-port=3000/tcp
-# 期望 YES，但实际 no
-ss -tlnp | grep :3000
-# uvicorn 进程在监听
-curl http://127.0.0.1:3000/health  # 本地 OK
-# 结论：loopback OK，远程被 firewalld 挡
-```
-
-**解决**：
-```bash
-firewall-cmd --zone=public --add-port=3000/tcp --permanent
-firewall-cmd --zone=public --add-port=4096/tcp --permanent
-firewall-cmd --reload
-```
-
-**为什么 pr-agent 之前能跑**：pr-agent Docker 容器启动时 Docker daemon 自动注册了端口；裸 uvicorn 进程不会自动注册。
-
-### 坑 3：worker 报 "FileNotFoundError: 'git'"
-
-**症状**：worker 调 `git clone --bare` 失败，`No such file or directory: 'git'`
-
-**根因**：systemd unit 写 `Environment="PATH=/home/workflow/ReviewAgent/.venv/bin"`，**完全覆盖**默认 PATH，导致 `/usr/bin/git` 找不到
-
-**解决**：扩展 systemd unit 的 PATH：
-```ini
-Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-```
-
-### 坑 4：git clone 重定向到登录页
-
-**症状**：
-```
-git clone --bare failed: fatal: unable to update url base from redirection:
-  asked for: http://gitlab.internal/info/refs?service=git-upload-pack
-   redirect: http://gitlab.internal/users/sign_in
-```
-
-**根因**：`workspace.py` 用 `gitlab_url.replace("https://", f"https://oauth2:{pat}@")` 构造 URL，但您的 GitLab 是 `http://`，replace 不匹配，URL 没带 token
-
-**解决**：新增 `GitLabClient.get_project_git_url(project_id)`，直接通过 GitLab API 拿 `path_with_namespace` 然后拼带 token 的 URL：
-```python
-def get_project_git_url(self, project_id: int) -> str:
-    project = self._gl.projects.get(project_id)
-    path = getattr(project, "path_with_namespace", None) or str(project_id)
-    base = self._gl.url.rstrip("/")
-    scheme = "https" if base.startswith("https://") else "http"
-    host = base[len(f"{scheme}://"):]
-    return f"{scheme}://oauth2:{self._gl.private_token}@{host}/{path}.git"
-```
-
-URL 写入日志前用 `_scrub_token()` 脱敏。
-
-### 坑 5：opencode `run --format json` 启动卡死
-
-**症状**：`Failed to fetch models.dev` 10 秒超时，agent 不产出任何输出
-
-**根因**：opencode 1.15.10 启动时强制 fetch `https://models.dev/api.json`（公网元数据源），86 network_isolated 阻断
-
-**解决（两个层面）**：
-
-1. **配置 provider**（避免 model lookup 失败）：
-   ```jsonc
-   // /root/.config/opencode/opencode.jsonc
-   {
-     "provider": { "deepseek": { ... } }
-   }
-   ```
-
-2. **改用 HTTP API 模式**（subprocess + --attach 实测也不工作，0 输出）：
-   ```python
-   # POST /session 创建 ephemeral
-   r = POST /session/{sid}/message
-     parts: [{type:"text"}, {type:"file", url:"data:text/plain;base64,..."}]
-     model: {providerID: "deepseek", modelID: "deepseek-v4-flash"}
-     agent: "pr-describer"
-   ```
-
-### 坑 6：file part 缺 `url` 字段
-
-**症状**：`opencode HTTP 400: Missing key at ["parts"][1]["url"]`
-
-**根因**：opencode 的 file part schema 是 `url`（指向 data URL 或已上传文件的 url），不是 `content`
-
-**解决**：改用 base64 data URL：
-```python
-b64 = base64.b64encode(raw).decode("ascii")
-parts.append({
-    "type": "file",
-    "filename": fp.name,
-    "mime": "text/plain",
-    "url": f"data:text/plain;base64,{b64}",
-})
-```
-
-### 坑 7：bash heredoc 在 ssh-remote exec 里转义问题
-
-**症状**：`ssh_ops.py: error: unrecognized arguments: 'JSONEOF'` 或 `$schema` 被解析成空
-
-**解决**：
-- 用 `<<'JSONEOF'` 单引号 heredoc（变量不展开）
-- 多行内容用 `-- "..."` 把命令隔离
-- API key 写入文件时用 base64 / data URL 编码避免 shell 解析
+1. **pip install 失败（urllib3 / Python 3.12 bug）**：Anolis 自带 pip 23.3.1 + urllib3 1.26.x 处理内网 mirror 的 Content-Length 缺失有 bug。先 `pip install 'urllib3<2'`，再升级 pip。
+2. **GitLab webhook "No route to host"**：firewalld `public zone` 默认只放行 ssh，3000/4096 被挡。需显式 `firewall-cmd --add-port`。
+3. **worker "FileNotFoundError: git"**：systemd unit 的 `Environment="PATH=.../.venv/bin"` 覆盖默认 PATH 导致 `/usr/bin/git` 找不到。PATH 须含 `/usr/bin`。
+4. **git clone 重定向到登录页**：`gitlab_url` 是 `http://` 时 `replace("https://"...)` 不匹配。改由 `GitLabClient.get_project_git_url(project_id)` 用 `path_with_namespace` 拼带 token 的 URL（日志用 `_scrub_token()` 脱敏）。
+5. **opencode `run --format json` 卡死**：启动时强制 fetch `models.dev`，离线环境超时。改用 **HTTP API**（`POST /session` + `/session/:id/message`），serve 启动时已加载 provider，不需要公网元数据。
+6. **file part 缺 `url` 字段**：opencode file part 用 `url`（data URL），非 `content`。但大文件 data URL 会触发 Server 500，故当前实现把 diff **内联进 prompt 文本**（`opencode_max_diff_chars` 截断）。
+7. **bash heredoc 转义**：写 opencode.jsonc 用 `<<'JSONEOF'` 单引号 heredoc，API key 用 base64 避免 shell 解析。
 
 ---
 
-## 当前真实配置
-
-### `/home/workflow/ReviewAgent/.env`（不入 git；以下为示例值）
-
-```bash
-GITLAB_URL=https://gitlab.your-company.com
-GITLAB_PERSONAL_ACCESS_TOKEN=glpat-***REDACTED***
-GITLAB_WEBHOOK_SECRET=***REDACTED-32-CHAR-HEX***
-GITLAB_BOT_USERNAME=review-bot
-OPENCODE_URL=http://127.0.0.1:4096
-OPENCODE_USERNAME=opencode
-OPENCODE_PASSWORD=
-REDIS_URL=redis://127.0.0.1:6379/1
-RQ_QUEUE_NAME=review
-RQ_WORKER_TIMEOUT=600
-REVIEWAGENT_DATA_DIR=/var/lib/reviewagent/data
-REVIEWAGENT_LOG_LEVEL=INFO
-MR_COOLDOWN_SECONDS=30
-MAX_REVIEW_CALLS_PER_MR=0
-```
-
-### `/root/.config/opencode/opencode.jsonc`（chmod 600）
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "deepseek": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "DeepSeek",
-      "options": {
-        "baseURL": "https://api.deepseek.com/v1",
-        "apiKey": "sk-YOUR_DEEPSEEK_KEY"
-      },
-      "models": {
-        "deepseek-chat":     { "name": "DeepSeek Chat" },
-        "deepseek-reasoner": { "name": "DeepSeek Reasoner" },
-        "deepseek-v4-flash": { "name": "DeepSeek v4 Flash" }
-      }
-    }
-  }
-}
-```
-
-### `/etc/systemd/system/reviewagent-{webhook,worker}.service`
-
-两文件同构，PATH 必须含 `/usr/bin`：
-
-```ini
-[Service]
-Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/home/workflow/ReviewAgent/.env
-WorkingDirectory=/home/workflow/ReviewAgent
-ExecStart=/home/workflow/ReviewAgent/.venv/bin/uvicorn reviewagent.main:app --host 0.0.0.0 --port 3000
-# worker 同理：ExecStart=/home/workflow/ReviewAgent/.venv/bin/rq worker review --url redis://127.0.0.1:6379/1
-```
-
-### firewalld
-
-```bash
-firewall-cmd --zone=public --list-ports
-# 3000/tcp 4096/tcp
-```
-
----
-
-## 验证清单（部署后）
+## 验证清单
 
 ```bash
 # 1. 服务健康
-curl http://127.0.0.1:3000/health
-curl http://127.0.0.1:4096/global/health
-systemctl is-active reviewagent-webhook reviewagent-worker
+curl http://127.0.0.1:3000/health        # 86
+curl http://127.0.0.1:5052/health        # 本地 v2
+curl http://127.0.0.1:4096/global/health  # opencode
 
 # 2. Redis
-/home/workflow/ReviewAgent/.venv/bin/python -c \
-  'import redis; r=redis.from_url("redis://127.0.0.1:6379/1"); print(r.ping())'
+python -c 'import redis; print(redis.from_url("redis://127.0.0.1:6379/1").ping())'
 
 # 3. SQLite
-ls -la /home/workflow/data/telemetry.db
-sqlite3 /home/workflow/data/telemetry.db ".tables"
-# 期望：mr_activity  review_runs
+ls -la data/telemetry.db
+python -c "import sqlite3; print(sqlite3.connect('data/telemetry.db').execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall())"
+# 期望：mr_activity / review_runs / suggestion_actions / suggestions
 
-# 4. firewalld
-firewall-cmd --zone=public --query-port=3000/tcp   # yes
-firewall-cmd --zone=public --query-port=4096/tcp   # yes
-
-# 5. GitLab webhook（GitLab 那侧手动）
-#    触发一个 MR open → 30s 内看 86 上 SQLite 是否有新记录
+# 4. Telemetry 累计量
+curl http://127.0.0.1:3000/api/v1/telemetry/health
 ```
 
 ---
 
 ## 备份 / 恢复
 
-需要备份的：
-- `/home/workflow/data/` — SQLite + bare repos（**核心**）
-- `/home/workflow/ReviewAgent/.env` — 凭证（**高敏**）
-- `/root/.config/opencode/opencode.jsonc` — opencode 凭证（**高敏**）
+需备份：
+- `data/` — SQLite + bare repos（核心）
+- `.env` — 凭证（高敏）
+- `~/.config/opencode/opencode.jsonc` / `agent/` — opencode 凭证与 agent 文件（高敏）
 
-不需要备份（可重建）：
-- `/tmp/reviewagent-worktrees/` — tmpfs，重启即清
-- systemd unit 文件 — 可重建
-- 日志 / opencode.db — 临时
+不需备份（可重建）：`/tmp/reviewagent-worktrees/`（tmpfs）、systemd unit、日志。
 
 ---
 
-## SSH 远程操作备忘
+## ⚠️ 安全提示
 
-主机别名：`ops-host`
-调用：`cd C:/Users/reviewer/.claude/skills/ssh-remote && python scripts/ssh_ops.py exec --session ops-host --yes --i-know --trust-host --trust-override --cmd-timeout 30 -- "命令"`
-
-常用 flags：
-- `--yes` — 已确认目标主机
-- `--i-know` — 高危操作（pkill / systemctl / firewalld）需此标志
-- `--trust-host` — 首次连接受信任 host key
-- `--trust-override` — 绕过 network_isolated 默认软约束
+- `scripts/run_webhook.sh` / `scripts/run_worker.sh` 当前**硬编码了真实 GitLab PAT 与 webhook secret 明文**。生产前务必改为从 `.env` 读取并轮换密钥（参考 `run_weekly_report.sh` 的 `source .env`）。
+- 历史文档里记录过的旧 secret（DeepSeek key、`glpat-...`、`414d0c...`）均已废弃，需轮换。
+- 86 服务器 opencode 未进 systemd，重启会丢，需补 unit。
