@@ -796,11 +796,81 @@ class ImproveCommand(BaseCommand):
             version = 1
         return f"## 改进总览 V{version}\n\n_加载中…_"
 
+    @staticmethod
+    def _collect_defined_names(
+        tree: "ast.AST",
+        ast_module,
+    ) -> set[str]:
+        """从 AST 中收集所有「定义」的符号名.
+
+        覆盖: ClassDef / FunctionDef / AsyncFunctionDef / Lambda args /
+        Import / ImportFrom / Assign / AnnAssign / NamedExpr /
+        For target / With optional_vars / global / nonlocal / decorator names.
+        """
+        defs: set[str] = set()
+
+        def _add_target(tgt):
+            if isinstance(tgt, ast_module.Name):
+                defs.add(tgt.id)
+            elif isinstance(tgt, ast_module.Tuple):
+                for el in tgt.elts:
+                    _add_target(el)
+            elif isinstance(tgt, ast_module.Starred):
+                _add_target(tgt.value)
+
+        for node in ast_module.walk(tree):
+            if isinstance(node, ast_module.ClassDef):
+                defs.add(node.name)
+            elif isinstance(node, (ast_module.FunctionDef, ast_module.AsyncFunctionDef)):
+                defs.add(node.name)
+                args = node.args
+                for arg in (args.posonlyargs + args.args +
+                            args.kwonlyargs + [args.vararg, args.kwarg]):
+                    if arg:
+                        defs.add(arg.arg)
+                for dec in node.decorator_list:
+                    if isinstance(dec, ast_module.Name):
+                        defs.add(dec.id)
+            elif isinstance(node, ast_module.Lambda):
+                args = node.args
+                for arg in (args.posonlyargs + args.args +
+                            args.kwonlyargs + [args.vararg, args.kwarg]):
+                    if arg:
+                        defs.add(arg.arg)
+            elif isinstance(node, (ast_module.Import, ast_module.ImportFrom)):
+                for alias in node.names:
+                    defs.add(alias.asname or alias.name.split(".")[0])
+            elif isinstance(node, ast_module.Assign):
+                for tgt in node.targets:
+                    _add_target(tgt)
+            elif isinstance(node, ast_module.AnnAssign):
+                if node.target:
+                    _add_target(node.target)
+            elif isinstance(node, ast_module.NamedExpr):
+                _add_target(node.target)
+            elif isinstance(node, ast_module.For):
+                if node.target:
+                    _add_target(node.target)
+            elif isinstance(node, ast_module.comprehension):
+                for gen in [node]:
+                    if gen.target:
+                        _add_target(gen.target)
+            elif isinstance(node, ast_module.With):
+                for item in node.items:
+                    if item.optional_vars:
+                        _add_target(item.optional_vars)
+            elif isinstance(node, ast_module.Global):
+                for name in node.names:
+                    defs.add(name)
+            elif isinstance(node, ast_module.Nonlocal):
+                for name in node.names:
+                    defs.add(name)
+        return defs
+
     def _detect_apply_risk(
         self,
         *,
         file_path: str,
-        target_line: int,
         improved_code: str,
         file_sources: dict[str, list[str]],
     ) -> tuple[str, list[str]]:
@@ -811,16 +881,28 @@ class ImproveCommand(BaseCommand):
           - ("warn", ["...", ...])  : 引用了 missing 符号, apply 后会 NameError / ImportError;
                                        review 中加 ⚠️ 提示, 但保留 Apply 按钮让 reviewer 自行处理
 
-        排除: builtins / 关键字 / self / cls / 已定义 (def/class/import/赋值/函数参数/lambda)
-        改进片段本身 AST 解析 syntax error (def 缺 body 等) → 视为 ok (治本靠 prompt 约束 8)
+        排除: builtins / 关键字 / self / cls / 已定义 (def/class/import/赋值/函数参数/
+        lambda/AnnAssign/NamedExpr/For target/With as/global/nonlocal/decorator).
+        改进片段本身 AST 解析 syntax error → 尝试 textwrap.dedent + 补 pass 再 parse,
+        仍失败则视为 ok (治本靠 prompt 约束 8).
         """
+        import ast as _ast
+        import textwrap as _tw
+
+        tree = None
         try:
-            import ast as _ast
             tree = _ast.parse(improved_code)
         except SyntaxError:
-            # 改进片段常不完整 (def 缺 body / while 缺 body), AST 解析必然 fail,
-            # 但这不代表 missing symbol. 视为 ok, 让 prompt 约束 8 治本.
-            return "ok", []
+            # 改进片段常不完整 (def 缺 body / while 缺 body), 尝试 dedent + 补 pass
+            for suffix in ("pass", "pass", "pass", "pass"):
+                candidate = _tw.dedent(improved_code).rstrip() + "\n" + suffix + "\n"
+                try:
+                    tree = _ast.parse(candidate)
+                    break
+                except SyntaxError:
+                    continue
+            if tree is None:
+                return "ok", []
 
         file_lines_local = file_sources.get(file_path, [])
         if not file_lines_local:
@@ -833,31 +915,7 @@ class ImproveCommand(BaseCommand):
         local_defs: set[str] = set()
         try:
             mod = _ast.parse(file_src)
-            for node in _ast.walk(mod):
-                if isinstance(node, _ast.ClassDef):
-                    local_defs.add(node.name)
-                elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                    local_defs.add(node.name)
-                    # 函数参数 (regular / kwonly / vararg / kwarg)
-                    for arg in (node.args.posonlyargs + node.args.args +
-                                node.args.kwonlyargs + [node.args.vararg, node.args.kwarg]):
-                        if arg:
-                            local_defs.add(arg.arg)
-                elif isinstance(node, _ast.Lambda):
-                    for arg in node.args.posonlyargs + node.args.args + [node.args.vararg, node.args.kwarg]:
-                        if arg:
-                            local_defs.add(arg.arg)
-                elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
-                    for alias in node.names:
-                        local_defs.add(alias.asname or alias.name.split(".")[0])
-                elif isinstance(node, _ast.Assign):
-                    for tgt in node.targets:
-                        if isinstance(tgt, _ast.Name):
-                            local_defs.add(tgt.id)
-                        elif isinstance(tgt, _ast.Tuple):
-                            for el in tgt.elts:
-                                if isinstance(el, _ast.Name):
-                                    local_defs.add(el.id)
+            local_defs = self._collect_defined_names(mod, _ast)
         except SyntaxError:
             pass
 
@@ -867,31 +925,7 @@ class ImproveCommand(BaseCommand):
         excluded.update(builtin_names)
 
         # === 收集 improved_code 自身定义的符号 ===
-        defined_in_improved: set[str] = set()
-        for node in _ast.walk(tree):
-            if isinstance(node, _ast.ClassDef):
-                defined_in_improved.add(node.name)
-            elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                defined_in_improved.add(node.name)
-                for arg in (node.args.posonlyargs + node.args.args +
-                            node.args.kwonlyargs + [node.args.vararg, node.args.kwarg]):
-                    if arg:
-                        defined_in_improved.add(arg.arg)
-            elif isinstance(node, _ast.Lambda):
-                for arg in node.args.posonlyargs + node.args.args + [node.args.vararg, node.args.kwarg]:
-                    if arg:
-                        defined_in_improved.add(arg.arg)
-            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
-                for alias in node.names:
-                    defined_in_improved.add(alias.asname or alias.name.split(".")[0])
-            elif isinstance(node, _ast.Assign):
-                for tgt in node.targets:
-                    if isinstance(tgt, _ast.Name):
-                        defined_in_improved.add(tgt.id)
-                    elif isinstance(tgt, _ast.Tuple):
-                        for el in tgt.elts:
-                            if isinstance(el, _ast.Name):
-                                defined_in_improved.add(el.id)
+        defined_in_improved = self._collect_defined_names(tree, _ast)
 
         all_defined = local_defs | defined_in_improved | excluded
 
@@ -930,23 +964,16 @@ class ImproveCommand(BaseCommand):
         if not uniq_missing:
             return "ok", []
 
-        # 启发式: 全小写无下划线 → 大概率 stdlib/第三方模块名 (LLM 通常会加 import)
-        # 单独标 warn, 但不列在 missing symbols 里 (避免噪音)
-        likely_module = [n for n in uniq_missing if n.islower() and "_" not in n]
-        truly_missing = [n for n in uniq_missing if n not in likely_module]
-
-        msgs: list[str] = []
-        if truly_missing:
-            msgs.append(
-                f"**目标文件未定义** ({', '.join(truly_missing[:8])}) — "
-                f"apply 后会 `NameError`；请先在文件里 `add {truly_missing[0]} = <value>` "
-                f"或 `import {truly_missing[0]}` 后再 apply"
-            )
-        if likely_module:
-            msgs.append(
-                f"**疑似未 import 的模块/外层变量** ({', '.join(likely_module[:5])}) — "
-                f"apply 前请确认 import 已就位或该变量在调用方作用域内可见"
-            )
+        # 统一处理: 所有 missing 符号都用同一条 actionable 提示
+        # (之前 likely_module 启发式把 data/config/result 等常见变量名误分类为"疑似模块",
+        #  反而削弱了警告力度. 现在统一用 NameError 提示, 文案里包含 import/add 两个方向.)
+        symbols_str = ", ".join(uniq_missing[:8])
+        first = uniq_missing[0]
+        msgs: list[str] = [
+            f"**目标文件未定义** ({symbols_str}) — "
+            f"apply 后会 `NameError`；请先在文件里 `add {first} = <value>` "
+            f"或 `import {first}` 后再 apply"
+        ]
 
         return "warn", msgs
 
@@ -1150,7 +1177,6 @@ class ImproveCommand(BaseCommand):
                 # 永远走 post 路径 (保留 Apply 按钮), reviewer 自己决定怎么处理
                 _risk_level, _risk_msgs = self._detect_apply_risk(
                     file_path=file_path,
-                    target_line=decision["new_line"],
                     improved_code=decision.get("normalised_code") or normalised["improved_code"],
                     file_sources=file_sources,
                 )
@@ -1168,7 +1194,6 @@ class ImproveCommand(BaseCommand):
                     )
                 body_to_post = normalised["body"]
                 nc = decision.get("normalised_code") or normalised["improved_code"]
-                n_lines = len(nc.split("\n"))
                 if nc != normalised["improved_code"]:
                     logger.info(
                         "improve.fix_indent project={} mr={} file={} line={}",
@@ -1184,20 +1209,18 @@ class ImproveCommand(BaseCommand):
                     body_to_post = (
                         f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
                         f"{normalised['rationale']}\n\n"
+                        f"{_warn_block}"
                         f"```suggestion:-0+{n_replace}\n{nc}\n```"
                         + self.HELP_TEXT_FOOTER
                     )
-                    if _warn_block:
-                        body_to_post = body_to_post.replace(
-                            "```suggestion", _warn_block + "```suggestion", 1
-                        )
-                        _warn_block = ""  # 已注入, 避免下面重复
+                    _warn_block = ""  # 已结构化注入, 避免下面重复
 
                 # === apply 风险: else 分支 (body_to_post 直接用 normalised["body"]) 也需注入 ===
-                if _warn_block and "```suggestion" in body_to_post:
-                    body_to_post = body_to_post.replace(
-                        "```suggestion", _warn_block + "```suggestion", 1
-                    )
+                if _warn_block:
+                    # 结构化注入: warn_block 紧贴 suggestion 块上方
+                    idx = body_to_post.find("```suggestion")
+                    if idx != -1:
+                        body_to_post = body_to_post[:idx] + _warn_block + body_to_post[idx:]
 
                 note_id = self.gitlab.post_mr_discussion(
                     self.project_id,
