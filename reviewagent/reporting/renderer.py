@@ -202,21 +202,13 @@ def _fmt_delta(delta, suffix: str = "", invert_good: bool = False) -> str:
 
 
 def _render_telemetry(d: dict[str, Any]) -> str:
-    """检视概况: 2 列 6 行指标表 (带环比趋势箭头)."""
+    """检视概况: 2 列指标表 + 叙事性检视汇总 (替代原 severity/规则 两行裸数据)."""
     mr_count = d.get("mr_count", 0)
     mr_total = d.get("mr_total", 0)
     suggestion_count = d.get("suggestion_count", 0)
     suggestion_total = d.get("suggestion_total", suggestion_count)
     adoption_rate = round(float(d.get("adoption_rate", 0)) * 100, 1)
-    sev = d.get("severity_breakdown") or {}
-    rules = d.get("top_rules") or []
     deltas = d.get("deltas") or {}
-
-    sev_value = "<br>".join(f"{k}={v}" for k, v in sev.items()) if sev else "(无)"
-    if rules:
-        rules_value = "<br>".join(f"{rk} ×{n}" for rk, n in rules[:5])
-    else:
-        rules_value = "(无)"
 
     def _row(label: str, value: str, delta=None, suffix: str = "") -> tuple[str, str]:
         if delta is not None and delta != 0:
@@ -231,8 +223,6 @@ def _render_telemetry(d: dict[str, Any]) -> str:
         _row("本周 suggestion 数", str(suggestion_count), deltas.get("suggestion_count")),
         ("累计 suggestion 数", str(suggestion_total)),
         _row("累计采纳率", f"{adoption_rate}%", deltas.get("adoption_rate_pct"), "pp"),
-        ("severity 分布", sev_value),
-        ("触发最多规则", rules_value),
     ]
     lines: list[str] = [
         "| 指标 | 数值 |",
@@ -240,7 +230,79 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     ]
     for label, value in rows:
         lines.append(f"| {label} | {value} |")
+
+    # 叙事性汇总: 问题分布范围 + 严重度情况 (替代原 severity 分布 / 触发最多规则 两行)
+    summary = _build_inspection_summary(d)
+    if summary:
+        lines.append("")
+        lines.append("**本周检视汇总**")
+        lines.append("")
+        lines.append(summary)
+
     return "\n".join(lines) + "\n"
+
+
+def _build_inspection_summary(d: dict[str, Any]) -> str:
+    """叙事性汇总本周检视结果: 问题分布范围 + 严重度情况.
+
+    替代原概况表里 'severity 分布' / '触发最多规则' 两行裸数据,
+    用一段话把严重度占比与规则命中分布讲清楚.
+    """
+    sev = d.get("severity_breakdown") or {}
+    rules = d.get("top_rules") or []
+    suggestion_count = int(d.get("suggestion_count", 0) or 0)
+    mr_count = int(d.get("mr_count", 0) or 0)
+
+    if suggestion_count == 0:
+        return "本周窗口内无检视建议产生，暂无问题分布与严重度数据。"
+
+    total = sum(sev.values()) or suggestion_count
+
+    def _pct(n: int) -> int:
+        return round(n / total * 100) if total else 0
+
+    hc = sev.get("critical", 0) + sev.get("high", 0)
+    med = sev.get("medium", 0)
+    low = sev.get("low", 0) + sev.get("warning", 0) + sev.get("other", 0)
+    hc_p, med_p, low_p = _pct(hc), _pct(med), _pct(low)
+    crit = sev.get("critical", 0)
+
+    if hc_p >= 50:
+        sev_judge = "整体偏高，问题不限于随手风格瑕疵，相当部分是有实际行为影响的缺陷"
+    elif med_p >= 50:
+        sev_judge = "以中等严重度为主，多为需人工判断的逻辑/规范问题"
+    else:
+        sev_judge = "整体偏轻，多为风格与规范类问题"
+
+    # 规则分布: 取 top5, 粗略归类规范类 vs 正确性类
+    if rules:
+        top_str = "、".join(f"{rk} ×{n}" for rk, n in rules[:5])
+        rule_line = f"触发最集中的规则为 {top_str}。"
+        style_kw = ("TYPEHINT", "DOCSTRING", "MUTABLE", "WILDCARD", "IMPORT", "NAMING", "SSD-RULE")
+        logic_kw = ("R-", "IMPACT", "LOOP", "CALLER")
+        has_style = any(any(k in rk.upper() for k in style_kw) for rk, _ in rules[:5])
+        has_logic = any(any(k in rk.upper() for k in logic_kw) for rk, _ in rules[:5])
+        if has_style and has_logic:
+            rule_line += ("其中规范类（类型注解/docstring/可变默认参数等，可下沉 CI 机械拦截）"
+                          "与正确性问题类（caller_param、R-LOOP 等导致运行期错误的接口/循环纪律问题）"
+                          "并存，后者应优先跟进。")
+        elif has_style:
+            rule_line += "以代码规范类问题为主，可考虑下沉到 CI lint 机械拦截，减少人肉 review 噪音。"
+        elif has_logic:
+            rule_line += "以接口/循环等正确性问题为主，应优先跟进排查运行期风险。"
+    else:
+        rule_line = "本周未捕捉到具体规则命中的分布。"
+
+    avg = f"{suggestion_count / mr_count:.1f}" if mr_count else "—"
+    parts = [
+        f"本周共产生 **{suggestion_count}** 条检视建议，覆盖 **{mr_count}** 个 MR"
+        + (f"，平均每个 MR 约 {avg} 条" if mr_count else "") + "。",
+        f"**严重度**：high {hc}（{hc_p}%）"
+        + (f"、含 critical {crit} 条" if crit else "")
+        + f"、medium {med}（{med_p}%），low/warning/other 共 {low}（{low_p}%）；{sev_judge}。",
+        f"**问题分布**：{rule_line}",
+    ]
+    return "\n".join(parts)
 
 
 def _render_merged_mrs(d: dict[str, Any]) -> str:
