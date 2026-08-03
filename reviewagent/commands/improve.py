@@ -33,7 +33,7 @@ from reviewagent.git.diff_lines import (
 )
 from reviewagent.gitlab.client import GitLabError
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import OpencodeOutputError, client as opencode
+from reviewagent.llm import OpencodeOutputError, get_client
 
 
 # Backward-compat re-exports
@@ -148,7 +148,8 @@ class ImproveCommand(BaseCommand):
             "improve.chunk_start project={} mr={} file={}",
             self.project_id, self.mr_iid, file_path,
         )
-        oc_result = opencode.run(
+        client = get_client()
+        oc_result = client.run(
             agent=self.DEFAULT_AGENT,
             prompt=prompt,
             workdir=ws.worktree,

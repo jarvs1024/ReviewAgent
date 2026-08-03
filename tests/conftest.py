@@ -13,6 +13,9 @@ _BASELINE = {
     "GITLAB_URL": "https://gitlab.example.test",
     "GITLAB_PERSONAL_ACCESS_TOKEN": "test-token",
     "GITLAB_WEBHOOK_SECRET": "test-secret",
+    "QODERCLI_NODE_PATH": "/usr/bin/node",
+    "QODERCLI_JS_PATH": "/opt/qodercli.js",
+    "QODERCLI_MODEL": "DeepSeek-V4-Flash",
 }
 
 for _key, _value in _BASELINE.items():

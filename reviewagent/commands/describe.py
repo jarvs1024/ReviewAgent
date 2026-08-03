@@ -14,7 +14,7 @@ from typing import Any
 
 from reviewagent.commands._common import BaseCommand, BaseCommandError
 from reviewagent.gitlab.client import GitLabError
-from reviewagent.opencode.client import OpencodeOutputError
+from reviewagent.llm import OpencodeOutputError
 from reviewagent.telemetry import events
 
 
