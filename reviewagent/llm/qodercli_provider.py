@@ -2,8 +2,16 @@
 
 The default driver (`acp`) uses a long-lived `qodercli --acp` server
 shared across all jobs in one RQ worker process. The legacy one-shot
-subprocess path is preserved as a kill-switch via
-`QODERCLI_DRIVER=subprocess` and lives in `qodercli_subprocess.py` (Task 7).
+subprocess path is preserved as a kill-switch via either:
+
+  * `QODERCLI_DRIVER=subprocess` in `.env`, or
+  * Constructing ``QoderCLIProvider(node_path=..., js_path=..., model=...)``
+    (compatibility constructor used by tests and earlier callers).
+
+When the legacy constructor is used we bypass `Config` and dispatch every
+``run()`` call to ``reviewagent.llm.qodercli_subprocess.run_subprocess``
+directly. The ACP client is not started in that mode — useful for
+kill-switches and for unit tests that patch ``subprocess.run``.
 """
 
 from __future__ import annotations
@@ -11,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -107,13 +116,55 @@ def reset_for_tests() -> None:
 
 
 class QoderCLIProvider(BaseLLMProvider):
-    """LLM Provider backed by QoderCLI ACP long connection."""
+    """LLM Provider backed by QoderCLI ACP long connection.
+
+    Two construction modes:
+
+    * ``QoderCLIProvider()`` — config-driven; honours ``config.qodercli_driver``
+      (defaults to ``acp``). Use this from production code.
+    * ``QoderCLIProvider(node_path=..., js_path=..., model=...)`` —
+      forces the legacy one-shot subprocess path. The arguments are passed
+      through to ``subprocess.run`` / ``--version`` checks. Useful for unit
+      tests that patch ``subprocess.run`` and for callers that need an
+      isolated provider instance.
+    """
+
+    def __init__(
+        self,
+        *,
+        node_path: str = "",
+        js_path: str = "",
+        model: str = "",
+    ) -> None:
+        self._node_path = node_path
+        self._js_path = js_path
+        self._model = model
+        # Force subprocess when the caller provides all three explicit
+        # overrides — backwards-compatible alias for the legacy class.
+        self._legacy = bool(node_path and js_path and model)
 
     @property
     def provider_name(self) -> str:
         return "qodercli"
 
+    def _legacy_health_check(self) -> bool:
+        """Probe both binaries via subprocess.run (legacy mode)."""
+        node = self._node_path or shutil.which("node")
+        script = self._js_path or config.qodercli_js_path
+        if not node or not script:
+            return False
+        try:
+            proc = subprocess.run(
+                [node, script, "--version"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return proc.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return False
+
     def health_check(self) -> bool:
+        if self._legacy:
+            return self._legacy_health_check()
         if config.qodercli_driver == "subprocess":
             return True
         try:
@@ -132,12 +183,16 @@ class QoderCLIProvider(BaseLLMProvider):
         timeout: int | None = None,
         tolerant_markdown: bool = False,
     ) -> LLMResult:
-        if config.qodercli_driver == "subprocess":
-            from reviewagent.llm.qodercli_subprocess import run_subprocess  # Task 7
+        # Legacy / kill-switch path: bypass ACP entirely.
+        if self._legacy or config.qodercli_driver == "subprocess":
+            from reviewagent.llm.qodercli_subprocess import run_subprocess
             return run_subprocess(
                 agent=agent, prompt=prompt, workdir=workdir, files=files,
                 timeout=timeout or config.qodercli_timeout,
                 tolerant_markdown=tolerant_markdown,
+                node=self._node_path or None,
+                script=self._js_path or None,
+                model=self._model or None,
             )
 
         client = _get_or_bootstrap(workdir)
