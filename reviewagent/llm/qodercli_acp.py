@@ -269,10 +269,15 @@ class QoderCLIACPClient:
         return self._register_pending(msg_id)
 
     def initialize(self, *, client_info: dict, capabilities: dict) -> dict:
+        # qodercli expects clientInfo.version to be a string; older callers
+        # passed only {"name": ...} which made initialize reject the
+        # params. Fill in a stable default version if absent.
+        info = dict(client_info or {})
+        info.setdefault("version", "0.1.0")
         fut = self._request(
             "initialize",
             protocolVersion=1,
-            clientInfo=client_info,
+            clientInfo=info,
             capabilities=capabilities,
         )
         try:
