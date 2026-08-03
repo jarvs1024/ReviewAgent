@@ -81,8 +81,10 @@ class MergedMrsCollector:
         items: list[dict[str, Any]] = []
         mr_list: list[dict[str, Any]] = []
         for m in in_window:
-            author = (m.get("author") or {}).get("username", "") or ""
-            merged_by = (m.get("merged_by") or {}).get("username", "") or ""
+            author_info = m.get("author") or {}
+            author = author_info.get("name") or author_info.get("username", "") or ""
+            merged_by_info = m.get("merged_by") or {}
+            merged_by = merged_by_info.get("name") or merged_by_info.get("username", "") or ""
             author_set.add(author)
             adds = m.get("additions_count") or 0
             dels = m.get("deletions_count") or 0
@@ -170,7 +172,7 @@ class MergedMrsCollector:
             "",
             "【输出要求】只输出一个 JSON 对象 {\"markdown\": \"...\"}。",
             "重要：markdown 值里所有换行必须用 \\n 表示，不要出现真实换行符；内部双引号用 \\\" 转义。",
-            "示例：{\"markdown\": \"**概述**\\n\\n本周变更聚焦于随机 IO 工具的无限循环 bug 修复与输入校验增强。\\n\\n**新增**\\n\\n- 新增 test_plp_hima3361_17610 固定 IO 脚本（io 工具模块）\\n- 新增 services 基础服务模块（root）\\n\\n**修改**\\n\\n- 修复 get_rand_io 在无合理 IO 时无限循环的 bug（io 工具模块）\\n\\n**删除**\\n\\n- 移除未使用的串行对象\"}",
+            "示例：{\"markdown\": \"**概述**\n\n本周变更聚焦于随机 IO 工具的无限循环 bug 修复与输入校验增强。\n\n**新增**\n\n- 新增 test_plp_hima3361_17610 固定 IO 脚本（io 工具模块）\n- 新增 services 基础服务模块（root）\n\n**修改**\n\n- 修复 get_rand_io 在无合理 IO 时无限循环的 bug（io 工具模块）\n\n**删除**\n\n- 移除未使用的串行对象\"}",
             "",
             f"目标分支：`{target_branch}`",
             f"本周合并 MR 数：{len(items)}，涉及作者：{data.get('author_count', 0)} 位。",
