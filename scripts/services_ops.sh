@@ -7,13 +7,13 @@
 # 命令:
 #   start     启动所有服务
 #   stop      停止所有服务
-#   restart   重启所有服务 (默认)
-#   status    查看所有服务状态 (含 PID / uptime / 最近日志)
+#   restart   重启所有服务
+#   status    查看所有服务状态 (默认, 含 PID / uptime / 最近日志)
 #   logs      实时跟踪所有服务日志 (类似 tail -f)
 #
 # 示例:
-#   bash scripts/services_ops.sh            # 默认 restart
-#   bash scripts/services_ops.sh status     # 查看状态
+#   bash scripts/services_ops.sh            # 默认查看状态
+#   bash scripts/services_ops.sh restart    # 重启
 #   bash scripts/services_ops.sh stop       # 停止
 #   bash scripts/services_ops.sh logs       # 跟踪日志
 set -eo pipefail
@@ -356,7 +356,7 @@ usage() {
 # ============================================================
 # 入口
 # ============================================================
-cmd="${1:-restart}"
+cmd="${1:-status}"
 
 case "$cmd" in
     start)   do_start   ;;
