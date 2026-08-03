@@ -230,3 +230,98 @@ class QoderCLIACPClient:
                     f"non-JSON line from qodercli: {raw!r}"
                 ) from e
             self._dispatch_response(message)
+
+    # ---- high-level RPCs (Task 5) ----
+
+    def _request(self, method: str, **params) -> "Future":
+        """Send a JSON-RPC request and return the Future that will resolve
+        when the matching response arrives."""
+        msg_id = _next_id()
+        self._enqueue({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params})
+        return self._register_pending(msg_id)
+
+    def initialize(self, *, client_info: dict, capabilities: dict) -> dict:
+        fut = self._request(
+            "initialize",
+            protocolVersion=1,
+            clientInfo=client_info,
+            capabilities=capabilities,
+        )
+        try:
+            return fut.result(timeout=30)
+        except QoderCLIProtocolError as e:
+            msg = str(e).lower()
+            if "auth" in msg or "-32000" in msg or "login" in msg:
+                raise QoderCLIAuthError(str(e)) from e
+            raise
+
+    def session_new(self, *, cwd: Path, mcp_servers=None) -> str:
+        fut = self._request(
+            "session/new", cwd=str(cwd), mcpServers=mcp_servers or []
+        )
+        result = fut.result(timeout=30)
+        sid = result.get("sessionId") if isinstance(result, dict) else None
+        if not sid:
+            raise QoderCLIProtocolError(f"session/new missing sessionId: {result!r}")
+        with self._session_lock:
+            self._sessions[sid] = {"created_at": time.time(), "agent": None}
+        return sid
+
+    def session_prompt(self, session_id: str, text: str, *, timeout: float) -> dict:
+        payload = [{"type": "text", "text": text}]
+        fut = self._request("session/prompt", sessionId=session_id, prompt=payload)
+        try:
+            return fut.result(timeout=timeout)
+        except QoderCLIProtocolError as e:
+            if "timeout" in str(e).lower():
+                raise QoderCLITimeoutError(str(e)) from e
+            raise
+        except TimeoutError as e:
+            raise QoderCLITimeoutError(f"session/prompt exceeded {timeout}s") from e
+
+    def session_cancel(self, session_id: str) -> None:
+        fut = self._request("session/cancel", sessionId=session_id)
+        try:
+            fut.result(timeout=10)
+        except QoderCLIProtocolError as e:
+            # Older QoderCLI builds may not implement session/cancel; ignore.
+            if "Method not found" not in str(e):
+                raise
+
+    def _reuse_session(self, agent: str, window: float):
+        now = time.time()
+        with self._session_lock:
+            for sid, meta in self._sessions.items():
+                if meta.get("agent") == agent and (now - meta.get("last_used", 0)) < window:
+                    meta["last_used"] = now
+                    return sid
+        return None
+
+    def chat(
+        self,
+        *,
+        agent: str,
+        prompt: str,
+        files,
+        timeout: float,
+        max_concurrent_sessions: int,
+        session_reuse_window: float,
+    ) -> dict:
+        if not hasattr(self, "_sem") or self._sem is None:
+            self._sem = threading.Semaphore(max_concurrent_sessions)
+        self._sem.acquire()
+        try:
+            sid = self._reuse_session(agent, session_reuse_window) or self.session_new(
+                cwd=self._workdir or Path.cwd()
+            )
+            try:
+                return self.session_prompt(sid, prompt, timeout=timeout)
+            finally:
+                with self._session_lock:
+                    self._sessions[sid] = {
+                        "created_at": self._sessions.get(sid, {}).get("created_at", time.time()),
+                        "agent": agent,
+                        "last_used": time.time(),
+                    }
+        finally:
+            self._sem.release()
