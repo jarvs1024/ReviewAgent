@@ -184,6 +184,23 @@ def reset_mr_describe_state(mr_iid: int, log: list[str]) -> None:
     log.append(f"[{_now_iso()}] reset description_generated=0 for mr {mr_iid} (rows={n})")
 
 
+def reset_mr_review_runs(mr_iid: int, log: list[str]) -> None:
+    """清掉该 MR 之前的 review_runs, 让 max_review_calls 闸门失效, 重新能触发链.
+
+    注意: 这只清 review_runs (实际跑过的轮次), 不清 mr_activity / suggestions /
+    suggestion_actions. 也不清 telemetry/ 中的描述/改进 snapshot.
+    """
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    with s._conn() as conn:
+        n = conn.execute(
+            "DELETE FROM review_runs WHERE project_id=? AND mr_iid=?",
+            (GITLAB_PROJECT_ID, mr_iid),
+        ).rowcount
+        conn.commit()
+    log.append(f"[{_now_iso()}] reset review_runs for mr {mr_iid} (rows={n})")
+
+
 def wait_for_new_run(
     mr_iid: int,
     before_count: int,
@@ -329,6 +346,7 @@ def run_chain_open(mr_iid: int, round_idx: int, log: list[str]) -> FeatureResult
     """merge_request open 事件 → pr_commands (describe + improve)."""
     clear_cooldown_locks(log)
     reset_mr_describe_state(mr_iid, log)
+    reset_mr_review_runs(mr_iid, log)
     before = len(list_mr_runs(mr_iid))
     payload = make_merge_request_payload(mr_iid, "open")
     status, body = _post_webhook(payload, log)
