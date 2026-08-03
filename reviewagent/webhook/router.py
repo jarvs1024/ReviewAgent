@@ -48,6 +48,37 @@ async def webhook(request: Request) -> dict:
 
 # ---------- MR / Push Hook ----------
 
+def _upsert_mr_from_hook(payload: dict, mr: "MRHookPayload") -> None:
+    """从 webhook payload 构造 MRRecord 并 upsert 到 SQLite.
+
+    确保 merge/close 事件的 state 变更被持久化, 前端能看到最新状态.
+    """
+    from reviewagent.telemetry.models import MRRecord, _parse_dt
+    from reviewagent.telemetry.store import get_store
+
+    obj = payload.get("object_attributes", {})
+    author = payload.get("user", {})
+    name = (author.get("name") or "").strip()
+    username = (author.get("username") or "").strip()
+    author_display = f"{name}@{username}" if name else username
+
+    record = MRRecord(
+        project_id=mr.project_id,
+        mr_iid=mr.mr_iid,
+        title=mr.title,
+        author_username=author_display,
+        source_branch=mr.source_branch,
+        target_branch=mr.target_branch,
+        state=mr.state,
+        created_at=_parse_dt(obj.get("created_at")),
+        updated_at=_parse_dt(obj.get("updated_at")),
+        merged_at=_parse_dt(obj.get("merged_at")),
+    )
+    store = get_store()
+    store.upsert_mr(record)
+    logger.info("webhook.mr_upsert project={} mr={} state={}", mr.project_id, mr.mr_iid, mr.state)
+
+
 async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain) -> dict:
     from reviewagent.config import config
 
@@ -62,12 +93,18 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         logger.info("webhook.skip bot_self project={} mr={}", mr.project_id, mr.mr_iid)
         return {"status": "skipped", "reason": "bot_self_trigger"}
 
-    # 2. MR 状态：仅 opened
+    # 2. 始终 upsert MR 元信息 (state/merged_at 都更新) — 确保 merge/close 事件被记录
+    try:
+        _upsert_mr_from_hook(payload, mr)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("webhook.mr_upsert failed (non-fatal) project={} mr={}: {}", mr.project_id, mr.mr_iid, e)
+
+    # 3. MR 状态：仅 opened 触发 review chain
     if mr.state and mr.state not in ("opened",):
         logger.info("webhook.skip state={} project={} mr={}", mr.state, mr.project_id, mr.mr_iid)
-        return {"status": "skipped", "reason": f"state={mr.state}"}
+        return {"status": "skipped", "reason": f"state={mr.state}", "note": "state_updated"}
 
-    # 3. 处理不同 action
+    # 4. 处理不同 action
     if mr.action == "update":
         # update 事件：仅当有新 commit 时才触发 push_commands
         if not locks.check_diff_head_changed(mr.project_id, mr.mr_iid, mr.head_sha):
@@ -83,7 +120,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         logger.info("webhook.skip action={} project={} mr={}", mr.action, mr.project_id, mr.mr_iid)
         return {"status": "skipped", "reason": f"action={mr.action}"}
 
-    # 4. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
+    # 5. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
     # Why: 用户在 GitLab UI 点 Apply suggestion 后, 代码会变但不会触发
     #      note 事件, 之前的 /adopt 处理就跑了. 这里在 head_sha 变时
     #      主动探测所有 open suggestions, 把已被 UI apply 的转 state=applied.
@@ -110,7 +147,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                 mr.project_id, mr.mr_iid, e,
             )
 
-    # 5a. max review calls — 防无限循环
+    # 6a. max review calls — 防无限循环
     skip_max, current_count = locks.should_skip_max_review_calls(
         mr.project_id, mr.mr_iid, commands,
     )
@@ -165,13 +202,13 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
             logger.warning("webhook.no_more_review_notice failed (non-fatal): {}", e)
         return {"status": "skipped", "reason": f"max_review_calls={current_count}"}
 
-    # 5b. cooldown
+    # 6b. cooldown
     first_cmd = commands[0]
     if locks.should_skip_cooldown(mr.project_id, mr.mr_iid, first_cmd):
         logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)
         return {"status": "skipped", "reason": "cooldown"}
 
-    # 6. 入队命令链
+    # 7. 入队命令链
     job_ids = enqueue_mr_chain(
         commands=commands,
         project_id=mr.project_id,
