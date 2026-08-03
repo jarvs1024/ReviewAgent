@@ -1,0 +1,13 @@
+[Unit]
+Description=ReviewAgent Weekly Report Enqueue (oneshot)
+After=network.target redis-server.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/workflow/ReviewAgent
+Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/workflow/ReviewAgent/.env
+ExecStart=/home/workflow/ReviewAgent/.venv/bin/python /home/workflow/ReviewAgent/scripts/weekly_report.py --enqueue
+StandardOutput=journal
+StandardError=journal
