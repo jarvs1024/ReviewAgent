@@ -643,7 +643,15 @@ class ImproveCommand(BaseCommand):
         if not file_lines or not existing_code.strip():
             return None
         target_lines = existing_code.strip("\n").split("\n")
-        target_first = target_lines[0].strip()
+        # 裁掉 leading trivial 行 (空行 / 纯 docstring 标记), 避免定位到前一行
+        # 例: existing="""\nprint(...) → 裁掉 """ → 从 print 开始搜
+        while target_lines and not target_lines[0].strip():
+            target_lines.pop(0)
+        if target_lines and target_lines[0].strip() in ('"""', "'''"):
+            # 单行 docstring 标记 (非多行 docstring 内容) 也裁掉
+            if len(target_lines) == 1 or target_lines[1].strip():
+                target_lines.pop(0)
+        target_first = target_lines[0].strip() if target_lines else ""
         if not target_first:
             return None
 
