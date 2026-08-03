@@ -104,6 +104,8 @@ class QoderCLIACPClient:
         self._recv_thread = None
         self._pending = {}
         self._pending_lock = threading.Lock()
+        self._pending_message: dict = {}
+        self._pending_message_lock = threading.Lock()
 
     # ---- send loop (Task 3) ----
 
@@ -218,6 +220,29 @@ class QoderCLIACPClient:
         else:
             fut.set_result(message.get("result"))
 
+    # ---- notification routing (Task 6) ----
+
+    def on_notification(self, message: dict) -> None:
+        """Receive a JSON-RPC notification and accumulate
+        `agent_message_chunk` text per session."""
+        if message.get("method") != "session/update":
+            return
+        params = message.get("params") or {}
+        sid = params.get("sessionId")
+        update = params.get("update") or {}
+        if not sid or update.get("sessionUpdate") != "agent_message_chunk":
+            return
+        text = (update.get("content") or {}).get("text", "")
+        if not text:
+            return
+        with self._pending_message_lock:
+            self._pending_message.setdefault(sid, []).append(text)
+
+    def collect_message(self, session_id: str) -> str:
+        with self._pending_message_lock:
+            chunks = self._pending_message.pop(session_id, [])
+        return "".join(chunks)
+
     def _run_recv_loop(self) -> None:
         assert self._proc is not None
         for raw in iter(self._proc.stdout.readline, b""):
@@ -229,7 +254,10 @@ class QoderCLIACPClient:
                 raise QoderCLIProtocolError(
                     f"non-JSON line from qodercli: {raw!r}"
                 ) from e
-            self._dispatch_response(message)
+            if "id" in message and ("result" in message or "error" in message):
+                self._dispatch_response(message)
+            else:
+                self.on_notification(message)
 
     # ---- high-level RPCs (Task 5) ----
 
