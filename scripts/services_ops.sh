@@ -2,7 +2,7 @@
 # ReviewAgent 服务管理脚本 (86 服务器).
 #
 # 用法:
-#   bash scripts/svc.sh <command>
+#   bash scripts/services_ops.sh <command>
 #
 # 命令:
 #   start     启动所有服务
@@ -12,10 +12,10 @@
 #   logs      实时跟踪所有服务日志 (类似 tail -f)
 #
 # 示例:
-#   bash scripts/svc.sh            # 默认 restart
-#   bash scripts/svc.sh status     # 查看状态
-#   bash scripts/svc.sh stop       # 停止
-#   bash scripts/svc.sh logs       # 跟踪日志
+#   bash scripts/services_ops.sh            # 默认 restart
+#   bash scripts/services_ops.sh status     # 查看状态
+#   bash scripts/services_ops.sh stop       # 停止
+#   bash scripts/services_ops.sh logs       # 跟踪日志
 set -eo pipefail
 
 # ============================================================
