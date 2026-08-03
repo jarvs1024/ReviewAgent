@@ -12,6 +12,9 @@
 
 异常类仍 re-export 原 OpencodeError / OpencodeOutputError / OpencodeTimeoutError，
 上层 except 子句零改动；未来 QoderCLIProvider 上线后可平滑切到 LLMError 命名空间.
+
+ACP 客户端类型也可以直接从本包 re-export，方便集成测试与上层模块不经内部路径
+直接构造 QoderCLIACPClient.
 """
 from __future__ import annotations
 
@@ -22,6 +25,13 @@ from reviewagent.opencode.client import (
 )
 from reviewagent.llm.base import BaseLLMProvider, LLMResult
 from reviewagent.llm.client import get_client, reset_client
+from reviewagent.llm.qodercli_acp import (  # noqa: F401  (re-exported for tests / external callers)
+    QoderCLIACPClient,
+    QoderCLIACPError,
+    QoderCLIAuthError,
+    QoderCLITimeoutError,
+    QoderCLIProtocolError,
+)
 
 __all__ = [
     "BaseLLMProvider",
@@ -29,6 +39,11 @@ __all__ = [
     "OpencodeError",
     "OpencodeOutputError",
     "OpencodeTimeoutError",
+    "QoderCLIACPClient",
+    "QoderCLIACPError",
+    "QoderCLIAuthError",
+    "QoderCLITimeoutError",
+    "QoderCLIProtocolError",
     "get_client",
     "reset_client",
 ]
