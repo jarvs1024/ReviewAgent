@@ -48,3 +48,5 @@ tmp_clip.png
 
 # Python 字节码
 *.pyc
+# QoderCLI 项目级 subagent 定义 (由 scripts/sync_qoder_agents.py 自动写入)
+.qoder/

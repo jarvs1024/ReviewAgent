@@ -38,6 +38,25 @@ class Config:
     opencode_model: str = "minimax/MiniMax-M2.7"
     opencode_timeout: int = 900  # opencode HTTP 请求默认超时（秒）
 
+    # ---- LLM Provider 适配层 ----
+    # 通过 LLM_PROVIDER=opencode|qodercli 在两者之间切换；详见 docs/LLM_PROVIDER_ADAPTER.md.
+    llm_provider: str = "opencode"          # "opencode" | "qodercli"
+
+    # ---- qodercli 专属配置 ----
+    qodercli_node_path: str = ""            # node 可执行文件；空则用 shutil.which("node")
+    qodercli_js_path: str = ""              # qodercli.js 绝对路径；空则用 readlink -f $(which qodercli)
+    qodercli_model: str = "DeepSeek-V4-Flash"
+    qodercli_timeout: int = 600             # subprocess 默认超时（秒）
+    # ---- qodercli ACP driver 专属 ----
+    # 默认 acp (长连接, 走 reviewagent.llm.qodercli_acp.QoderCLIACPClient);
+    # 回滚可改 subprocess 走旧 --append-system-prompt 路径.
+    qodercli_driver: str = "acp"               # "acp" | "subprocess"
+    qodercli_acp_extra_args: list[str] = field(default_factory=list)  # 透传 --acp 之后的额外参数
+    qodercli_max_concurrent_sessions: int = 4   # 同 ACP 进程内 session 并发上限 (semaphore)
+    qodercli_queue_wait_timeout: int = 120      # 拿不到 semaphore 时等位超时 (秒)
+    qodercli_session_reuse_window: int = 300    # 同一 agent 复用同一 sessionId 的窗口 (秒)
+    qodercli_session_timeout: int = 540         # 单 session/prompt 超时 (秒)
+
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
     rq_queue_name: str = "review"
@@ -112,6 +131,17 @@ class Config:
             opencode_password=_env("OPENCODE_PASSWORD", ""),
             opencode_model=_env("OPENCODE_MODEL", "minimax/MiniMax-M2.7"),
             opencode_timeout=int(_env("OPENCODE_TIMEOUT", "900")),
+            llm_provider=_env("LLM_PROVIDER", "opencode"),
+            qodercli_node_path=_env("QODERCLI_NODE_PATH", ""),
+            qodercli_js_path=_env("QODERCLI_JS_PATH", ""),
+            qodercli_model=_env("QODERCLI_MODEL", "DeepSeek-V4-Flash"),
+            qodercli_timeout=int(_env("QODERCLI_TIMEOUT", "600")),
+            qodercli_driver=_env("QODERCLI_DRIVER", "acp"),
+            qodercli_acp_extra_args=[s for s in _env("QODERCLI_ACP_EXTRA_ARGS", "").split() if s],
+            qodercli_max_concurrent_sessions=int(_env("QODERCLI_MAX_CONCURRENT_SESSIONS", "4")),
+            qodercli_queue_wait_timeout=int(_env("QODERCLI_QUEUE_WAIT_TIMEOUT", "120")),
+            qodercli_session_reuse_window=int(_env("QODERCLI_SESSION_REUSE_WINDOW", "300")),
+            qodercli_session_timeout=int(_env("QODERCLI_SESSION_TIMEOUT", "540")),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=rq_queue_name,
             rq_weekly_queue_name=rq_weekly_queue_name,
