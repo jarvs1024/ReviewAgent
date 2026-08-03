@@ -11,10 +11,14 @@ can swap in `io.BytesIO`. The real subprocess is wired in Task 4.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
 import queue
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 
@@ -92,6 +96,14 @@ class QoderCLIACPClient:
         self._send_q: "queue.Queue[dict]" = pending if pending is not None else queue.Queue()
         self._stop = threading.Event()
         self._send_thread: threading.Thread | None = None
+        # Filled in by bootstrap() (Task 4).
+        self._proc = None
+        self._workdir = None
+        self._sessions = {}
+        self._session_lock = threading.Lock()
+        self._recv_thread = None
+        self._pending = {}
+        self._pending_lock = threading.Lock()
 
     # ---- send loop (Task 3) ----
 
@@ -129,3 +141,92 @@ class QoderCLIACPClient:
         self._stop.set()
         if self._send_thread:
             self._send_thread.join(timeout=2)
+
+    def shutdown(self) -> None:
+        """Terminate the subprocess (if any) and join background threads.
+
+        Safe to call multiple times. Tests typically patch subprocess.Popen
+        so the process never really exists; in that case terminate() is a
+        no-op and the recv thread exits when its readline yields b""."""
+        self.stop()
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+        if self._recv_thread is not None:
+            self._recv_thread.join(timeout=2)
+
+    @classmethod
+    def bootstrap(
+        cls,
+        *,
+        node: str,
+        script: str,
+        model: str,
+        extra_args: list,
+        workdir: Path,
+    ):
+        cmd = [node, script, "--acp", "-m", model, *extra_args]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=workdir,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        if proc.poll() is not None:
+            raise QoderCLIACPError(
+                f"qodercli --acp died at start: exit={proc.returncode}"
+            )
+        client = cls(
+            node=node,
+            script=script,
+            model=model,
+            extra_args=extra_args,
+            transport=_SubprocessTransport(proc=proc),
+        )
+        client._proc = proc
+        client._workdir = workdir
+        client.start_send_loop()
+        client._recv_thread = threading.Thread(
+            target=client._run_recv_loop, name="qodercli-acp-recv", daemon=True
+        )
+        client._recv_thread.start()
+        return client
+
+    def _register_pending(self, msg_id: int) -> Future:
+        fut = Future()
+        with self._pending_lock:
+            self._pending[msg_id] = fut
+        return fut
+
+    def _dispatch_response(self, message: dict) -> None:
+        msg_id = message.get("id")
+        with self._pending_lock:
+            fut = self._pending.pop(msg_id, None)
+        if fut is None:
+            return
+        if "error" in message:
+            err = message["error"]
+            fut.set_exception(
+                QoderCLIProtocolError(
+                    f"rpc {msg_id}: {err.get('message')} {err.get('data')}"
+                )
+            )
+        else:
+            fut.set_result(message.get("result"))
+
+    def _run_recv_loop(self) -> None:
+        assert self._proc is not None
+        for raw in iter(self._proc.stdout.readline, b""):
+            if not raw:
+                return
+            try:
+                message = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as e:
+                raise QoderCLIProtocolError(
+                    f"non-JSON line from qodercli: {raw!r}"
+                ) from e
+            self._dispatch_response(message)
