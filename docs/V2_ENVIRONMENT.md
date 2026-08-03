@@ -1,6 +1,6 @@
 # ReviewAgent v2 环境说明（与 pr-agent v1 完全隔离）
 
-> 更新日期：2026-08-02
+> 更新日期：2026-08-03
 
 v2 是跑在**本机 macOS** 上、与旧 `pr-agent v1`（Docker 容器 `my-pr-agent:v49`）完全隔离的一套环境。本文档只描述 v2 特有的差异，共用部分见 [`README.md`](../README.md) 与 [`docs/DEPLOYMENT.md`](DEPLOYMENT.md)。
 
@@ -41,8 +41,10 @@ docker run -d --name reviewagent-bridge \
 
 # 4. webhook + worker
 bash scripts/run_webhook.sh     # 后台 uvicorn :5052
-bash scripts/run_worker.sh      # 后台 rq worker review-v2（含 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES）
+bash scripts/run_worker.sh      # 同时起主队列 review-v2 + 周报队列 review-v2-weekly 两个 worker（含 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES）
 ```
+
+> 一键重启（改了 agent prompt 或代码后必跑）：`bash scripts/restart_local.sh` 重启 opencode serve + web(:3000) + 主队列(review-v2，3 worker) 与周报队列(review-v2-weekly，1 worker)，配置读自 `.env`（web 用 :3000，与 `run_webhook.sh` 的 :5052 不是同一套本地配置）。
 
 > `scripts/run_*.sh` 内置了 v2 全部环境变量（GITLAB_URL / PAT / secret / REDIS `:63790/2` / 队列 `review-v2` / 模型 minimax）。这些脚本当前**硬编码了真实凭证**，仅限本地；生产请用 `.env`（见 DEPLOYMENT.md 安全提示）。
 
@@ -50,8 +52,8 @@ bash scripts/run_worker.sh      # 后台 rq worker review-v2（含 OBJC_DISABLE_
 
 ## 关键文件
 
-- `reviewagent/prompts/describe.md` / `improve.md` — agent prompt 源（仓库内，单一事实来源）
-- `~/.config/opencode/agent/{describe,improve}.md` — opencode agent 副本（**须与仓库通过 `scripts/sync_agents.py` 保持同步**）
+- `reviewagent/prompts/*.md` — agent prompt 源（仓库内，单一事实来源；含 `describe` / `improve` / `improve_agent` / `weekly_*` 周报三段）
+- `~/.config/opencode/agent/*.md` — opencode agent 副本（**须与仓库通过 `scripts/sync_agents.py` 保持同步**）
 - `~/.config/opencode/opencode.json` / `opencode.jsonc` — provider 配置（minimax provider）
 
 ---
@@ -59,8 +61,8 @@ bash scripts/run_worker.sh      # 后台 rq worker review-v2（含 OBJC_DISABLE_
 ## 已验证端到端
 
 - 项目：`root/auto-review-test`（id=34）
-- 触发：推送新 commit / MR 评论 `/describe`
-- 输出：改写中文 MR 标题 + Description（Markdown）
+- 触发：推送新 commit / MR 评论 `/describe` / `/improve`
+- 输出：`/describe` 改写中文 MR 标题 + Description；`/improve` 产可 Apply 的 inline 建议；周报（JSON + MD + XLSX，含三段 LLM 生成）
 
 ---
 

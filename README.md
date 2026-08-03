@@ -34,7 +34,7 @@ Python 端不做任何代码理解工作。
 | 建议采纳/驳回 | 对 inline suggestion 回复 `/adopt [理由]` · `/dismiss [理由]` | ✅ |
 | GitLab UI Apply 自动识别 | 用户在 UI 点 "Apply suggestion" 或 push 改写代码 | ✅ |
 | Telemetry API（`/api/v1/telemetry/*`） | — | ✅ |
-| 周报（JSON + Markdown + XLSX，可推钉钉） | 脚本 / 定时 | ✅ |
+| 周报（JSON + Markdown + XLSX，可推钉钉，含固有代码全量扫描） | 脚本 / 定时 | ✅ |
 | `/review`（深度代码检视） | — | ❌ 未实现 |
 
 > 注：`prompts/` 里已为 `/review` 预留规划，但 `commands/review.py` 尚未编写，webhook 也不识别 `/review`。
@@ -76,7 +76,7 @@ FastAPI /webhook  ── 立即 200 ──► RQ 队列 (Redis)
 GET /api/v1/telemetry/*  ── 看板 / 统计
 
 周报（含 opencode LLM 变更摘要 / 质量扫描）走**独立队列 `review-weekly`（`review-v2-weekly`）**
-+ **独立 worker 进程**，与主 review 队列物理隔离：周报 job 含两次 LLM 调用、可能跑数分钟，
++ **独立 worker 进程**，与主 review 队列物理隔离：周报 job 含三次 LLM 调用（三小节各一次）、可能跑数分钟，
 不会阻塞 improve/describe。Redis / opencode / 模型 / SQLite 等底层资源全部共享（"共有资源"）。
 ```
 
@@ -87,17 +87,24 @@ GET /api/v1/telemetry/*  ── 看板 / 统计
 ```
 reviewagent/
 ├── config.py              # 业务配置（frozen dataclass + 环境变量，单例 config）
+├── repo_context.py        # 仓库规则动态解析（RuleNameResolver.from_repo）
 ├── logging_setup.py       # loguru
 ├── main.py                # FastAPI app（/webhook、/health、/docs、/api/v1/telemetry/*）
 ├── git/
 │   ├── workspace.py       # bare repo + worktree + 代码污染防护
 │   └── diff_lines.py      # diff 行号映射（suggestion 行号校正）
 ├── gitlab/client.py       # python-gitlab 薄封装
-├── opencode/client.py     # subprocess 改 HTTP API（POST /session + /session/:id/message）
+├── opencode/client.py     # HTTP API（POST /session + /session/:id/message）
 ├── prompts/               # agent prompt（Markdown frontmatter；核心交付物）
-│   ├── describe.md        #   pr-describer
-│   ├── improve.md         #   code-improver
-│   └── _general_rules_block.md
+│   ├── describe.md        #   pr-describer（MR 标题 + 中文描述）
+│   ├── improve.md         #   /improve 命令编排 prompt
+│   ├── improve_agent.md   #   code-improver（opencode primary agent，发 inline 建议）
+│   ├── weekly_inspection_summary.md  # 周报一：本周检视概况叙事（LLM）
+│   ├── weekly_change_summary.md      # 周报二：main 变更汇总（LLM）
+│   ├── weekly_quality_scan.md        # 周报三：代码质量全量扫描，含固有代码评估（LLM）
+│   ├── _general_rules_block.md        # 可复用规则 block
+│   ├── loader.py          # prompt 加载器（frontmatter 解析）
+│   └── __init__.py
 ├── commands/
 │   ├── describe.py        # /describe 工作流
 │   ├── improve.py         # /improve 工作流（可 Apply 的 inline 建议）
@@ -114,8 +121,12 @@ reviewagent/
 │   ├── store.py           # SQLite 落库（WAL）
 │   └── events.py
 ├── reporting/             # 周报（collectors / renderer / notifiers / runner）
-│   ├── collectors/        #   telemetry / merged_mrs / repo_scan
-│   ├── notifiers/         #   dingtalk
+│   ├── collectors/        #   base / telemetry / merged_mrs / repo_scan
+│   ├── notifiers/         #   base / dingtalk
+│   ├── artifact.py        #   WeeklyArtifact 数据契约
+│   ├── renderer.py        #   markdown 渲染 + 分块
+│   ├── rule_translate.py  #   规则键 → 中文翻译
+│   ├── config.py          #   WeeklyReportConfig
 │   └── runner.py          #   run_weekly_job 主入口
 └── api/router.py          # Telemetry API 路由
 ```
@@ -137,13 +148,18 @@ reviewagent/
 | 分组 | 变量 | 说明 |
 |---|---|---|
 | GitLab | `GITLAB_URL` `GITLAB_PERSONAL_ACCESS_TOKEN` `GITLAB_WEBHOOK_SECRET` `GITLAB_BOT_USERNAME` | 必填；PAT 最低 `api` scope |
-| opencode | `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | 默认 `http://localhost:4096`，模型 `minimax/MiniMax-M2.7` |
-| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` | 队列名两环境不同（`review`/`review-v2`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`，周报专用、与主队列隔离 |
+| opencode | `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | 默认 `http://localhost:4096`，模型 `minimax/MiniMax-M2.7`；`OPENCODE_TIMEOUT` 默认 900s |
+| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` | 队列名两环境不同（`review`/`review-v2`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`，周报专用、与主队列隔离；`RQ_WORKER_COUNT` 并发 worker 数（默认 3） |
 | 存储 | `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` | 默认 `./data` |
 | 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过 |
-| 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` | 从目标仓库读 `AGENTS.md` / `.agents/rules/*.md` |
+| 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库读 `AGENTS.md` / `.agents/rules/*.md`；`REPO_CONTEXT_MAX_LINES` 规则文件最大行数（默认 2000） |
 | improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_MAX_FILES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MIN_SCORE` | 并行度 / 限流 |
-| 周报 | `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` `REVIEWAGENT_WEEKLY_TARGET_BRANCH` `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `DINGTALK_WEBHOOK` | 目标分支默认 `main`；cron 用 systemd timer `OnCalendar` 格式（默认 `Mon 09:00`，`systemctl edit reviewagent-weekly.timer` 自定义） |
+| 检视过滤 | `REVIEW_EXCLUDE_EXTENSIONS` | 不送审的文件扩展名（默认含 `.md`/`.txt`/图片等） |
+| 周报-总开关 | `REVIEWAGENT_WEEKLY_ENABLED` `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` `REVIEWAGENT_WEEKLY_TARGET_BRANCH` `REVIEWAGENT_WEEKLY_TIMEZONE` | 总开关（默认 true）；目标项目 id（0=跳过 merged_mrs/repo_scan 段）/ 分支（默认 `main`）/ 时区（默认 `Asia/Shanghai`） |
+| 周报-采集 | `REVIEWAGENT_WEEKLY_COLLECTORS` `REVIEWAGENT_WEEKLY_NOTIFIER` | 启用的采集段（默认 `telemetry,merged_mrs,repo_scan`）；通知器（默认 `dingtalk`） |
+| 周报-调度 | `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` | cron 触发时间，`OnCalendar` 格式（默认 `Mon 09:00`；当前无 systemd timer，由 `scripts/run_weekly_report.sh` 或外部 cron 调用） |
+| 周报-钉钉 | `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为兼容回退）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
+| 周报-标题 | `REVIEWAGENT_WEEKLY_REPORT_TITLE` `REVIEWAGENT_WEEKLY_REPORT_EMOJI` | 周报标题（默认 `SSD自动化代码检视周报`）/ emoji（默认 📊） |
 
 ---
 
@@ -153,7 +169,7 @@ reviewagent/
 - Phase 1 全套：骨架、污染防护、opencode HTTP 客户端、webhook 接入、RQ 任务、GitLab 客户端、`/describe` 端到端。
 - `/improve` + 可 Apply 的 inline suggestion（`/adopt` `/dismiss` + GitLab UI Apply 自动识别）。
 - Telemetry API（`/api/v1/telemetry/*`：health / runs / mr / suggestions / stats / timeline / metrics / dismissals / weekly-reports）。
-- 周报生成（JSON + MD + XLSX，钉钉推送支持，默认 dry_run）。**第二节「变更汇总」与第三节「代码质量扫描」由 opencode agent 生成**：`weekly_change_summary`（主题归纳变更摘要）与 `weekly_quality_scan`（自由发挥的代码质量综述，不限制规则命中），prompt 见 `reviewagent/prompts/`。上线前需先 `python scripts/sync_agents.py` 同步 agent 并**重启 opencode serve** 使其加载；LLM 失败时自动回退到确定性拼装，周报不崩。cron 可用 `--enqueue`（`WEEKLY_ENQUEUE=true`）把整份周报作为 RQ job 入队，由 worker 异步执行（含 LLM 调用）。
+- 周报生成（JSON + MD + XLSX，钉钉推送支持，默认 dry_run）。**三个小节均由 opencode agent 生成、各一次 LLM 调用**：`weekly_inspection_summary`（本周检视概况叙事）、`weekly_change_summary`（main 变更主题归纳）、`weekly_quality_scan`（代码质量全量扫描，含**固有代码全局评估**，不限制规则命中），prompt 见 `reviewagent/prompts/`。上线前需先 `python scripts/sync_agents.py` 同步 agent 并**重启 opencode serve** 使其加载；LLM 失败时自动回退到确定性拼装，周报不崩。cron 可用 `--enqueue`（`WEEKLY_ENQUEUE=true`）把整份周报作为 RQ job 入队，由 worker 异步执行（含三次 LLM 调用）。
 
 ### 计划 / 进行中
 - **`/review` 命令**：深度代码检视（设计见 prompts 规划），目前尚未实现 `commands/review.py`。

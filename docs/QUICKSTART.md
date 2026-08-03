@@ -1,7 +1,7 @@
 # 快速启动指南
 
 > 适用于：本地 macOS 开发 / 86 服务器运维 / 重建部署
-> 更新日期：2026-08-02（命令与配置已对齐当前代码）
+> 更新日期：2026-08-03（命令与配置已对齐当前代码）
 
 ---
 
@@ -27,12 +27,14 @@ python scripts/sync_agents.py
 
 # 5. 起 webhook + worker（两个终端 / 后台）
 bash scripts/run_webhook.sh     # :5052
-bash scripts/run_worker.sh      # rq worker review-v2
+bash scripts/run_worker.sh      # 同时起主队列 review-v2 + 周报队列 review-v2-weekly 两个 worker
 
 # 6. （如需 GitLab 容器能回调）起 socat bridge
 docker run -d --name reviewagent-bridge --network gitlab-stack_net -p 5051:5051 \
   alpine/socat TCP-LISTEN:5051,fork,reuseaddr TCP:host.docker.internal:5052
 ```
+
+> 一键重启（本地 v2）：`bash scripts/restart_local.sh` 重启 opencode serve + web(:3000) + 主队列(review-v2，3 worker) 与周报队列(review-v2-weekly，1 worker)，配置读自 `.env`（web 用 :3000，与 `run_webhook.sh` 的 :5052 不是同一套本地配置）。
 
 > 注意：`scripts/run_webhook.sh` / `run_worker.sh` 当前硬编码了真实凭证，仅供本地使用；生产请改为 `.env` 读取（见 DEPLOYMENT.md 安全提示）。
 
@@ -103,6 +105,8 @@ WEEKLY_PUSH=true bash scripts/run_weekly_report.sh
 # 指定项目 / 上周
 bash scripts/run_weekly_report.sh --project-id 34 --week-offset -1
 ```
+
+> 周报含三段采集（`REVIEWAGENT_WEEKLY_COLLECTORS`，默认 `telemetry,merged_mrs,repo_scan`）：本周检视概况、main 变更汇总、以及**代码质量全量扫描（`repo_scan`，含固有代码全局评估）**。三段各一次 opencode LLM 调用。
 
 ---
 

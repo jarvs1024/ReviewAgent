@@ -1,6 +1,6 @@
 # 部署文档
 
-> 更新日期：2026-08-02 · 两环境并存（86 服务器 + 本地 v2）
+> 更新日期：2026-08-03 · 两环境并存（86 服务器 + 本地 v2）
 
 ReviewAgent 目前有**两套并存**的部署目标，互相隔离（与旧 `pr-agent v1` 也完全隔离）。本文档记录两者的真实配置与踩坑。
 
@@ -94,8 +94,10 @@ curl http://127.0.0.1:4096/global/health   # {"healthy":true,...}
 直接使用仓库内置脚本（已写死 v2 环境变量，含 Redis `:63790/2`、队列 `review-v2`、模型 minimax）：
 ```bash
 bash scripts/run_webhook.sh      # 后台 uvicorn :5052
-bash scripts/run_worker.sh       # 后台 rq worker review-v2（含 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES）
+bash scripts/run_worker.sh       # 同时起主队列 review-v2 + 周报队列 review-v2-weekly 两个 worker（含 OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES）
 ```
+
+> 一键重启（本地 v2）：`bash scripts/restart_local.sh` 重启 opencode serve + web(:3000) + 主队列(review-v2，3 worker) 与周报队列(review-v2-weekly，1 worker)，配置读自 `.env`（web 用 :3000，与 `run_webhook.sh` 的 :5052 不是同一套本地配置）。
 
 因 macOS Docker Desktop 无法直接 `host.docker.internal:port` 访问宿主进程，需起 socat bridge 让 GitLab 容器可达 `:5051`：
 ```bash
