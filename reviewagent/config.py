@@ -35,7 +35,7 @@ class Config:
     opencode_url: str = "http://localhost:4096"
     opencode_username: str = "opencode"
     opencode_password: str = ""
-    opencode_model: str = "minimax/MiniMax-M2.7"
+    opencode_model: str = "deepseek/deepseek-v4-flash"
     opencode_timeout: int = 900  # opencode HTTP 请求默认超时（秒）
 
     # ---- LLM Provider 适配层 ----
@@ -47,9 +47,8 @@ class Config:
     qodercli_js_path: str = ""              # qodercli.js 绝对路径；空则用 readlink -f $(which qodercli)
     qodercli_model: str = "DeepSeek-V4-Flash"
     qodercli_timeout: int = 600             # subprocess 默认超时（秒）
-    # ---- qodercli ACP driver 专属 ----
-    # 默认 acp (长连接, 走 reviewagent.llm.qodercli_acp.QoderCLIACPClient);
-    # 回滚可改 subprocess 走旧 --append-system-prompt 路径.
+    # ---- qodercli driver ----
+    # subprocess 是当前唯一启用路径；ACP 代码保留用于上游 stdin hang 修复后的复测.
     qodercli_driver: str = "subprocess"        # "subprocess" only — ACP path hangs on stdin (2026-08-04 run 577 验证). "acp" 保留代码但默认不启用.
     qodercli_acp_extra_args: list[str] = field(default_factory=list)  # 透传 --acp 之后的额外参数
     qodercli_permission_mode: str = ""        # Headless --permission-mode (accept_edits / bypass_permissions / dont_ask / auto). 空字符串 = 不传.
@@ -131,7 +130,7 @@ class Config:
             opencode_url=_env("OPENCODE_URL", "http://localhost:4096"),
             opencode_username=_env("OPENCODE_USERNAME", "opencode"),
             opencode_password=_env("OPENCODE_PASSWORD", ""),
-            opencode_model=_env("OPENCODE_MODEL", "minimax/MiniMax-M2.7"),
+            opencode_model=_env("OPENCODE_MODEL", "deepseek/deepseek-v4-flash"),
             opencode_timeout=int(_env("OPENCODE_TIMEOUT", "900")),
             llm_provider=_env("LLM_PROVIDER", "opencode"),
             qodercli_node_path=_env("QODERCLI_NODE_PATH", ""),

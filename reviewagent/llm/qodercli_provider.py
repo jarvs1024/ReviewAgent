@@ -121,8 +121,8 @@ class QoderCLIProvider(BaseLLMProvider):
 
     Two construction modes:
 
-    * ``QoderCLIProvider()`` — config-driven; honours ``config.qodercli_driver``
-      (defaults to ``acp``). Use this from production code.
+    * ``QoderCLIProvider()`` — config-driven; uses the supported
+      ``subprocess`` driver. Use this from production code.
     * ``QoderCLIProvider(node_path=..., js_path=..., model=...)`` —
       forces the legacy one-shot subprocess path. The arguments are passed
       through to ``subprocess.run`` / ``--version`` checks. Useful for unit
