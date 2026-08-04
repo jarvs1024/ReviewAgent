@@ -79,3 +79,40 @@ def test_subprocess_path_raises_on_empty_stdout(tmp_path: Path) -> None:
     with patch("subprocess.run", return_value=fake_proc):
         with pytest.raises(QoderCLIOutputError, match="empty"):
             run_subprocess(agent="improve", prompt="x", workdir=tmp_path, files=[], timeout=30, tolerant_markdown=False)
+
+
+@pytest.mark.parametrize(
+    "inner, expected",
+    [
+        (
+            '{"title":"x","description_md":"line 1\nline 2"}',
+            {"title": "x", "description_md": "line 1\nline 2"},
+        ),
+        ('{"ok":true}\nJSON generated.', {"ok": True}),
+    ],
+)
+def test_subprocess_path_recovers_common_llm_json_variants(
+    tmp_path: Path, inner: str, expected: dict
+) -> None:
+    fake_proc = MagicMock()
+    fake_proc.stdout = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": inner,
+        "stop_reason": "end_turn",
+        "usage": {},
+    })
+    fake_proc.stderr = ""
+    fake_proc.returncode = 0
+
+    with patch("subprocess.run", return_value=fake_proc):
+        result = run_subprocess(
+            agent="describe",
+            prompt="x",
+            workdir=tmp_path,
+            files=[],
+            timeout=30,
+            tolerant_markdown=False,
+        )
+
+    assert result.data == expected

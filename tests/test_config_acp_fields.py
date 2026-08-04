@@ -25,6 +25,12 @@ def test_qodercli_driver_override(monkeypatch):
     assert cfg.qodercli_driver == "subprocess"
 
 
+def test_opencode_model_defaults_to_deepseek_v4_flash(monkeypatch):
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
+    cfg = _make_config(monkeypatch)
+    assert cfg.opencode_model == "deepseek/deepseek-v4-flash"
+
+
 def test_qodercli_max_concurrent_sessions_default(monkeypatch):
     monkeypatch.delenv("QODERCLI_MAX_CONCURRENT_SESSIONS", raising=False)
     cfg = _make_config(monkeypatch)
