@@ -80,6 +80,8 @@ def main() -> int:
     print(f"[ok] week_label   : {result['week_label']}")
     print(f"[ok] artifact     : {result['artifact_path']}")
     print(f"[ok] markdown     : {result['markdown_path']}")
+    if result.get("xlsx_path"):
+        print(f"[ok] xlsx         : {result['xlsx_path']}")
     print(f"[ok] sections     : {result['sections']}")
     delivery = result['delivery']
     if delivery.get('dry_run'):
