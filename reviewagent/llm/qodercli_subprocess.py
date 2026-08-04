@@ -94,6 +94,48 @@ def _cleanup_attachment(attachment: Path | None) -> None:
         pass
 
 
+def _extract_inner_json(text: str) -> object:
+    """Parse qodercli inner ``result`` blob tolerating common LLM quirks.
+
+    Real-world DeepSeek-V4-Flash (and similar) frequently emits:
+
+    * Trailing prose after the JSON object (``{"ok": true}\nJSON generated.``).
+    * Literal newline characters inside JSON string values
+      (``{"title": "x", "description_md": "line 1\nline 2"}``) where
+      Python 3.12 ``strict=True`` (the default since 3.12) rejects the
+      unescaped control character.
+
+    Strategy (mirrors opencode.client extraction):
+
+      1. ``json.JSONDecoder(strict=False).raw_decode(text)`` — handles both
+         trailing prose AND literal control chars inside string values.
+      2. Whole-document ``json.loads(text, strict=False)`` as a second
+         safety net when the LLM appends whitespace before prose.
+      3. Re-raise ``JSONDecodeError`` so the caller can choose their own
+         fallback (typically ``tolerant_markdown`` or hard-fail).
+
+    Returns a dict/list when parsing succeeds; raises ``JSONDecodeError``
+    otherwise. The result MUST be a JSON object — bare scalars are not
+    a useful agent payload — but we keep ``list`` in the contract for
+    future-proofing.
+    """
+    if not text:
+        raise json.JSONDecodeError("empty text", text or "", 0)
+    decoder = json.JSONDecoder(strict=False)
+    try:
+        obj, _end = decoder.raw_decode(text)
+        if isinstance(obj, (dict, list)):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    try:
+        obj = json.loads(text, strict=False)
+        if isinstance(obj, (dict, list)):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    raise json.JSONDecodeError("no json object in inner text", text, 0)
+
 
 def _build_cmd(
     *,
@@ -287,7 +329,15 @@ def run_subprocess(
     # `result` is a string — could be a JSON-encoded blob or plain markdown.
     text = _strip_fence(str(inner))
     try:
-        data = json.loads(text)
+        data = _extract_inner_json(text)
+        if not isinstance(data, dict):
+            # Bare scalar / array are not useful agent payloads — treat as
+            # non-JSON so tolerant_markdown can downgrade to raw_text.
+            raise json.JSONDecodeError(
+                f"inner result is not a JSON object (got {type(data).__name__})",
+                text,
+                0,
+            )
     except json.JSONDecodeError:
         if tolerant_markdown:
             return LLMResult(
@@ -299,7 +349,9 @@ def run_subprocess(
                 model=model_id,
                 raw_output=text,
             )
-        raise QoderCLIOutputError(f"agent output result not JSON: {text[:300]}")
+        raise QoderCLIOutputError(
+            f"agent output result not JSON: {text[:300]}"
+        )
 
     return LLMResult(
         data=data,
