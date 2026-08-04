@@ -13,6 +13,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -37,6 +38,20 @@ class LLMResult:
     duration_ms: int = 0
     provider: str = ""
     raw_output: str = ""
+
+
+def _strip_fence(text: str) -> str:
+    """Strip ```` ```json ... ``` ```` / ```` ``` ... ``` ```` fence; return inner text.
+
+    Used by both qodercli (subprocess) and opencode provider wrappers to
+    pull JSON out of common LLM "helpful" wrapping (markdown code blocks).
+    For richer extraction (multi-block, raw_decode fallback), see
+    ``reviewagent.opencode.client._extract_json_block``.
+    """
+    if not text:
+        return ""
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    return (m.group(1) if m else text).strip()
 
 
 class BaseLLMProvider(ABC):

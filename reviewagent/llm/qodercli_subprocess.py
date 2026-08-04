@@ -31,29 +31,20 @@ stdout JSON shape (top-level wrapper produced by qodercli):
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
 from reviewagent.config import config
-from reviewagent.llm.base import LLMResult
-from reviewagent.llm.qodercli_provider import (
+from reviewagent.llm.base import LLMResult, _strip_fence
+from reviewagent.llm.qodercli_errors import (
     QoderCLIError,
     QoderCLIOutputError,
     QoderCLITimeoutError,
 )
 from reviewagent.logging_setup import logger
 from reviewagent.prompts import loader
-
-
-def _strip_fence(text: str) -> str:
-    """Strip ```json ... ``` / ``` ... ``` fence; return inner text."""
-    if not text:
-        return ""
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    return (m.group(1) if m else text).strip()
 
 
 def _resolve_paths(
@@ -70,18 +61,24 @@ def _resolve_paths(
 
 
 def _build_attachment(workdir: Path, files: list[Path] | None) -> Path | None:
-    """Materialise a single-file attachment path under workdir, return None on failure."""
+    """Materialise a single attachment file under workdir; return None on failure.
+
+    Concatenates all provided files with a header separator. qodercli's
+    ``--attachment`` flag expects a single path, so multiple inputs are
+    merged into one temp file.
+    """
     if not files:
         return None
     attachment = workdir / f".__qodercli_attach_{int(time.time() * 1000)}.diff"
     try:
-        if files[0].exists():
-            attachment.write_text(files[0].read_text(), encoding="utf-8")
-        else:
-            attachment.write_text(
-                "\n".join(p.read_text(encoding="utf-8") for p in files),
-                encoding="utf-8",
-            )
+        chunks: list[str] = []
+        for p in files:
+            try:
+                chunks.append(p.read_text(encoding="utf-8"))
+            except OSError as e:
+                logger.warning("qodercli: failed to read attachment {}: {}", p, e)
+                return None
+        attachment.write_text("\n".join(chunks), encoding="utf-8")
         return attachment
     except OSError as e:
         logger.warning("qodercli: failed to write attachment file: {}", e)
@@ -199,7 +196,7 @@ def run_subprocess(
         max_turns=config.qodercli_max_turns,
     )
 
-    started = time.time()
+    started = time.monotonic()
     actual_timeout = timeout or config.qodercli_timeout
     try:
         proc = subprocess.run(
@@ -207,7 +204,6 @@ def run_subprocess(
             capture_output=True,
             text=True,
             timeout=actual_timeout,
-            bufsize=0,
         )
     except subprocess.TimeoutExpired as e:
         _cleanup_attachment(attachment)
@@ -226,7 +222,7 @@ def run_subprocess(
         )
 
     raw = proc.stdout.strip() if proc.stdout else ""
-    duration_ms = int((time.time() - started) * 1000)
+    duration_ms = int((time.monotonic() - started) * 1000)
 
     if not raw:
         if tolerant_markdown:

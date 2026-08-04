@@ -45,6 +45,7 @@ class OpencodeResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model: str = ""
+    raw_output: str = ""
 
 
 class OpencodeClient:
@@ -189,6 +190,7 @@ class OpencodeClient:
                         prompt_tokens=tokens.get("input", 0),
                         completion_tokens=tokens.get("output", 0),
                         model=msg.get("info", {}).get("modelID", ""),
+                        raw_output=self._extract_text(msg),
                     )
                 except OpencodeOutputError as e:
                     # 容错：非截断导致的 JSON 解析失败，把原文当 markdown 兜底
@@ -314,16 +316,6 @@ class OpencodeClient:
                     text = part["text"]
                     break
         return (text or "").strip()
-
-
-def _strip_fence(text: str) -> str:
-    """去掉首尾的 ```json ... ``` / ``` ... ``` 围栏，返回内部文本."""
-    if not text:
-        return ""
-    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence:
-        return fence.group(1).strip()
-    return text.strip()
 
 
 def _extract_json_block(text: str) -> str:

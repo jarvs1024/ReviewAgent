@@ -58,8 +58,7 @@ class OpencodeProvider(BaseLLMProvider):
             model=oc.model,
             duration_ms=duration_ms,
             provider=self.provider_name,
-            # OpencodeClient 不暴露原文,留空; 调试走 telemetry.store.save_agent_output_fail
-            raw_output="",
+            raw_output=oc.raw_output,
         )
 
     def health_check(self) -> bool:

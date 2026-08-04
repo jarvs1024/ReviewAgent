@@ -11,6 +11,8 @@ can swap in `io.BytesIO`. The real subprocess is wired in Task 4.
 from __future__ import annotations
 
 import json
+
+from reviewagent.llm.qodercli_errors import QoderCLIError
 import os
 import subprocess
 import time
@@ -22,8 +24,12 @@ from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 
-class QoderCLIACPError(RuntimeError):
-    """Base class for qodercli ACP failures."""
+class QoderCLIACPError(QoderCLIError):
+    """Base class for qodercli ACP failures.
+
+    Inherits :class:`QoderCLIError` so callers using ``except QoderCLIError``
+    catch both ACP- and subprocess-driver failures.
+    """
 
 
 class QoderCLIAuthError(QoderCLIACPError):

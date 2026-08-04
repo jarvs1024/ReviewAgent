@@ -1,16 +1,18 @@
 """QoderCLIProvider — wires ReviewAgent commands onto the subprocess driver.
 
-The default driver (`subprocess`, as of 2026-08-04) uses the one-shot
-`qodercli -p` invocation that re-runs per call. The previous default
-ACP driver (long-lived `qodercli --acp` server shared across jobs)
+The default driver (``subprocess``, as of 2026-08-04) uses the one-shot
+``qodercli -p`` invocation that re-runs per call. The previous default
+ACP driver (long-lived ``qodercli --acp`` server shared across jobs)
 is preserved as a code path but is **disabled by default** because
 the ACP session/prompt response stream hangs in production (verified
 on MR 176 run 577 — 7+ min no response, CPU 0%, killed via SIGTERM).
 
-If you want to re-enable ACP after the upstream bug is fixed:
-  1. Edit qodercli_provider.py: revert the `in ("subprocess", "acp")` line
-  2. Set QODERCLI_DRIVER=acp in .env
-  3. Verify on a non-trivial MR before deploying.
+Re-enable once upstream bug is fixed:
+    1. Edit :meth:`QoderCLIProvider.run` so the ACP branch runs when
+       ``config.qodercli_driver == "acp"`` (drop the unconditional
+       subprocess dispatch).
+    2. Set ``QODERCLI_DRIVER=acp`` in .env.
+    3. Verify on a non-trivial MR before deploying.
 
 Constructing ``QoderCLIProvider(node_path=..., js_path=..., model=...)``
 (legacy compat constructor) always uses the subprocess driver.
@@ -19,7 +21,6 @@ Constructing ``QoderCLIProvider(node_path=..., js_path=..., model=...)``
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import threading
@@ -27,7 +28,7 @@ import time
 from pathlib import Path
 
 from reviewagent.config import config
-from reviewagent.llm.base import BaseLLMProvider, LLMResult
+from reviewagent.llm.base import BaseLLMProvider, LLMResult, _strip_fence
 from reviewagent.llm.qodercli_acp import (
     QoderCLIACPClient,
     QoderCLIACPError,
@@ -38,33 +39,25 @@ from reviewagent.logging_setup import logger
 from reviewagent.prompts import loader
 
 
-# Provider-side exception classes (preserved for backward-compatible imports).
-class QoderCLIError(RuntimeError):
-    """qodercli 调用失败基类."""
-
-
-class QoderCLITimeoutError(QoderCLIError):
-    """qodercli 任务超时."""
-
-
-class QoderCLIOutputError(QoderCLIError):
-    """qodercli 输出无法解析为 JSON."""
+from reviewagent.llm.qodercli_errors import (
+    QoderCLIError,
+    QoderCLITimeoutError,
+    QoderCLIOutputError,
+)
 
 
 _acp_client: QoderCLIACPClient | None = None
 _acp_lock = threading.Lock()
 
 
-def _strip_fence(text: str) -> str:
-    """Strip ```json ... ``` / ``` ... ``` fence; return inner text."""
-    if not text:
-        return ""
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    return (m.group(1) if m else text).strip()
-
-
 def _get_or_bootstrap(workdir: Path) -> QoderCLIACPClient:
-    """Return the worker-scoped ACP client, bootstrapping it on first use."""
+    """Return the worker-scoped ACP client, bootstrapping it on first use.
+
+    .. warning::
+       Currently unreachable from :meth:`QoderCLIProvider.run` — the run
+       method unconditionally dispatches to subprocess (see commit
+       ``3d09f43``). Kept for the day upstream ACP stdin hang is fixed.
+    """
     global _acp_client
     with _acp_lock:
         if _acp_client is not None and _acp_client._proc and _acp_client._proc.poll() is None:
@@ -106,15 +99,21 @@ def _get_or_bootstrap(workdir: Path) -> QoderCLIACPClient:
 
 
 def reset_for_tests() -> None:
-    """Clear the worker-scoped client; tests use this between cases."""
+    """Clear the worker-scoped client; tests use this between cases.
+
+    Shutdown happens *outside* the lock so a hung shutdown does not
+    deadlock subsequent callers. Reference is cleared first so concurrent
+    ``_get_or_bootstrap`` won't pick up a stale client.
+    """
     global _acp_client
     with _acp_lock:
-        if _acp_client is not None:
-            try:
-                _acp_client.shutdown()
-            except Exception:  # pragma: no cover
-                pass
+        stale = _acp_client
         _acp_client = None
+    if stale is not None:
+        try:
+            stale.shutdown()
+        except Exception:  # pragma: no cover
+            pass
 
 
 class QoderCLIProvider(BaseLLMProvider):
@@ -165,10 +164,19 @@ class QoderCLIProvider(BaseLLMProvider):
             return False
 
     def health_check(self) -> bool:
+        """Probe the configured driver.
+
+        * Legacy mode (per-call overrides): spawn ``qodercli --version``.
+        * Subprocess driver (default): same probe — quick and avoids
+          false positives if the binary is missing or the model is
+          mis-configured.
+        * ACP driver: long-lived server probe (kept for back-compat;
+          not reachable while ACP is disabled).
+        """
         if self._legacy:
             return self._legacy_health_check()
         if config.qodercli_driver == "subprocess":
-            return True
+            return self._legacy_health_check()
         try:
             client = _get_or_bootstrap(Path.cwd())
         except QoderCLIError:
@@ -202,7 +210,7 @@ class QoderCLIProvider(BaseLLMProvider):
         client = _get_or_bootstrap(workdir)
         meta = loader.load(agent)
         prefixed = f"使用 {agent} subagent 处理以下任务:\n\n{prompt}"
-        started = time.time()
+        started = time.monotonic()
         sid = client.session_new(cwd=workdir)
         try:
             client.session_prompt(sid, prefixed, timeout=timeout or config.qodercli_session_timeout)
@@ -213,7 +221,7 @@ class QoderCLIProvider(BaseLLMProvider):
                 pass
             raise QoderCLITimeoutError(str(e)) from e
         message = client.collect_message(sid)
-        duration_ms = int((time.time() - started) * 1000)
+        duration_ms = int((time.monotonic() - started) * 1000)
         if not message:
             raise QoderCLIOutputError("ACP session produced no agent_message_chunk")
         try:
