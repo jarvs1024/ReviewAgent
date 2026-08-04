@@ -18,7 +18,7 @@ from typing import Any
 from reviewagent.config import config
 from reviewagent.gitlab.client import GitLabError, client as gl
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import OpencodeError, client as opencode
+from reviewagent.llm import OpencodeError, get_client
 
 from .base import CollectorContext, SectionResult
 
@@ -194,7 +194,8 @@ class MergedMrsCollector:
                               prev_data: dict[str, Any] | None = None) -> str:
         """调 opencode weekly_change_summary agent 生成变更摘要；失败抛异常由调用方回退."""
         prompt = self._build_llm_prompt(data, target_branch, prev_data)
-        oc_result = opencode.run(
+        client = get_client()
+        oc_result = client.run(
             agent="weekly_change_summary",
             prompt=prompt,
             workdir=Path.cwd(),

@@ -31,11 +31,11 @@ from reviewagent.git.workspace import (
 )
 from reviewagent.gitlab.client import GitLabError, GitLabClient
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import (
+from reviewagent.llm import (
     OpencodeError,
     OpencodeOutputError,
     OpencodeTimeoutError,
-    client as opencode,
+    get_client,
 )
 from reviewagent.prompts import loader
 from reviewagent.repo_context import build_repo_context
@@ -105,7 +105,8 @@ class BaseCommand:
 
     def _call_agent(self, ws) -> dict[str, Any]:
         """调 opencode agent，返回解析后的 dict. 子类可覆盖实现并行等策略."""
-        oc_result = opencode.run(
+        client = get_client()
+        oc_result = client.run(
             agent=self.DEFAULT_AGENT,
             prompt=self._build_user_prompt(),
             workdir=ws.worktree,

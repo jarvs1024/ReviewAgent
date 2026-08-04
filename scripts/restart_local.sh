@@ -28,6 +28,18 @@ sleep 2
 
 echo "==> [2/3] 启动服务"
 
+# Materialise .qoder/agents/*.md so the qodercli ACP server (when each
+# RQ worker pre-boots it lazily on first job) picks up the synced
+# subagent prompts. Idempotent: skips when nothing has changed.
+if [ -x .venv/bin/python ]; then
+    # reviewagent.config reads required env at import time. Source .env
+    # in the same shell as the python invocation so sync_qoder_agents can
+    # import reviewagent.config without RuntimeError.
+    (set -a && source .env && set +a && .venv/bin/python scripts/sync_qoder_agents.py) 2>&1 | tee -a logs/sync_qoder_agents.log
+else
+    echo "    WARNING: .venv/bin/python not found; skipping sync_qoder_agents"
+fi
+
 screen -dmS revagent-opencode bash -c \
     "exec ${OPENCODE_BIN} serve --port 4096 2>&1 | tee -a logs/opencode-4096.log"
 echo "    started revagent-opencode (:4096)"

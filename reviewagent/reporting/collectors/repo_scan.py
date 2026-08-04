@@ -30,7 +30,7 @@ from typing import Any
 from reviewagent.config import config
 from reviewagent.gitlab.client import GitLabError, client as gl
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import OpencodeError, client as opencode
+from reviewagent.llm import OpencodeError, get_client
 
 from .base import CollectorContext, SectionResult
 
@@ -568,7 +568,8 @@ class RepoScanCollector:
             prev_data=prev_data,
             project_overview=project_overview,
         )
-        oc_result = opencode.run(
+        client = get_client()
+        oc_result = client.run(
             agent="weekly_quality_scan",
             prompt=prompt,
             workdir=Path.cwd(),
