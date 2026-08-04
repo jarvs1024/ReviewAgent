@@ -57,28 +57,95 @@ Python 端不做任何代码理解工作。
 
 ## 架构
 
-```
-GitLab (MR / Push / Note)
-   │  webhook (X-Gitlab-Token 鉴权)
-   ▼
-FastAPI /webhook  ── 立即 200 ──► RQ 队列 (Redis)
-   │                                  │
-   │                            RQ Worker (review / review-v2)
-   │                                  │  ← 只处理 improve/describe/suggestion
-   │                  ┌───────────────┼───────────────────┐
-   │                  ▼               ▼                   ▼
-   │           GitLab API        git worktree        opencode serve (:4096)
-   │         (diff / comment)   (bare repo)         (HTTP API: session+message)
-   │                  │               │                   │
-   │                  └───────────────┴───────────────────┘
-   │                          SQLite telemetry.db ◄── 落库
-   ▼
-GET /api/v1/telemetry/*  ── 看板 / 统计
+### 总览
 
-周报（含 opencode LLM 变更摘要 / 质量扫描）走**独立队列 `review-weekly`（`review-v2-weekly`）**
-+ **独立 worker 进程**，与主 review 队列物理隔离：周报 job 含三次 LLM 调用（三小节各一次）、可能跑数分钟，
-不会阻塞 improve/describe。Redis / opencode / 模型 / SQLite 等底层资源全部共享（"共有资源"）。
 ```
+                          ┌─────────────────────────────────────────────┐
+                          │              GitLab Server                  │
+                          │  MR open/update · Push · Note (comment)     │
+                          └──────────────────┬──────────────────────────┘
+                                             │ webhook (X-Gitlab-Token)
+                                             ▼
+┌────────────────────────────────────────────────────────────────────────────────┐
+│  FastAPI  (uvicorn :3000)                                                      │
+│                                                                                │
+│  POST /webhook ─── 鉴权 → payload 解析 → 立即 200 → enqueue ──┐               │
+│  GET  /health                                                   │               │
+│  GET  /api/v1/telemetry/* ◄── SQLite ─────────────────────────  │               │
+└─────────────────────────────────────────────────────────────────┼───────────────┘
+                                                                  │
+              ┌───────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Redis                                                                          │
+│                                                                                 │
+│  ┌──────────────────────────┐     ┌──────────────────────────┐                  │
+│  │ Queue: review-v2         │     │ Queue: review-v2-weekly  │                  │
+│  │ (describe / improve /    │     │ (周报: 3 次 LLM 调用)    │                  │
+│  │  suggestion / adopt)     │     │                          │                  │
+│  └────────────┬─────────────┘     └────────────┬─────────────┘                  │
+└───────────────┼────────────────────────────────┼────────────────────────────────┘
+                │                                │
+                ▼                                ▼
+┌───────────────────────────┐     ┌───────────────────────────┐
+│ RQ Worker ×N (并发)        │     │ RQ Worker ×1 (独立进程)    │
+│ reviewagent-worker@1..3   │     │ reviewagent-worker@weekly  │
+└─────────────┬─────────────┘     └─────────────┬─────────────┘
+              │                                 │
+              ▼                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Commands 层                                                                    │
+│                                                                                 │
+│  /describe          /improve                    周报                             │
+│  ┌──────────┐      ┌──────────────────────┐    ┌──────────────────────────┐     │
+│  │describe.py│     │ improve.py             │    │ reporting/               │     │
+│  │          │     │                        │    │  ├ telemetry collector    │     │
+│  │ 1 次 LLM │     │ diff → 按文件切片       │    │  ├ merged_mrs collector  │     │
+│  │ 调用     │     │ → ThreadPoolExecutor   │    │  └ repo_scan collector   │     │
+│  └──────────┘     │   (max_workers=3)      │    │                          │     │
+│                   │      │     │     │      │    │ 3 次 LLM 调用            │     │
+│                   │      ▼     ▼     ▼      │    │ (各 collector 各 1 次)    │     │
+│                   │  chunk1 chunk2 chunk3   │    └──────────────────────────┘     │
+│                   │   (并行 opencode 调用)   │                                     │
+│                   └──────────────────────────┘                                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  基础设施层                                                                     │
+│                                                                                 │
+│  ┌─────────────────┐  ┌─────────────────────┐  ┌──────────────────────────┐    │
+│  │ GitLab API       │  │ git workspace       │  │ opencode serve (:4096)   │    │
+│  │ (python-gitlab)  │  │                     │  │                          │    │
+│  │                 │  │ bare repo           │  │ HTTP API                 │    │
+│  │ • 拉 diff       │  │ + tmpfs worktree    │  │ POST /session            │    │
+│  │ • 发评论         │  │ (代码污染防护)       │  │ POST /session/:id/message│    │
+│  │ • resolve       │  │                     │  │                          │    │
+│  └─────────────────┘  └─────────────────────┘  │ ┌──────────────────────┐│    │
+│                                                 │ │ LLM (DeepSeek/      ││    │
+│                                                 │ │ MiniMax via qoder)  ││    │
+│                                                 │ └──────────────────────┘│    │
+└─────────────────────────────────────────────────┴─────────────────────────┘────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  SQLite telemetry.db (WAL)                                                      │
+│  MR 记录 · suggestion 记录 · 采纳/驳回 · 周报归档                                │
+│  GET /api/v1/telemetry/* → 看板 / 统计                                          │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 关键设计说明
+
+| 设计点 | 说明 |
+|--------|------|
+| **队列隔离** | review 命令 (describe/improve/suggestion) 与周报走独立队列 + 独立 worker，周报 job 含 3 次 LLM 调用可能跑数分钟，不会阻塞 MR review |
+| **Worker 并发** | review 队列配 N 个 worker (默认 3)，多个 MR 可同时处理 |
+| **improve 并行** | 单个 /improve 内部按文件切片，ThreadPoolExecutor(max_workers=3) 并行调 opencode，多文件 MR 显著加速 |
+| **opencode 独立进程** | opencode serve 作为 daemon 运行 (非 systemd)，加载 `~/.config/opencode/agents/` 中的 agent 定义 |
+| **代码污染防护** | bare repo + tmpfs worktree，agent 在临时 worktree 中读文件，不污染主仓库 |
+| **死循环防护** | bot 自评论忽略 + cooldown 限频 + MAX_REVIEW_CALLS_PER_MR 上限 (默认 30) |
 
 ---
 
