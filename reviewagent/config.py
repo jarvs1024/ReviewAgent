@@ -52,6 +52,8 @@ class Config:
     # 回滚可改 subprocess 走旧 --append-system-prompt 路径.
     qodercli_driver: str = "acp"               # "acp" | "subprocess"
     qodercli_acp_extra_args: list[str] = field(default_factory=list)  # 透传 --acp 之后的额外参数
+    qodercli_permission_mode: str = ""        # Headless --permission-mode (accept_edits / bypass_permissions / dont_ask / auto). 空字符串 = 不传.
+    qodercli_max_turns: int = 0               # Headless --max-turns 上限. 0 = 不传 (用 qodercli 默认).
     qodercli_max_concurrent_sessions: int = 4   # 同 ACP 进程内 session 并发上限 (semaphore)
     qodercli_queue_wait_timeout: int = 120      # 拿不到 semaphore 时等位超时 (秒)
     qodercli_session_reuse_window: int = 300    # 同一 agent 复用同一 sessionId 的窗口 (秒)
@@ -142,6 +144,8 @@ class Config:
             qodercli_queue_wait_timeout=int(_env("QODERCLI_QUEUE_WAIT_TIMEOUT", "120")),
             qodercli_session_reuse_window=int(_env("QODERCLI_SESSION_REUSE_WINDOW", "300")),
             qodercli_session_timeout=int(_env("QODERCLI_SESSION_TIMEOUT", "540")),
+            qodercli_permission_mode=_env("QODERCLI_PERMISSION_MODE", ""),
+            qodercli_max_turns=int(_env("QODERCLI_MAX_TURNS", "0")),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=rq_queue_name,
             rq_weekly_queue_name=rq_weekly_queue_name,

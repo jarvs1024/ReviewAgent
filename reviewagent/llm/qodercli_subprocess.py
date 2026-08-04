@@ -97,6 +97,64 @@ def _cleanup_attachment(attachment: Path | None) -> None:
         pass
 
 
+
+def _build_cmd(
+    *,
+    node_path: str,
+    script_path: str,
+    model_name: str,
+    workdir: Path,
+    meta_prompt: str,
+    attachment: "Path | None",
+    prompt: str,
+    permission_mode: str,
+    max_turns: int,
+) -> list[str]:
+    """Pure-function form of the qodercli subprocess command — extracted for unit tests."""
+    cmd = [
+        node_path, script_path, "-p",
+        "--model", model_name,
+        "--no-session-persistence",
+        "-o", "json",
+        "-w", str(workdir),
+        "--append-system-prompt", meta_prompt,
+        "--disallowed-tools", "write,edit,bash,webfetch,websearch",
+    ]
+    if permission_mode:
+        cmd += ["--permission-mode", permission_mode]
+    if max_turns > 0:
+        cmd += ["--max-turns", str(max_turns)]
+    if attachment is not None:
+        cmd += ["--attachment", str(attachment)]
+    cmd.append(prompt)
+    return cmd
+
+
+def _build_cmd_for_test(
+    *,
+    node: str,
+    script: str,
+    model: str,
+    meta_prompt: str,
+    workdir: str,
+    prompt: str,
+    permission_mode: str,
+    max_turns: int,
+) -> list[str]:
+    """Test shim mirroring _build_cmd with positional args."""
+    return _build_cmd(
+        node_path=node,
+        script_path=script,
+        model_name=model,
+        workdir=Path(workdir),
+        meta_prompt=meta_prompt,
+        attachment=None,
+        prompt=prompt,
+        permission_mode=permission_mode,
+        max_turns=max_turns,
+    )
+
+
 def run_subprocess(
     *,
     agent: str,
@@ -129,18 +187,17 @@ def run_subprocess(
     meta = loader.load(agent)
     attachment = _build_attachment(workdir, files)
 
-    cmd = [
-        node_path, script_path, "-p",
-        "--model", model_name,
-        "--no-session-persistence",
-        "-o", "json",
-        "-w", str(workdir),
-        "--append-system-prompt", meta["prompt"],
-        "--disallowed-tools", "write,edit,bash,webfetch,websearch",
-    ]
-    if attachment is not None:
-        cmd += ["--attachment", str(attachment)]
-    cmd.append(prompt)  # prompt is the trailing positional argument
+    cmd = _build_cmd(
+        node_path=node_path,
+        script_path=script_path,
+        model_name=model_name,
+        workdir=workdir,
+        meta_prompt=meta["prompt"],
+        attachment=attachment,
+        prompt=prompt,
+        permission_mode=config.qodercli_permission_mode,
+        max_turns=config.qodercli_max_turns,
+    )
 
     started = time.time()
     actual_timeout = timeout or config.qodercli_timeout
