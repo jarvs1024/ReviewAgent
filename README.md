@@ -58,47 +58,38 @@ Python 端不做任何代码理解工作。
 ## 架构
 
 ```
-GitLab (MR / Push / Note)
-   │  webhook (X-Gitlab-Token)
-   ▼
-FastAPI /webhook ── 立即 200 ──┐
-                               │
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-     ┌─────────────────┐              ┌──────────────────┐
-     │ Queue: review   │              │ Queue: weekly    │
-     │ describe/improve│              │ 周报 (3×LLM)     │
-     │ /suggestion     │              │                  │
-     └───────┬─────────┘              └────────┬─────────┘
-             │                                 │
-             ▼                                 ▼
-     Worker ×N (并发)                  Worker ×1 (独立)
-             │                                 │
-             ▼                                 ▼
-  ┌──────────────────┐              ┌──────────────────┐
-  │ /describe        │              │ reporting/        │
-  │  1× LLM         │              │  3 个 collector   │
-  │                  │              │  各 1× LLM       │
-  │ /improve         │              └──────────────────┘
-  │  diff → 按文件切片 │
-  │  → 并行 opencode  │
-  │  (max_workers=3) │
-  └────────┬─────────┘
-           │
-           ▼
-  ┌────────┴────────────────────────────┐
-  │                                     │
-  ▼              ▼                      ▼
-GitLab API    git worktree         opencode serve (:4096)
-(拉 diff /    (bare repo +        HTTP API → LLM
- 发评论)       tmpfs 隔离)         (agent 定义在 prompts/*.md)
-           │
-           ▼
-     SQLite telemetry.db ──► GET /api/v1/telemetry/*
+  ┌──────────────────────────┐          ┌──────────────────┐
+  │ GitLab (MR/Push/Note)    │          │ cron / 定时脚本    │
+  └────────────┬─────────────┘          └────────┬─────────┘
+               │ webhook                         │ enqueue
+               ▼                                 ▼
+  FastAPI /webhook ── 立即 200       Queue: weekly
+               │                     周报 (3×LLM)
+               ▼                          │
+  Queue: review                           ▼
+  describe / improve / suggestion    Worker ×1 (独立)
+               │                          │
+               ▼                          ▼
+  Worker ×N (并发)                reporting/ (3 个 collector)
+       │         │                  各 1× LLM 调用
+       ▼         ▼                       │
+  /describe  /improve                    ▼
+  1×LLM     diff→按文件切片         ┌────┴────┐
+           →并行 opencode          ▼         ▼
+           (max_workers=3)     钉钉通知   SQLite 归档
+       │         │
+       ▼         ▼
+  GitLab API   git worktree      opencode serve (:4096)
+  (拉 diff /   (bare repo +      HTTP API → LLM
+   发评论)      tmpfs 隔离)      (agent 定义在 prompts/*.md)
+                         │
+                         ▼
+              SQLite telemetry.db
+              GET /api/v1/telemetry/*
 ```
 
 **关键设计**:
-- **队列隔离**: review 与周报走独立队列 + worker，周报跑数分钟不阻塞 MR review
+- **两条触发链**: webhook 链 (MR review) 与定时链 (周报) 独立触发、独立队列、独立 worker，互不阻塞
 - **Worker 并发**: review 队列 N 个 worker (默认 3)，多 MR 可同时处理
 - **improve 并行**: 按文件切片 → ThreadPoolExecutor 并行调 opencode
 - **代码防护**: bare repo + tmpfs worktree，agent 只读临时目录
