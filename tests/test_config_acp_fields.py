@@ -16,7 +16,8 @@ def _make_config(monkeypatch, **env):
 def test_qodercli_driver_default(monkeypatch):
     monkeypatch.delenv("QODERCLI_DRIVER", raising=False)
     cfg = _make_config(monkeypatch)
-    assert cfg.qodercli_driver == "acp"
+    # 2026-08-04: ACP driver hangs on stdin (run 577 验证), 默认改为 subprocess
+    assert cfg.qodercli_driver == "subprocess"
 
 
 def test_qodercli_driver_override(monkeypatch):

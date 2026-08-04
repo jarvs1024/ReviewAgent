@@ -1,17 +1,19 @@
-"""QoderCLIProvider — wires ReviewAgent commands onto the ACP client.
+"""QoderCLIProvider — wires ReviewAgent commands onto the subprocess driver.
 
-The default driver (`acp`) uses a long-lived `qodercli --acp` server
-shared across all jobs in one RQ worker process. The legacy one-shot
-subprocess path is preserved as a kill-switch via either:
+The default driver (`subprocess`, as of 2026-08-04) uses the one-shot
+`qodercli -p` invocation that re-runs per call. The previous default
+ACP driver (long-lived `qodercli --acp` server shared across jobs)
+is preserved as a code path but is **disabled by default** because
+the ACP session/prompt response stream hangs in production (verified
+on MR 176 run 577 — 7+ min no response, CPU 0%, killed via SIGTERM).
 
-  * `QODERCLI_DRIVER=subprocess` in `.env`, or
-  * Constructing ``QoderCLIProvider(node_path=..., js_path=..., model=...)``
-    (compatibility constructor used by tests and earlier callers).
+If you want to re-enable ACP after the upstream bug is fixed:
+  1. Edit qodercli_provider.py: revert the `in ("subprocess", "acp")` line
+  2. Set QODERCLI_DRIVER=acp in .env
+  3. Verify on a non-trivial MR before deploying.
 
-When the legacy constructor is used we bypass `Config` and dispatch every
-``run()`` call to ``reviewagent.llm.qodercli_subprocess.run_subprocess``
-directly. The ACP client is not started in that mode — useful for
-kill-switches and for unit tests that patch ``subprocess.run``.
+Constructing ``QoderCLIProvider(node_path=..., js_path=..., model=...)``
+(legacy compat constructor) always uses the subprocess driver.
 """
 
 from __future__ import annotations
@@ -184,7 +186,9 @@ class QoderCLIProvider(BaseLLMProvider):
         tolerant_markdown: bool = False,
     ) -> LLMResult:
         # Legacy / kill-switch path: bypass ACP entirely.
-        if self._legacy or config.qodercli_driver == "subprocess":
+        # 2026-08-04: ACP path hangs on stdin (run 577 验证 7+min 卡死),
+        # force subprocess regardless of QODERCLI_DRIVER setting.
+        if self._legacy or config.qodercli_driver in ("subprocess", "acp"):
             from reviewagent.llm.qodercli_subprocess import run_subprocess
             return run_subprocess(
                 agent=agent, prompt=prompt, workdir=workdir, files=files,
