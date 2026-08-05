@@ -200,6 +200,8 @@ def process_dismiss(
     suggestion_note_id: str,
     actor_username: str,
     reason: str,
+    file_path: str = "",
+    target_line: int = 0,
 ) -> dict[str, Any]:
     """处理 /dismiss 命令.
 

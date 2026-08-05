@@ -270,3 +270,33 @@ def test_get_suggestion_by_note_id_returns_most_recent(tmp_telemetry):
 
     row = s.get_suggestion_by_note_id("shared-id")
     assert row["file_path"] == "services/b.py"  # 最近插入的
+
+
+def test_process_dismiss_accepts_file_path_kwargs(tmp_telemetry):
+    """Regression: process_dismiss must accept file_path/target_line kwargs.
+
+    Bug found 2026-08-06: webhook /dismiss passed file_path/target_line to
+    run_suggestion_action → run_suggestion_action → process_dismiss, but
+    process_dismiss didn't have those kwargs → TypeError raised → /dismiss job failed.
+
+    Fix: added file_path: str = "", target_line: int = 0 to process_dismiss signature.
+    """
+    from reviewagent.commands.suggestion_actions import process_dismiss
+    from unittest.mock import MagicMock, patch as mock_patch
+
+    fake_gl = MagicMock()
+    fake_gl.resolve_discussion.return_value = True
+    fake_gl.reply_to_discussion.return_value = None
+
+    with mock_patch("reviewagent.commands.suggestion_actions.GitLabClient", lambda: fake_gl):
+        # Should not raise TypeError on file_path/target_line kwargs
+        result = process_dismiss(
+            project_id=34, mr_iid=213,
+            suggestion_note_id="0bd6b73e4867820dccdaf9ab4c1fcd45e4ba7f91",
+            actor_username="tester",
+            reason="verify kwarg accept",
+            file_path="services/verify_8bugs_caller_2026_08_05.py",
+            target_line=20,
+        )
+    assert "action" in result
+    assert result["action"] in ("dismissed", "dismiss-skipped"), f"got {result}"
