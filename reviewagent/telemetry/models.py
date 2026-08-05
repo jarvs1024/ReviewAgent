@@ -74,6 +74,12 @@ class ReviewRun:
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None
+    # GitLab MR hook 新格式: "2024-01-15 10:30:00 UTC"
+    if isinstance(s, str) and s.endswith(" UTC"):
+        try:
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
     try:
         # GitLab ISO 8601: "2024-01-15T10:30:00.000Z"
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
