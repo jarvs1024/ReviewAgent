@@ -229,6 +229,7 @@ class Store:
                         target_branch = excluded.target_branch,
                         state = excluded.state,
                         updated_at = excluded.updated_at,
+                        created_at = COALESCE(excluded.created_at, mr_activity.created_at),
                         merged_at = COALESCE(excluded.merged_at, mr_activity.merged_at)
                     """,
                     (
