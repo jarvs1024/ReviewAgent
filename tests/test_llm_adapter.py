@@ -420,3 +420,93 @@ class TestGetClient:
         # reset 后 _client 是 None,会重新构造一个新实例（OpencodeProvider 内部复用全局单例
         # 但 OpencodeProvider 实例本身是新的）
         assert a is not b
+
+
+# ============================== 适配层 → commands/_common.py 集成回归 ==============================
+
+class TestBaseCommandExceptionHandling:
+    """回归测试:commands/_common.py 的 except 子句必须能捕获两个 provider 的异常族.
+
+    历史 bug(2026-08-05 fix): except 列表只包含 Opencode*Error,qodercli 抛 QoderCLI*Error
+    时会被最外层 bare `except Exception` 兜底,telemetry 标记为 "unexpected: ..." 而非
+    "qodercli: ...",业务上语义错误且 retry 行为不对.
+    """
+
+    def test_commands_common_excepts_both_provider_families(self):
+        """commands/_common.py 的 LLM 异常分支必须显式列出 6 个具体类."""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "reviewagent" / "commands" / "_common.py").read_text(encoding="utf-8")
+        for cls in (
+            "OpencodeTimeoutError", "OpencodeOutputError", "OpencodeError",
+            "QoderCLITimeoutError", "QoderCLIOutputError", "QoderCLIError",
+        ):
+            assert cls in src, f"{cls} missing from commands/_common.py except clauses"
+
+    def test_base_command_catches_qodercli_error(self, monkeypatch):
+        """集成回归:BaseCommand.run() 在 qodercli 抛 QoderCLIError 时走 LLM 分支.
+
+        Mock 所有外部依赖,只让 _call_agent 抛 QoderCLIError,验证:
+          1. 抛 BaseCommandError 而非裸 Exception
+          2. telemetry emit_run_finished 收到 status='failed' + error 包含 'qodercli'
+        """
+        from reviewagent.llm import QoderCLIError, get_client
+        from reviewagent.commands._common import BaseCommand, BaseCommandError
+        from reviewagent.git.workspace import Workspace
+
+        # 1) mock get_client() 返回一个 provider_name='qodercli' 的对象
+        class _FakeProvider:
+            provider_name = "qodercli"
+        monkeypatch.setattr("reviewagent.commands._common.get_client", lambda: _FakeProvider())
+
+        # 2) mock gitlab + workspace + telemetry 入口
+        fake_gitlab = type("G", (), {})()
+        _MR = {
+            "sha": "deadbeef", "state": "opened",
+            "project_id": 1, "iid": 1,
+            "title": "Test MR", "author": {"username": "root", "name": "Root"},
+            "source_branch": "feat", "target_branch": "main",
+            "created_at": "2026-08-05T00:00:00Z",
+            "updated_at": "2026-08-05T00:00:00Z", "merged_at": None,
+        }
+        fake_gitlab.get_mr = lambda *_a, **_k: _MR
+        fake_gitlab.get_mr_diff = lambda *_a, **_k: "diff --git a/x b/x\n+ok"
+        fake_gitlab.get_project_git_url = lambda *_a, **_k: "git@example.com:x.git"
+
+        # 3) mock prepare_workspace / cleanup_workspace
+        fake_ws = Workspace(
+            bare=Path("/tmp/bare"), worktree=Path("/tmp/wt"),
+            diff_file=Path("/tmp/diff"),
+        )
+        monkeypatch.setattr("reviewagent.commands._common.prepare_workspace", lambda **_k: fake_ws)
+        monkeypatch.setattr("reviewagent.commands._common.cleanup_workspace", lambda *_a, **_k: None)
+
+        # 4) mock build_repo_context / loader
+        monkeypatch.setattr("reviewagent.commands._common.build_repo_context", lambda *_a, **_k: "")
+
+        # 5) mock telemetry — 捕获 emit_run_finished
+        from reviewagent.telemetry import events
+        captured = {}
+        def fake_emit_finished(run_id, status, **_kw):
+            captured["status"] = status
+            captured["error"] = _kw.get("error", "")
+        monkeypatch.setattr(events, "emit_run_finished", fake_emit_finished)
+        monkeypatch.setattr(events, "emit_run_started", lambda *_a, **_k: "run-id")
+        monkeypatch.setattr(events, "emit_mr_activity", lambda *_a, **_k: None)
+
+        # 6) 构造一个最小测试子类,_call_agent 抛 QoderCLIError
+        class _T(BaseCommand):
+            COMMAND_NAME = "describe"
+            DEFAULT_AGENT = "describe"
+            def _call_agent(self, _ws):
+                raise QoderCLIError("synthetic qodercli boom")
+
+        cmd = _T(project_id=1, mr_iid=1)
+
+        # 7) 通过 __init__ 已经设的 self.gitlab 直接 patch
+        monkeypatch.setattr(cmd, "gitlab", fake_gitlab)
+
+        # 8) 触发并断言
+        with pytest.raises(BaseCommandError, match="qodercli error"):
+            cmd.run()
+        assert captured["status"] == "failed", f"expected failed, got {captured}"
+        assert "qodercli" in captured["error"], f"expected qodercli in error, got {captured}"

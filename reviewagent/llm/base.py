@@ -7,6 +7,11 @@
     - 异常包装
 
 详见 docs/LLM_PROVIDER_ADAPTER.md.
+
+降级语义（tolerant_markdown）:
+    - False(默认): 任何非 JSON stdout → raise QoderCLIOutputError / OpencodeOutputError
+    - True: 非 JSON stdout → LLMResult(data={"markdown": <raw_text>}, ...),
+      caller 需自行识别该降级形态(典型: 周报 agent 容忍 prose 输出)
 """
 from __future__ import annotations
 

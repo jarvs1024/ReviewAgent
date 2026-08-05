@@ -34,6 +34,7 @@ import json
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from reviewagent.config import config
@@ -69,7 +70,8 @@ def _build_attachment(workdir: Path, files: list[Path] | None) -> Path | None:
     """
     if not files:
         return None
-    attachment = workdir / f".__qodercli_attach_{int(time.time() * 1000)}.diff"
+    # 用 uuid 避免同毫秒撞名（并发场景 / 快速重试）
+    attachment = workdir / f".__qodercli_attach_{uuid.uuid4().hex[:16]}.diff"
     try:
         chunks: list[str] = []
         for p in files:

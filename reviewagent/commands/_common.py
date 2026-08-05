@@ -35,6 +35,9 @@ from reviewagent.llm import (
     OpencodeError,
     OpencodeOutputError,
     OpencodeTimeoutError,
+    QoderCLIError,
+    QoderCLIOutputError,
+    QoderCLITimeoutError,
     get_client,
 )
 from reviewagent.prompts import loader
@@ -133,6 +136,8 @@ class BaseCommand:
         prompt_tokens = 0
         completion_tokens = 0
         model_used = self.model
+        # 在 try 块前初始化 provider_name,except 块才能访问
+        provider_name = getattr(get_client(), "provider_name", "unknown")
 
         try:
             # 1. MR 元信息
@@ -286,14 +291,19 @@ class BaseCommand:
             )
             return result_summary
 
-        except (OpencodeTimeoutError, OpencodeOutputError, OpencodeError) as e:
+        # LLM 适配层异常族 — opencode + qodercli 共 6 个具体类;
+        # 没有公共基类(避免动 reviewagent.opencode.client 的类层级),这里显式列出.
+        except (
+            OpencodeTimeoutError, OpencodeOutputError, OpencodeError,
+            QoderCLITimeoutError, QoderCLIOutputError, QoderCLIError,
+        ) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             events.emit_run_finished(
-                run_id, status="failed", error=f"opencode: {e}",
+                run_id, status="failed", error=f"{provider_name}: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
-            raise BaseCommandError(f"opencode error: {e}") from e
+            raise BaseCommandError(f"{provider_name} error: {e}") from e
         except (WorkspaceError, GitLabError) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             events.emit_run_finished(

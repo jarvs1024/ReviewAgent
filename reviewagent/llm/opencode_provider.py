@@ -64,7 +64,7 @@ class OpencodeProvider(BaseLLMProvider):
     def health_check(self) -> bool:
         """走 opencode GET /api/health; 网络或 auth 失败返回 False."""
         try:
-            with httpx.Client(auth=self._client._auth, timeout=5) as c:
+            with httpx.Client(auth=self._client.auth, timeout=5) as c:
                 r = c.get(f"{self._client.base_url}/api/health")
                 return r.status_code == 200
         except Exception:

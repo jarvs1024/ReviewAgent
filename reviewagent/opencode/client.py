@@ -74,6 +74,11 @@ class OpencodeClient:
             else None
         )
 
+    @property
+    def auth(self) -> tuple[str, str] | None:
+        """Public accessor for HTTP Basic Auth tuple; None 表示不需要鉴权."""
+        return self._auth
+
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         url = f"{self.base_url}{path}"
         try:

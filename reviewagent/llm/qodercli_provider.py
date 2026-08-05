@@ -45,11 +45,8 @@ class QoderCLIProvider(BaseLLMProvider):
         self._node_path = node_path
         self._js_path = js_path
         self._model = model
-        # When the caller passes all three explicit overrides we run in
-        # legacy mode (subprocess with explicit args). Otherwise we use
-        # the config-driven subprocess path. Both forms invoke the same
-        # driver; this flag just controls arg resolution.
-        self._legacy = bool(node_path and js_path and model)
+        # 三个 override 字段用于测试（tests/test_llm_adapter.py 显式传值），
+        # 实际运行路径与 config 模式一致 — 都是 subprocess driver。
 
     @property
     def provider_name(self) -> str:
