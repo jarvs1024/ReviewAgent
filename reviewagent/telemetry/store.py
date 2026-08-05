@@ -719,6 +719,19 @@ class Store:
             )
             return note_ids
 
+    def update_suggestion_note_id(self, suggestion_id: int, new_note_id: str) -> None:
+        """回填 note_id — Fix C: file:line 兜底命中后, 把真实 GitLab note_id 写回.
+
+        Why: webhook /adopt 来时 improve 的 record_suggestion 还没 INSERT, file:line
+        兜底命中后, 真实 note_id 跟 DB 占位 id 不一致. 这里把真实 note_id 写回,
+        后续 /adopt 直接走 note_id 主路径, 不会再走兜底.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE suggestions SET note_id=?, updated_at=? WHERE id=?",
+                (new_note_id, _fmt_dt(_utcnow()), suggestion_id),
+            )
+
     def list_suggestions(
         self, *, project_id: int | None = None, mr_iid: int | None = None,
         state: str | None = None, since: str | None = None,

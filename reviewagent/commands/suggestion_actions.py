@@ -260,6 +260,48 @@ def process_dismiss(
     return {"action": "dismissed", "reason": reason}
 
 
+# ---------- /adopt 内置辅助: note_id 短重试 + file:line 兜底 (Fix C) ----------
+_ADOPT_LOOKUP_RETRY_DELAYS = (0.0, 0.25, 0.5)
+
+
+def _lookup_suggestion_with_retry(
+    store,
+    *,
+    suggestion_note_id: str,
+    file_path: str = "",
+    target_line: int = 0,
+    project_id: int,
+    mr_iid: int,
+):
+    """按 note_id 查, 找不到重试一次, 最后按 file:line 兜底.
+
+    Returns: 命中 suggestion dict, 或 None.
+    总耗时上限 0.75s, 不阻塞 RQ job 太久.
+    """
+    for delay in _ADOPT_LOOKUP_RETRY_DELAYS:
+        if delay > 0:
+            import time as _t
+            _t.sleep(delay)
+        sug = store.get_suggestion_by_note_id(suggestion_note_id)
+        if sug is not None:
+            return sug
+
+    if file_path and target_line > 0:
+        sug = store.find_open_suggestion_by_line(
+            project_id=project_id, mr_iid=mr_iid,
+            file_path=file_path, target_line=target_line,
+            window=3,
+        )
+        if sug is not None:
+            logger.info(
+                "/adopt: note_id miss but file:line hit ({}, L{}, suggestion.id={}); falling back",
+                file_path, target_line, sug.get("id"),
+            )
+            return sug
+
+    return None
+
+
 def process_adopt(
     *,
     project_id: int,
@@ -267,6 +309,8 @@ def process_adopt(
     suggestion_note_id: str,
     actor_username: str,
     reason: str,
+    file_path: str = "",
+    target_line: int = 0,
 ) -> dict[str, Any]:
     """处理 /adopt 命令.
 
@@ -275,14 +319,18 @@ def process_adopt(
     gl = GitLabClient()
     store = get_store()
 
-    # 1. 找 suggestion 记录
-    sug = store.get_suggestion_by_note_id(suggestion_note_id)
+    # 1. 找 suggestion 记录 (重试 1 次, file:line 兜底 — 见 _lookup_suggestion_with_retry)
+    sug = _lookup_suggestion_with_retry(
+        store, suggestion_note_id=suggestion_note_id,
+        file_path=file_path, target_line=target_line,
+        project_id=project_id, mr_iid=mr_iid,
+    )
     if sug is None:
-        # 没找到 = improve 没记录过这条 suggestion (可能是历史的)
+        # 真没找到 — 历史 MR / 跨 project 数据 / 人工发的 note 等
         # 仍然尝试 resolve (让用户至少能看到反馈)
         logger.info(
-            "/adopt: no suggestion record for note_id={}, allowing resolve anyway",
-            suggestion_note_id,
+            "/adopt: no suggestion record for note_id={} file={} line={}, allowing resolve anyway",
+            suggestion_note_id, file_path or "-", target_line or 0,
         )
         gl.resolve_discussion(project_id, mr_iid, suggestion_note_id)
         gl.reply_to_discussion(
@@ -290,6 +338,17 @@ def process_adopt(
             "✅ 已采纳建议 (无历史记录, 跳过验证)。",
         )
         return {"action": "adopted-unchecked", "reason": "no_record"}
+
+    # 命中 file:line 兜底 (note_id 没找到但 file:line 命中) → 同步把真实 note_id 回填
+    if sug.get("note_id") != suggestion_note_id:
+        try:
+            store.update_suggestion_note_id(sug["id"], suggestion_note_id)
+            logger.info(
+                "/adopt: backfilled note_id suggestion.id={} old={} new={}",
+                sug["id"], sug.get("note_id"), suggestion_note_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("/adopt backfill note_id failed: {}", e)
 
     # 2. 检查 suggestion 状态
     #    state=applied/dismissed: 之前已被处理过 (auto_detect 或用户 /adopt / /dismiss).

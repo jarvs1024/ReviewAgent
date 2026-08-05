@@ -401,7 +401,7 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
             return {"status": "ignored", "reason": f"{action}_requires_diffnote"}
         if locks.should_skip_cooldown(note.project_id, note.mr_iid, action):
             return {"status": "skipped", "reason": "cooldown"}
-        # 入队
+        # 入队 (带 file_path/target_line 让 process_adopt 在 note_id 未建库时 fallback)
         from reviewagent.workers.tasks import enqueue_suggestion_action
         job_id = enqueue_suggestion_action(
             action=action,
@@ -410,6 +410,8 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
             suggestion_note_id=note.discussion_id,
             actor_username=note.actor_username,
             reason=reason,
+            file_path=note.diff_file or "",
+            target_line=int(note.diff_line) if note.diff_line else 0,
         )
         logger.info(
             "webhook.queued action={} project={} mr={} discussion={} job={}",
