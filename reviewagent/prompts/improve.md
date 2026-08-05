@@ -115,13 +115,13 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 **总检视策略**：本次检视按 **跨文件影响 → SSD 自定义规则 → 通用规则** 顺序执行，
 跨文件影响类问题优先级最高（caller 不同步 / 引用方失配通常不在 R-XXX 19 类里）。
 
-### 🟠 优先 1 — 跨文件影响分析 (P1)
+### 🔴 优先 1 — 跨文件影响分析 (P1)
 
 **已在 prompt 顶部完成**：见 `## 跨文件影响分析` 段。命中 caller 不同步 / 引用方失配 / schema 漂移 / import 路径陈旧 等问题 →
 产 suggestion, `label: cross-file impact`, `rationale` 以 `R-OTHER-IMPACT:<描述>` 开头。
 **跨文件影响类问题不要求先命中 R-XXX 19 类**。
 
-### 🔴 优先 2 — SSD 自定义规则 (项目方定义)
+### 🟠  优先 2 — SSD 自定义规则 (项目方定义)
 
 如果 user message 中包含 `<instruction_files>` 块（即仓库的 AGENTS.md / `.agents/rules/` 下的 SSD 规则文件），
 **先**逐条扫描这些规则，命中即产 suggestion，并在 `rationale` 中引用规则键（如 `SSD-RULE-NO-LOG-EXC`）。
