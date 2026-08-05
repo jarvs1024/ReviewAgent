@@ -263,6 +263,17 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
         # 格式化为 "名字@工号"
         actor_name = (payload.get("user_name") or "").strip()
         actor = f"{actor_name}@{actor}" if actor_name and actor else actor
+
+        # upsert MR 元信息到 telemetry (push hook 路径之前缺失这一步)
+        # GitLab API 返回的 mr dict 含 created_at/updated_at/merged_at, 比 webhook 更完整
+        try:
+            from reviewagent.telemetry.models import MRRecord
+            from reviewagent.telemetry.store import get_store
+            record = MRRecord.from_gitlab(mr)
+            get_store().upsert_mr(record)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("push.mr_upsert failed (non-fatal) project={} mr={}: {}", project_id, mr_iid, e)
+
         if locks.should_skip_cooldown(project_id, mr_iid, config.push_commands[0]):
             continue
         # push event 也可能隐含 user 改了代码 (手动 apply / 直接改源) —
