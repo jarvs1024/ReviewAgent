@@ -676,6 +676,49 @@ class Store:
                  note_id),
             )
 
+    def supersede_stale_open_suggestions(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+        current_head_sha: str,
+    ) -> list[str]:
+        """把该 MR 上 head_sha != current_head_sha 的全部 state=open suggestions
+        标记为 'superseded'.
+
+        Why:
+            用户 UI Apply suggestion / 新 push 后 head_sha 变化, 老 suggestions
+            的 inline 行号 / 上下文可能已不再有效. 把它们标 superseded 而不是
+            留 state=open, 避免:
+              - /adopt 误以为这行还待应用, 触发 reconcile 失败
+              - 前端 V{N} / 列表里看到一堆"仍 open"但实际已 outdated 的提示
+              - 后续 improve 的 dedup_at_line 把它们当作"已发过"而漏掉新 bug
+
+        Returns:
+            superseded note_id 列表 (用于发一次性合并通知).
+
+        边界: head_sha 为空时不操作 (前置校验失败的情况).
+        """
+        if not current_head_sha:
+            return []
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT note_id FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? AND state='open' "
+                "AND head_sha != ?",
+                (project_id, mr_iid, current_head_sha),
+            ).fetchall()
+            note_ids = [str(r["note_id"]) for r in rows]
+            if not note_ids:
+                return []
+            # 批量更新: 按 note_id 逐条 update (note_id 是字符串 PK-ish, 写 IN 可能超长)
+            conn.executemany(
+                "UPDATE suggestions SET state='superseded', updated_at=? "
+                "WHERE note_id=? AND state='open'",
+                [(_fmt_dt(_utcnow()), nid) for nid in note_ids],
+            )
+            return note_ids
+
     def list_suggestions(
         self, *, project_id: int | None = None, mr_iid: int | None = None,
         state: str | None = None, since: str | None = None,

@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from reviewagent.logging_setup import logger
+from reviewagent.metrics import inc as _metric_inc
 from reviewagent.webhook.auth import verify_webhook_token
 from reviewagent.webhook.locks import locks
 from reviewagent.webhook.parsers import (
@@ -36,6 +37,7 @@ async def webhook(request: Request) -> dict:
     from reviewagent.workers.tasks import enqueue_mr_chain, enqueue_command_from_note
 
     logger.info("webhook.received object_kind={} event_type={}", object_kind, payload.get("event_type", ""))
+    _metric_inc("reviewagent_webhook_received_total", object_kind=object_kind or "unknown")
 
     if object_kind in ("merge_request", "push"):
         return await _handle_code_change(payload, object_kind, enqueue_mr_chain)
@@ -43,6 +45,7 @@ async def webhook(request: Request) -> dict:
         return await _handle_note_hook(payload, enqueue_command_from_note)
 
     logger.info("webhook.ignored object_kind={}", object_kind)
+    _metric_inc("reviewagent_webhook_skipped_total", reason="unknown_object_kind")
     return {"status": "ignored", "object_kind": object_kind}
 
 
@@ -91,6 +94,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
     # 1. bot 自我识别
     if locks.is_bot(mr.actor_username):
         logger.info("webhook.skip bot_self project={} mr={}", mr.project_id, mr.mr_iid)
+        _metric_inc("reviewagent_webhook_skipped_total", reason="bot_self_trigger")
         return {"status": "skipped", "reason": "bot_self_trigger"}
 
     # 2. 始终 upsert MR 元信息 (state/merged_at 都更新) — 确保 merge/close 事件被记录
@@ -102,6 +106,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
     # 3. MR 状态：仅 opened 触发 review chain
     if mr.state and mr.state not in ("opened",):
         logger.info("webhook.skip state={} project={} mr={}", mr.state, mr.project_id, mr.mr_iid)
+        _metric_inc("reviewagent_webhook_skipped_total", reason=f"state_{mr.state}")
         return {"status": "skipped", "reason": f"state={mr.state}", "note": "state_updated"}
 
     # 4. 处理不同 action
@@ -110,6 +115,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         if not locks.check_diff_head_changed(mr.project_id, mr.mr_iid, mr.head_sha):
             logger.info("webhook.skip action=update (no new commit) project={} mr={} head_sha={!r}",
                         mr.project_id, mr.mr_iid, mr.head_sha)
+            _metric_inc("reviewagent_webhook_skipped_total", reason="no_new_commit")
             return {"status": "skipped", "reason": "action=update no new commit"}
         logger.info("webhook.action=update new commit project={} mr={} head_sha={}",
                     mr.project_id, mr.mr_iid, mr.head_sha)
@@ -122,13 +128,51 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                 "webhook.skip action={} (no new commit) project={} mr={} head_sha={!r}",
                 mr.action, mr.project_id, mr.mr_iid, mr.head_sha,
             )
+            _metric_inc("reviewagent_webhook_skipped_total", reason=f"action_{mr.action}_same_sha")
             return {"status": "skipped", "reason": f"action={mr.action} same sha"}
         commands = config.pr_commands if object_kind == "merge_request" else config.push_commands
     else:
         logger.info("webhook.skip action={} project={} mr={}", mr.action, mr.project_id, mr.mr_iid)
+        _metric_inc("reviewagent_webhook_skipped_total", reason=f"action_{mr.action}")
         return {"status": "skipped", "reason": f"action={mr.action}"}
 
-    # 5. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
+    # 5a. head_sha 变化时 — 先把 head_sha != current 的 state=open suggestions 标 superseded
+    #     (避免老 apply 建议在新一轮检视里仍被当作"未应用"误报)
+    # Why: UI Apply suggestion / 新 push 都改 head_sha, 老 suggestions 的
+    #      行号 / 上下文可能已失效, 留着 state=open 会:
+    #        - 前端 V{N} 列表里看到一堆"仍 open"但实际已 outdated
+    #        - dedup_at_line 把它们当"已发过"而漏掉新 bug
+    #        - /adopt 时跟新建议互相干扰
+    # 注: 只标状态, 不删 GitLab note (note 仍是审计轨迹; 历史可查).
+    try:
+        from reviewagent.telemetry.store import get_store
+        superseded_note_ids = get_store().supersede_stale_open_suggestions(
+            project_id=mr.project_id,
+            mr_iid=mr.mr_iid,
+            current_head_sha=mr.head_sha,
+        )
+        if superseded_note_ids:
+            try:
+                _metric_inc(
+                    "reviewagent_suggestion_supersede_total",
+                    amount=len(superseded_note_ids),
+                    project_id=str(mr.project_id),
+                    mr_iid=str(mr.mr_iid),
+                )
+            except Exception:
+                pass
+            logger.info(
+                "webhook.supersede_stale project={} mr={} current_head={} count={} note_ids={}",
+                mr.project_id, mr.mr_iid, mr.head_sha[:8], len(superseded_note_ids),
+                ",".join(superseded_note_ids[:5]) + (" ..." if len(superseded_note_ids) > 5 else ""),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "webhook.supersede_stale failed (non-fatal) project={} mr={}: {}",
+            mr.project_id, mr.mr_iid, e,
+        )
+
+    # 5b. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
     # Why: 用户在 GitLab UI 点 Apply suggestion 后, 代码会变但不会触发
     #      note 事件, 之前的 /adopt 处理就跑了. 这里在 head_sha 变时
     #      主动探测所有 open suggestions, 把已被 UI apply 的转 state=applied.
@@ -214,6 +258,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
     first_cmd = commands[0]
     if locks.should_skip_cooldown(mr.project_id, mr.mr_iid, first_cmd):
         logger.info("webhook.skip cooldown project={} mr={} cmd={}", mr.project_id, mr.mr_iid, first_cmd)
+        _metric_inc("reviewagent_webhook_skipped_total", reason="cooldown")
         return {"status": "skipped", "reason": "cooldown"}
 
     # 7. 入队命令链
@@ -224,6 +269,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         triggered_by="webhook",
         actor_username=mr.actor_username,
     )
+    _metric_inc("reviewagent_chain_enqueued_total", source="mr_webhook", project_id=str(mr.project_id), mr_iid=str(mr.mr_iid))
     logger.info("webhook.queued commands={} project={} mr={} jobs={}", list(commands), mr.project_id, mr.mr_iid, job_ids)
     return {"status": "queued", "commands": list(commands), "job_ids": job_ids}
 
@@ -316,6 +362,7 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
         return {"status": "ignored", "reason": "not_mr_note"}
 
     if locks.is_bot(note.actor_username):
+        _metric_inc("reviewagent_webhook_skipped_total", reason="bot_self_trigger_note")
         return {"status": "skipped", "reason": "bot_self_trigger"}
 
     # GitLab system DiffNote: 用户在 UI 点击 "Apply suggestion" 时, GitLab 会发一条
@@ -375,6 +422,7 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
         return {"status": "ignored", "reason": "no_command"}
 
     if locks.should_skip_cooldown(note.project_id, note.mr_iid, cmd):
+        _metric_inc("reviewagent_webhook_skipped_total", reason="cooldown_note")
         return {"status": "skipped", "reason": "cooldown"}
 
     job_id = enqueue_command_from_note(

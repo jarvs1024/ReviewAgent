@@ -40,6 +40,14 @@ def get_client() -> BaseLLMProvider:
         raise ValueError(
             f"unknown LLM_PROVIDER={name!r}; expected 'opencode' or 'qodercli'"
         )
+
+    # C3: provider init 计入 metric (用于对比 opencode vs qodercli 流量比例)
+    try:
+        from reviewagent.metrics import inc as _metric_inc
+        _metric_inc("reviewagent_llm_provider_initialized_total", provider=name)
+    except Exception:
+        pass
+
     return _client
 
 

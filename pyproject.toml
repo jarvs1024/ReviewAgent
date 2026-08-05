@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "fakeredis[lua]>=2.20",
     "ruff>=0.6",
 ]
 
