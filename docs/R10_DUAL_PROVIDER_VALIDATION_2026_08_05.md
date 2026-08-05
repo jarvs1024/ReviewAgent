@@ -75,7 +75,7 @@ DeepSeek-V4-Flash 在 qodercli subprocess 模式下输出 2 类异常：
 
 ## 已知保留项
 
-- `QODERCLI_DRIVER=acp` 代码保留但不启用（upstream stdin hang，未修）。
+- ACP driver 代码 2026-08-05 已彻底删除（详见 `docs/LLM_PROVIDER_ADAPTER.md` v2→v3 章节）。
 - `GITLAB_BOT_USERNAME=non-existent-bot-marker-2026-08-05` 是临时占位 marker，绕过 webhook `bot_self` skip；建议下周还原到 `review-bot-v2`。
 - `pre-existing failure: tests/test_improve_alignment.py::test_build_summary_v2_version_increments_per_run` 与本次改动无关，保留。
 

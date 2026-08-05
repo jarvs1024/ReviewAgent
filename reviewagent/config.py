@@ -49,14 +49,8 @@ class Config:
     qodercli_timeout: int = 600             # subprocess 默认超时（秒）
     # ---- qodercli driver ----
     # subprocess 是当前唯一启用路径；ACP 代码保留用于上游 stdin hang 修复后的复测.
-    qodercli_driver: str = "subprocess"        # "subprocess" only — ACP path hangs on stdin (2026-08-04 run 577 验证). "acp" 保留代码但默认不启用.
-    qodercli_acp_extra_args: list[str] = field(default_factory=list)  # 透传 --acp 之后的额外参数
     qodercli_permission_mode: str = ""        # Headless --permission-mode (accept_edits / bypass_permissions / dont_ask / auto). 空字符串 = 不传.
     qodercli_max_turns: int = 0               # Headless --max-turns 上限. 0 = 不传 (用 qodercli 默认).
-    qodercli_max_concurrent_sessions: int = 4   # 同 ACP 进程内 session 并发上限 (semaphore)
-    qodercli_queue_wait_timeout: int = 120      # 拿不到 semaphore 时等位超时 (秒)
-    qodercli_session_reuse_window: int = 300    # 同一 agent 复用同一 sessionId 的窗口 (秒)
-    qodercli_session_timeout: int = 540         # 单 session/prompt 超时 (秒)
 
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
@@ -137,12 +131,6 @@ class Config:
             qodercli_js_path=_env("QODERCLI_JS_PATH", ""),
             qodercli_model=_env("QODERCLI_MODEL", "DeepSeek-V4-Flash"),
             qodercli_timeout=int(_env("QODERCLI_TIMEOUT", "600")),
-            qodercli_driver=_env("QODERCLI_DRIVER", "subprocess"),
-            qodercli_acp_extra_args=[s for s in _env("QODERCLI_ACP_EXTRA_ARGS", "").split() if s],
-            qodercli_max_concurrent_sessions=int(_env("QODERCLI_MAX_CONCURRENT_SESSIONS", "4")),
-            qodercli_queue_wait_timeout=int(_env("QODERCLI_QUEUE_WAIT_TIMEOUT", "120")),
-            qodercli_session_reuse_window=int(_env("QODERCLI_SESSION_REUSE_WINDOW", "300")),
-            qodercli_session_timeout=int(_env("QODERCLI_SESSION_TIMEOUT", "540")),
             qodercli_permission_mode=_env("QODERCLI_PERMISSION_MODE", ""),
             qodercli_max_turns=int(_env("QODERCLI_MAX_TURNS", "0")),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),

@@ -1,4 +1,4 @@
-"""Subprocess fallback path — QODERCLI_DRIVER=subprocess."""
+"""Subprocess driver: run_subprocess parsing + JSON edge cases."""
 
 from __future__ import annotations
 

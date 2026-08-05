@@ -1,10 +1,10 @@
-"""Subprocess fallback for QoderCLIProvider.
+"""Subprocess driver for QoderCLIProvider.
 
-When `QODERCLI_DRIVER=subprocess` (or the legacy constructor
-`QoderCLIProvider(node_path=..., js_path=..., model=...)` is used) we
-revert to the pre-ACP one-shot invocation model. The implementation
-mirrors the original `QoderCLIProvider.run` so the public contract
-(`run -> LLMResult`) and the parsed JSON shape are unchanged.
+The only supported path as of 2026-08-05 (the ACP long-lived driver was
+removed; see :mod:`reviewagent.llm.qodercli_provider`). One ``qodercli -p``
+subprocess is spawned per call. The legacy explicit-arg constructor
+``QoderCLIProvider(node_path=..., js_path=..., model=...)`` continues to
+work as a config-free entry point and still routes through this module.
 
 CLI invocation:
     node {qodercli.js} -p \

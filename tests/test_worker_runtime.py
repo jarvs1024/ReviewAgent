@@ -73,11 +73,18 @@ def test_local_launchers_load_credentials_from_dotenv(script):
         assert f"export {variable}=" not in content
 
 
-def test_example_uses_supported_qodercli_driver():
+def test_example_no_qodercli_acp_references():
+    """The .env.example must not point at the dead ACP driver."""
     content = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for needle in ("QODERCLI_DRIVER", "QODERCLI_ACP_EXTRA_ARGS",
+                   "QODERCLI_MAX_CONCURRENT_SESSIONS", "QODERCLI_SESSION_TIMEOUT"):
+        assert needle not in content, f"{needle} still in .env.example"
 
-    assert "QODERCLI_DRIVER=subprocess" in content
-    assert "QODERCLI_DRIVER=acp" not in content
+
+def test_scripts_do_not_reference_removed_acp_module():
+    for script in ("scripts/restart_local.sh", "scripts/run_worker.sh"):
+        content = (ROOT / script).read_text(encoding="utf-8")
+        assert "qodercli_acp" not in content
 
 
 def test_restart_local_cleans_stale_screen_sessions():

@@ -1,24 +1,9 @@
-"""Shared qodercli exception hierarchy.
+"""qodercli exception hierarchy.
 
-All qodercli-related providers (ACP driver, subprocess driver, future
-drivers) raise exceptions rooted at :class:`QoderCLIError`. This lets
-upstream callers write ``except QoderCLIError`` and catch failures from
-any driver without naming the concrete subclass.
-
-Hierarchy::
-
-    QoderCLIError(RuntimeError)
-    ├── QoderCLITimeoutError    — wall-clock budget exhausted
-    ├── QoderCLIOutputError     — stdout empty / not JSON / agent missing
-    └── QoderCLIACPError        — base for ACP-driver-specific failures
-        ├── QoderCLIAuthError
-        ├── QoderCLITimeoutError (ACP variant; kept for back-compat)
-        └── QoderCLIProtocolError
-
-The ACP variants shadow :class:`QoderCLITimeoutError` on purpose --
-``__init__.py`` re-exports the canonical (provider-level) one. The
-ACP timeout class still inherits via :class:`QoderCLIACPError`, so
-``except QoderCLIError`` catches both.
+Subprocess driver exceptions all derive from :class:`QoderCLIError`,
+so callers can write ``except QoderCLIError`` without naming the
+concrete subclass. As of 2026-08-05 only the subprocess driver remains
+(ACP removed — see ``qodercli_provider`` module docstring).
 """
 
 from __future__ import annotations

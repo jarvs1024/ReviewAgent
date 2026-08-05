@@ -28,9 +28,11 @@ from reviewagent.llm import (
 from reviewagent.llm.opencode_provider import OpencodeProvider
 from reviewagent.llm.qodercli_provider import (
     QoderCLIProvider,
+    QoderCLIOutputError,
+)
+from reviewagent.llm.qodercli_errors import (
     QoderCLIError,
     QoderCLITimeoutError,
-    QoderCLIOutputError,
 )
 from reviewagent.opencode.client import OpencodeResult
 
@@ -304,7 +306,7 @@ class TestQoderCLIProvider:
         def fake_warning(*args, **kwargs):
             warnings.append((args, kwargs))
         monkeypatch.setattr(
-            "reviewagent.llm.qodercli_provider.logger.warning", fake_warning,
+            "reviewagent.llm.qodercli_subprocess.logger.warning", fake_warning,
         )
 
         result = provider.run(agent="improve", prompt="p", workdir=Path("/tmp"))

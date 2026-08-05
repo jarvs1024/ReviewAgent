@@ -381,62 +381,19 @@ bash scripts/services_ops.sh restart
 
 ---
 
-## v2 — QoderCLI ACP driver (2026-08-03)
+## v2→v3 历史：QoderCLI ACP driver (2026-08-03 ~ 2026-08-05)
 
-原可行性验证走一次性 `qodercli -p --append-system-prompt` + `subprocess.run`，在 macOS 上 RQ fork + PIPE 反复卡死，故本次重构为单一 worker 一个常驻 `qodercli --acp` 长连接进程，多 session 并发共享同一连接。详细设计与权衡见 [docs/superpowers/specs/2026-08-03-qodercli-acp-provider-design.md](superpowers/specs/2026-08-03-qodercli-acp-provider-design.md) 与 [实施计划](superpowers/plans/2026-08-03-qodercli-acp-provider.md)。
+v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。实现跑通 162/162 单测，端到端 3 并发 8.82s 返回，但在 MR 176 实战 (run 577) 上游 `qodercli --acp` 把 session/prompt 响应流稳卡 7+ 分钟，CPU 0%，只能 `SIGTERM` 杀掉。
 
-### 关键架构变化
+**结论 (2026-08-05)**：ACP driver 整链从代码库彻底删除，包括：
 
-| 维度 | v1 一次性 subprocess | v2 ACP 长连接 |
-|---|---|---|
-| 进程模型 | 每次任务 fork 一个 `node qodercli.js` 子进程 | 整个 worker 一个 `qodercli --acp` 共享进程 |
-| 通信 | stdin/stdout JSON-RPC 单次往返 | JSON-RPC 2.0 stdin/stdout 长连接 + 通知流 |
-| 并发 | 不支持（一个 worker 一个任务） | `Semaphore(4)` 约束，同步复用 `sessionId` 5 分钟 |
-| Fork hang | macOS RQ 反复卡 | 进程预起，job 路径不再 fork |
-| Subagent 注入 | `--append-system-prompt <prompt>` | `.qoder/agents/<name>.md` + `--setting-sources project,user,local` |
-| 文件附件 | `--attachment <tmp>` | ACP 协议层（待官方支持，临时仍走 `--attachment`） |
+- `reviewagent/llm/qodercli_acp.py`（366 行客户端）
+- `scripts/probe_qodercli_acp.py`（端到端 probe）
+- 5 个 `tests/test_qodercli_acp_*.py`
+- `Config` 字段：`qodercli_driver`、`qodercli_acp_extra_args`、`qodercli_max_concurrent_sessions`、`qodercli_queue_wait_timeout`、`qodercli_session_reuse_window`、`qodercli_session_timeout`
+- 全部 `.env` / `.env.example` 上的 `QODERCLI_DRIVER` / `QODERCLI_ACP_*` / `QODERCLI_SESSION_*` 变量
 
-### 配置参数 (`.env`)
+如果上游修了 stdin hang，新接入应该另起独立模块（不要再 import 这套旧代码），并在复测前先用最小单 case 验证 `agent_message_chunk` 不会卡死。
 
-| Key | Default | 说明 |
-|---|---|---|
-| `QODERCLI_DRIVER` | `acp` | `acp` = 长连接；`subprocess` = 旧一次性路径作 kill-switch |
-| `QODERCLI_MAX_CONCURRENT_SESSIONS` | `4` | 单 ACP 进程内 `session/prompt` 并发上限 (semaphore) |
-| `QODERCLI_QUEUE_WAIT_TIMEOUT` | `120` | 抢不到 semaphore 时等位超时 (秒) |
-| `QODERCLI_SESSION_REUSE_WINDOW` | `300` | 同 agent 复用同一 `sessionId` 窗口 (秒) |
-| `QODERCLI_SESSION_TIMEOUT` | `540` | 单 `session/prompt` 超时 (秒) |
-| `QODERCLI_ACP_EXTRA_ARGS` | (空) | 透传到 `qodercli --acp` 的额外参数 |
-| `QODERCLI_NODE_PATH` | `node` | node 可执行文件绝对路径 |
-| `QODERCLI_JS_PATH` | (auto) | qodercli.js bundle 绝对路径 |
-| `QODERCLI_MODEL` | `DeepSeek-V4-Flash` | 模型名（qodercli 用纯模型名） |
-
-### Subagent 物化
-
-`scripts/sync_qoder_agents.py` 在 worker 启动 + 每次 `QoderCLIProvider.run()` 入口被调用，把 `reviewagent/prompts/<name>.md` 写到 `.qoder/agents/<name>.md` 并把 `tools: {write: false}` 翻译成 `disallowedTools: [Write, Edit, Bash, WebFetch, WebSearch]`。ACP server 通过 `--setting-sources project,user,local` 直接读取这些文件，无需 `--agents` JSON 注入。
-
-### 接口层 (`reviewagent/llm/`)
-
-| 文件 | 角色 |
-|---|---|
-| `base.py` | `BaseLLMProvider` 抽象 + `LLMResult` dataclass |
-| `client.py` | `get_client()` 工厂，按 `config.llm_provider` 选 OpencodeProvider / QoderCLIProvider（单例） |
-| `opencode_provider.py` | opencode 客户端的薄包装 (翻译 `OpencodeResult → LLMResult`) |
-| `qodercli_acp.py` | `QoderCLIACPClient` JSON-RPC 客户端（bootstrap / send / recv / RPC / chat） |
-| `qodercli_provider.py` | 长连接 provider；`__init__(node_path, js_path, model)` 参数化时降级走 subprocess 路径 |
-| `qodercli_subprocess.py` | 一次性 subprocess fallback (`QODERCLI_DRIVER=subprocess` 或 legacy 构造) |
-
-### 回滚
-
-```bash
-# .env
-QODERCLI_DRIVER=subprocess
-# 然后跑
-bash scripts/restart_local.sh
-```
-
-Legacy 一次性路径在 `reviewagent/llm/qodercli_subprocess.py`，对线上透明。
-
-### 验证
-
-- 单测：`pytest tests/test_qodercli_acp_*.py tests/test_qodercli_subprocess_fallback.py tests/test_llm_adapter.py -q` 全绿 (162/162)
-- 端到端 probe：`scripts/probe_qodercli_acp.py` 起真 `qodercli --acp` + 3 并发 session/prompt，8.82s 内全部返回非空 JSON
+回溯阅读：[实施计划](superpowers/plans/2026-08-03-qodercli-acp-provider.md) /
+[设计稿](superpowers/specs/2026-08-03-qodercli-acp-provider-design.md)。
