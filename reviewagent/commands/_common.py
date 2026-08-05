@@ -132,6 +132,12 @@ class BaseCommand:
         prompt_tokens = 0
         completion_tokens = 0
         model_used = self.model
+        _run_finished = False  # finally 安全网: 确保 run 状态一定被标记
+
+        def _mark_finished(**kw):
+            nonlocal _run_finished
+            events.emit_run_finished(run_id, **kw)
+            _run_finished = True
 
         try:
             # 1. MR 元信息
@@ -154,7 +160,7 @@ class BaseCommand:
                     self.COMMAND_NAME, self.project_id, self.mr_iid, mr_state,
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
-                events.emit_run_finished(
+                _mark_finished(
                     run_id, status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
@@ -170,7 +176,7 @@ class BaseCommand:
                     self.COMMAND_NAME, self.project_id, self.mr_iid, reason,
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
-                events.emit_run_finished(
+                _mark_finished(
                     run_id, status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
@@ -201,7 +207,7 @@ class BaseCommand:
                 except GitLabError:
                     pass  # best-effort comment
                 duration_ms = int((time.monotonic() - t0) * 1000)
-                events.emit_run_finished(
+                _mark_finished(
                     run_id, status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
@@ -232,7 +238,7 @@ class BaseCommand:
                     self.COMMAND_NAME, self.project_id, self.mr_iid, fresh_state,
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
-                events.emit_run_finished(
+                _mark_finished(
                     run_id, status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
@@ -272,7 +278,7 @@ class BaseCommand:
 
             # 7. 标记成功
             duration_ms = int((time.monotonic() - t0) * 1000)
-            events.emit_run_finished(
+            _mark_finished(
                 run_id, status="success", model=model_used,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
@@ -287,7 +293,7 @@ class BaseCommand:
 
         except (OpencodeTimeoutError, OpencodeOutputError, OpencodeError) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
-            events.emit_run_finished(
+            _mark_finished(
                 run_id, status="failed", error=f"opencode: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
@@ -295,7 +301,7 @@ class BaseCommand:
             raise BaseCommandError(f"opencode error: {e}") from e
         except (WorkspaceError, GitLabError) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
-            events.emit_run_finished(
+            _mark_finished(
                 run_id, status="failed", error=f"infra: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
@@ -303,13 +309,25 @@ class BaseCommand:
             raise BaseCommandError(f"infra error: {e}") from e
         except Exception as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
-            events.emit_run_finished(
+            _mark_finished(
                 run_id, status="failed", error=f"unexpected: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
             raise
         finally:
+            # 安全网: 进程被 kill / OOM / 未捕获异常 等场景下,
+            # 确保 review_run 不会永远卡在 "running"
+            if not _run_finished:
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                try:
+                    events.emit_run_finished(
+                        run_id, status="failed",
+                        error="process terminated unexpectedly",
+                        duration_ms=duration_ms,
+                    )
+                except Exception:
+                    pass
             if ws is not None:
                 try:
                     cleanup_workspace(ws)
