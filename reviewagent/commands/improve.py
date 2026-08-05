@@ -1232,6 +1232,17 @@ class ImproveCommand(BaseCommand):
         #      现在 summary 只显示本次循环内 inline_posted 的内容, 标题带 V{N} 版本号.
         inline_posted: list[dict[str, Any]] = []
         inline_skipped: list[dict[str, Any]] = []
+
+        # === Head SHA 提前到循环外算一次 (race 修复 Fix A) ===
+        # Why: 之前在 dedup check 和 record_suggestion 里各调一次 _get_mr_head_sha (网络),
+        #      6 条 suggestion 会触发 12 次 get_mr_diff_refs 调用, 单条 200-800ms 网络往返.
+        #      串行叠加后 ~2-9 秒, 这段时间里 _publish 完成 post_mr_discussion 但 SQLite 还没 INSERT,
+        #      webhook 上的 /adopt 抢先查到 get_suggestion_by_note_id 返回 None → 误入 no_record 分支
+        #      ("✅ 已采纳建议 (无历史记录)").
+        # 修复: 进入循环前调用一次 _get_mr_head_sha, 把 head_sha 缓存给所有 iteration 共用.
+        # 边界: _get_mr_head_sha 内部已经 try/except (网络失败返回 None), 不会阻塞发布流程.
+        _publish_head_sha = self._get_mr_head_sha() or ""
+
         for raw in suggestions:
             try:
                 normalised = self._normalise_suggestion(raw)
@@ -1263,7 +1274,7 @@ class ImproveCommand(BaseCommand):
             #      会发到 GitLab 的分支都先查重.
             if decision["action"] in ("post", "general"):
                 _sev = (normalised.get("severity") or "medium").lower()
-                _head_sha = self._get_mr_head_sha() or ""
+                _head_sha = _publish_head_sha  # Fix A: 用循环前缓存值, 避免每条重复网络调用
                 try:
                     from reviewagent.telemetry.store import get_store as _dedup_store
                     _dedup_db = _dedup_store()
@@ -1382,7 +1393,7 @@ class ImproveCommand(BaseCommand):
                     # 记录 suggestion 到 telemetry (用于后续 /adopt 验证 + 跨次去重)
                     try:
                         from reviewagent.telemetry.store import get_store
-                        head_sha = self._get_mr_head_sha() or ""
+                        head_sha = _publish_head_sha  # Fix A: 用循环前缓存值, race window 几乎归零
                         existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
                         # === 跨次去重: file+line+existing_code 的指纹 ===
                         import hashlib as _hl

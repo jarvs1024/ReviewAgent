@@ -107,8 +107,15 @@ def enqueue_suggestion_action(
     suggestion_note_id: str,
     actor_username: str,
     reason: str,
+    file_path: str = "",
+    target_line: int = 0,
 ) -> str:
-    """入队 /adopt 或 /dismiss 命令 (针对单个 inline suggestion)."""
+    """入队 /adopt 或 /dismiss 命令 (针对单个 inline suggestion).
+
+    file_path / target_line: 可选, 给 process_adopt / process_dismiss 用作
+    note_id 查不到的 fallback (Fix C). 当 webhook 的 DiffNote 同时给出
+    position (discussion 是行内 thread 时), 用它们做兜底匹配.
+    """
     if action not in ("adopt", "dismiss"):
         raise ValueError(f"unsupported action: {action}")
     q = get_queue()
@@ -120,6 +127,8 @@ def enqueue_suggestion_action(
         suggestion_note_id=suggestion_note_id,
         actor_username=actor_username,
         reason=reason,
+        file_path=file_path,
+        target_line=target_line,
         job_timeout=120,
         result_ttl=3600,
         failure_ttl=86400,
@@ -317,12 +326,19 @@ def run_suggestion_action(
     suggestion_note_id: str,
     actor_username: str,
     reason: str,
+    file_path: str = "",
+    target_line: int = 0,
 ) -> dict[str, Any]:
-    """处理 /adopt 或 /dismiss — 不调用 opencode, 直接 resolve discussion + record telemetry."""
+    """处理 /adopt 或 /dismiss — 不调用 opencode, 直接 resolve discussion + record telemetry.
+
+    file_path / target_line 透传给 process_*, 让其在 note_id 查不到时降级到
+    file:line 兜底 (Fix C).
+    """
     from reviewagent.commands.suggestion_actions import process_adopt, process_dismiss
     logger.info(
-        "worker.run_suggestion_action action={} project={} mr={} discussion={} actor={}",
+        "worker.run_suggestion_action action={} project={} mr={} discussion={} actor={} file={} line={}",
         action, project_id, mr_iid, suggestion_note_id, actor_username,
+        file_path or "-", target_line or 0,
     )
     if action == "adopt":
         return process_adopt(
@@ -331,6 +347,8 @@ def run_suggestion_action(
             suggestion_note_id=suggestion_note_id,
             actor_username=actor_username,
             reason=reason,
+            file_path=file_path,
+            target_line=target_line,
         )
     elif action == "dismiss":
         return process_dismiss(
@@ -339,6 +357,8 @@ def run_suggestion_action(
             suggestion_note_id=suggestion_note_id,
             actor_username=actor_username,
             reason=reason,
+            file_path=file_path,
+            target_line=target_line,
         )
     else:
         raise NotImplementedError(f"unsupported action: {action}")

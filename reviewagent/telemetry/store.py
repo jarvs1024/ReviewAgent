@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS mr_activity (
     merged_at           TIMESTAMP,
     description_generated INTEGER DEFAULT 0,
     last_review_at      TIMESTAMP,
+    last_activity_at    TIMESTAMP,
     PRIMARY KEY (project_id, mr_iid)
 );
 
@@ -189,6 +190,13 @@ class Store:
             }.items():
                 if column not in run_columns:
                     conn.execute(sql)
+            # mr_activity.last_activity_at — 任何 review / suggestion / action 触发后更新
+            # dashboard 用 "MR 最后活动时间" (区别于 last_review_at = 上次触发 review).
+            mr_columns = {row[1] for row in conn.execute("PRAGMA table_info(mr_activity)")}
+            if "last_activity_at" not in mr_columns:
+                conn.execute("ALTER TABLE mr_activity ADD COLUMN last_activity_at TIMESTAMP")
+                # 新加列, 给所有现存 MR 回填 (MAX 语义, 不会回退)
+                self._backfill_last_activity(conn)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sug_cohort ON suggestions(mr_iid, cohort_key)"
             )
@@ -229,7 +237,6 @@ class Store:
                         target_branch = excluded.target_branch,
                         state = excluded.state,
                         updated_at = excluded.updated_at,
-                        created_at = COALESCE(excluded.created_at, mr_activity.created_at),
                         merged_at = COALESCE(excluded.merged_at, mr_activity.merged_at)
                     """,
                     (
@@ -253,13 +260,82 @@ class Store:
 
     def mark_description_generated(self, project_id: int, mr_iid: int) -> None:
         with self._conn() as conn:
+            now = _fmt_dt(_utcnow())
             conn.execute(
                 """
                 UPDATE mr_activity
-                SET description_generated = 1, last_review_at = ?
+                SET description_generated = 1, last_review_at = ?, last_activity_at = ?
                 WHERE project_id = ? AND mr_iid = ?
                 """,
-                (_fmt_dt(_utcnow()), project_id, mr_iid),
+                (now, now, project_id, mr_iid),
+            )
+
+    def _backfill_last_activity(self, conn) -> None:
+        """给所有 mr_activity 行回填 last_activity_at.
+
+        SQL: last_activity_at = MAX(last_review_at, MAX(suggestions.created_at), MAX(suggestion_actions.created_at))
+        没记录的子查询返回 NULL, SQLite MAX 忽略 NULL. MAX 语义保证不会回退.
+        Migration 中新建列时调用一次; 测试 / 维护脚本可独立调用.
+        """
+        conn.execute(
+            """
+            UPDATE mr_activity SET last_activity_at = (
+                SELECT MAX(t) FROM (
+                    SELECT last_review_at AS t FROM mr_activity m2
+                    WHERE m2.project_id = mr_activity.project_id AND m2.mr_iid = mr_activity.mr_iid
+                    UNION ALL SELECT MAX(created_at) FROM suggestions
+                    WHERE project_id = mr_activity.project_id AND mr_iid = mr_activity.mr_iid
+                    UNION ALL SELECT MAX(created_at) FROM suggestion_actions
+                    WHERE project_id = mr_activity.project_id AND mr_iid = mr_activity.mr_iid
+                )
+            )
+            """
+        )
+
+    def backfill_last_activity_at(self) -> int:
+        """公开入口: 给所有 MR 行回填 last_activity_at. 返回影响行数.
+
+        用于:
+        - 修复历史数据中 last_activity_at 缺失/异常
+        - 测试
+        - 维护脚本 (scripts/ops/)
+        """
+        with self._conn() as conn:
+            self._backfill_last_activity(conn)
+            return conn.execute("SELECT changes()").fetchone()[0]
+
+    def touch_mr_activity(self, project_id: int, mr_iid: int, *, at: str | None = None) -> None:
+        """更新 mr_activity.last_activity_at — 在 suggestion / action / run 完成后调用.
+
+        Why: dashboard 需要 "MR 最后活动时间" (区别于 last_review_at = 上次触发 review).
+        last_activity_at = MAX(自身, 新值, last_review_at, MAX(suggestions.created_at), MAX(suggestion_actions.created_at))
+        用 MAX 保证单调递增: 写入时间早于已存在的 last_activity_at 不会回退.
+        """
+        ts = at or _fmt_dt(_utcnow())
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE mr_activity
+                SET last_activity_at = (
+                    SELECT MAX(t) FROM (
+                        SELECT ? AS t
+                        UNION ALL SELECT last_activity_at FROM mr_activity
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT last_review_at FROM mr_activity
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT MAX(created_at) FROM suggestions
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT MAX(created_at) FROM suggestion_actions
+                            WHERE project_id = ? AND mr_iid = ?
+                    )
+                )
+                WHERE project_id = ? AND mr_iid = ?
+                """,
+                (ts, project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid),
             )
 
     def get_mr(self, project_id: int, mr_iid: int) -> dict | None:
@@ -369,6 +445,7 @@ class Store:
         duration_ms: int = 0,
     ) -> None:
         with self._conn() as conn:
+            now = _fmt_dt(_utcnow())
             conn.execute(
                 """
                 UPDATE review_runs
@@ -378,12 +455,39 @@ class Store:
                 WHERE id = ?
                 """,
                 (
-                    _fmt_dt(_utcnow()), status, error, model,
+                    now, status, error, model,
                     prompt_tokens, completion_tokens,
                     prompt_tokens + completion_tokens, duration_ms,
                     run_id,
                 ),
             )
+            # 同步 touch mr_activity.last_activity_at (按 MAX 取最大, 不会回退到旧时间)
+            row = conn.execute(
+                "SELECT project_id, mr_iid FROM review_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row:
+                pid, mid = row["project_id"], row["mr_iid"]
+                conn.execute(
+                    """
+                    UPDATE mr_activity
+                    SET last_activity_at = (
+                        SELECT MAX(t) FROM (
+                            SELECT ? AS t
+                            UNION ALL SELECT last_activity_at FROM mr_activity
+                                WHERE project_id = ? AND mr_iid = ?
+                            UNION ALL SELECT last_review_at FROM mr_activity
+                                WHERE project_id = ? AND mr_iid = ?
+                            UNION ALL SELECT MAX(created_at) FROM suggestions
+                                WHERE project_id = ? AND mr_iid = ?
+                            UNION ALL SELECT MAX(created_at) FROM suggestion_actions
+                                WHERE project_id = ? AND mr_iid = ?
+                        )
+                    )
+                    WHERE project_id = ? AND mr_iid = ?
+                    """,
+                    (now, pid, mid, pid, mid, pid, mid, pid, mid, pid, mid),
+                )
 
     def save_agent_output_fail(self, text: str, agent: str) -> None:
         """保存 agent 失败时的输出前 500 字符到 agent_failures 表（用于调试）."""
@@ -456,7 +560,33 @@ class Store:
                     _fmt_dt(_utcnow()),
                 ),
             )
-            return int(cur.lastrowid or 0)
+            sug_id = int(cur.lastrowid or 0)
+            # 同步 touch mr_activity.last_activity_at
+            conn.execute(
+                """
+                UPDATE mr_activity
+                SET last_activity_at = (
+                    SELECT MAX(t) FROM (
+                        SELECT ? AS t
+                        UNION ALL SELECT last_activity_at FROM mr_activity
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT last_review_at FROM mr_activity
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT MAX(created_at) FROM suggestions
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT MAX(created_at) FROM suggestion_actions
+                            WHERE project_id = ? AND mr_iid = ?
+                    )
+                )
+                WHERE project_id = ? AND mr_iid = ?
+                """,
+                (_fmt_dt(_utcnow()), project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid),
+            )
+            return sug_id
 
     def suggestion_exists_by_fingerprint(
         self, project_id: int, mr_iid: int, fingerprint: str
@@ -720,6 +850,19 @@ class Store:
             )
             return note_ids
 
+    def update_suggestion_note_id(self, suggestion_id: int, new_note_id: str) -> None:
+        """回填 note_id — Fix C: file:line 兜底命中后, 把真实 GitLab note_id 写回.
+
+        Why: webhook /adopt 来时 improve 的 record_suggestion 还没 INSERT, file:line
+        兜底命中后, 真实 note_id 跟 DB 占位 id 不一致. 这里把真实 note_id 写回,
+        后续 /adopt 直接走 note_id 主路径, 不会再走兜底.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE suggestions SET note_id=?, updated_at=? WHERE id=?",
+                (new_note_id, _fmt_dt(_utcnow()), suggestion_id),
+            )
+
     def list_suggestions(
         self, *, project_id: int | None = None, mr_iid: int | None = None,
         state: str | None = None, since: str | None = None,
@@ -886,7 +1029,33 @@ class Store:
                     _fmt_dt(_utcnow()),
                 ),
             )
-            return int(cur.lastrowid or 0)
+            action_id = int(cur.lastrowid or 0)
+            # 同步 touch mr_activity.last_activity_at
+            conn.execute(
+                """
+                UPDATE mr_activity
+                SET last_activity_at = (
+                    SELECT MAX(t) FROM (
+                        SELECT ? AS t
+                        UNION ALL SELECT last_activity_at FROM mr_activity
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT last_review_at FROM mr_activity
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT MAX(created_at) FROM suggestions
+                            WHERE project_id = ? AND mr_iid = ?
+                        UNION ALL SELECT MAX(created_at) FROM suggestion_actions
+                            WHERE project_id = ? AND mr_iid = ?
+                    )
+                )
+                WHERE project_id = ? AND mr_iid = ?
+                """,
+                (_fmt_dt(_utcnow()), project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid,
+                 project_id, mr_iid),
+            )
+            return action_id
 
     def list_suggestion_actions(
         self,
