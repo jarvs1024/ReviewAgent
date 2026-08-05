@@ -31,6 +31,7 @@ stdout JSON shape (top-level wrapper produced by qodercli):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -48,15 +49,32 @@ from reviewagent.logging_setup import logger
 from reviewagent.prompts import loader
 
 
+def _resolve_script_path() -> str:
+    """Resolve qodercli.js 路径，优先级: 配置 > $(which qodercli) > 空.
+
+    为什么用 readlink: npm global install 通常在 bin/ 放个 shim wrapper,
+    真身在 ../lib/node_modules/@qoder-ai/qodercli/bundle/qodercli.js.
+    """
+    cfg = config.qodercli_js_path.strip() if config.qodercli_js_path else ""
+    if cfg and os.path.isfile(cfg):
+        return cfg
+    wrapper = shutil.which("qodercli")
+    if wrapper:
+        return os.path.realpath(wrapper)
+    return ""
+
+
 def _resolve_paths(
     node: str | None, script: str | None, model: str | None
 ) -> tuple[str, str, str]:
+    """解析 node / qodercli.js / model 路径, 全部支持显式参数 > env > PATH fallback."""
     node = node or config.qodercli_node_path or shutil.which("node") or ""
-    script = script or config.qodercli_js_path
+    script = script or _resolve_script_path()
     model = model or config.qodercli_model
     if not node or not script:
         raise QoderCLIError(
-            "QODERCLI_NODE_PATH / QODERCLI_JS_PATH not configured for subprocess driver"
+            "qodercli subprocess driver requires node + qodercli.js on PATH "
+            "(or set QODERCLI_NODE_PATH / QODERCLI_JS_PATH env)"
         )
     return node, script, model
 
