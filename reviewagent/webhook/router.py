@@ -115,6 +115,14 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                     mr.project_id, mr.mr_iid, mr.head_sha)
         commands = config.push_commands
     elif mr.action in ("open", "reopen"):
+        # open / reopen 也走一次 diff_head check: 首次见 SHA → 写锁 + 触发; 重放同 SHA → 跳过
+        # Why: 之前 open 路径不写 diff_head, 后续 update 重投递会看到 Redis 是空 → 误判为新 commit
+        if not locks.check_diff_head_changed(mr.project_id, mr.mr_iid, mr.head_sha):
+            logger.info(
+                "webhook.skip action={} (no new commit) project={} mr={} head_sha={!r}",
+                mr.action, mr.project_id, mr.mr_iid, mr.head_sha,
+            )
+            return {"status": "skipped", "reason": f"action={mr.action} same sha"}
         commands = config.pr_commands if object_kind == "merge_request" else config.push_commands
     else:
         logger.info("webhook.skip action={} project={} mr={}", mr.action, mr.project_id, mr.mr_iid)
