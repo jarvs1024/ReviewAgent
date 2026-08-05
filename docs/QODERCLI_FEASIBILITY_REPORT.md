@@ -1,5 +1,7 @@
 # qodercli 替换 opencode 可行性验证报告
 
+> **Superseded by** [docs/superpowers/specs/2026-08-03-qodercli-acp-provider-design.md](superpowers/specs/2026-08-03-qodercli-acp-provider-design.md) (2026-08-03). 本报告记录的是一次性 subprocess 方案；线上实现已切换为长连接 ACP driver，详见 [docs/LLM_PROVIDER_ADAPTER.md](../LLM_PROVIDER_ADAPTER.md) 的 v2 段。保留为历史参考。
+
 ## 测试环境
 - **qodercli**: v1.20.1 (npm `@qoder-ai/qodercli`)
 - **调用方式**: 直接用 `node qodercli.js`（绕过 `qodercli.cmd` 的 PATH 问题）

@@ -31,11 +31,14 @@ from reviewagent.git.workspace import (
 )
 from reviewagent.gitlab.client import GitLabError, GitLabClient
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import (
+from reviewagent.llm import (
     OpencodeError,
     OpencodeOutputError,
     OpencodeTimeoutError,
-    client as opencode,
+    QoderCLIError,
+    QoderCLIOutputError,
+    QoderCLITimeoutError,
+    get_client,
 )
 from reviewagent.prompts import loader
 from reviewagent.repo_context import build_repo_context
@@ -105,7 +108,8 @@ class BaseCommand:
 
     def _call_agent(self, ws) -> dict[str, Any]:
         """调 opencode agent，返回解析后的 dict. 子类可覆盖实现并行等策略."""
-        oc_result = opencode.run(
+        client = get_client()
+        oc_result = client.run(
             agent=self.DEFAULT_AGENT,
             prompt=self._build_user_prompt(),
             workdir=ws.worktree,
@@ -134,10 +138,19 @@ class BaseCommand:
         model_used = self.model
         _run_finished = False  # finally 安全网: 确保 run 状态一定被标记
 
-        def _mark_finished(**kw):
+        def _mark_finished(_run_id, **kw):
+            """统一收口 emit_run_finished 调用,带 finished flag 防止 finally 重复触发.
+
+            Args:
+                _run_id: 当前 review_run 的 id (运行时一直是同一个 run_id, 这里保留
+                    作为位置参数以保持调用点 `_mark_finished(run_id, ...)` 不变).
+                **kw: 其余字段 (status, error, prompt_tokens, ...) 透传给 events.
+            """
             nonlocal _run_finished
-            events.emit_run_finished(run_id, **kw)
+            events.emit_run_finished(_run_id, **kw)
             _run_finished = True
+        # 在 try 块前初始化 provider_name, except 块 + finally 都能访问
+        provider_name = getattr(get_client(), "provider_name", "unknown")
 
         try:
             # 1. MR 元信息
@@ -291,14 +304,19 @@ class BaseCommand:
             )
             return result_summary
 
-        except (OpencodeTimeoutError, OpencodeOutputError, OpencodeError) as e:
+        # LLM 适配层异常族 — opencode + qodercli 共 6 个具体类;
+        # 没有公共基类(避免动 reviewagent.opencode.client 的类层级),这里显式列出.
+        except (
+            OpencodeTimeoutError, OpencodeOutputError, OpencodeError,
+            QoderCLITimeoutError, QoderCLIOutputError, QoderCLIError,
+        ) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
-                run_id, status="failed", error=f"opencode: {e}",
+                run_id, status="failed", error=f"{provider_name}: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
-            raise BaseCommandError(f"opencode error: {e}") from e
+            raise BaseCommandError(f"{provider_name} error: {e}") from e
         except (WorkspaceError, GitLabError) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(

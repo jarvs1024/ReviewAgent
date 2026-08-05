@@ -33,7 +33,7 @@ from reviewagent.git.diff_lines import (
 )
 from reviewagent.gitlab.client import GitLabError
 from reviewagent.logging_setup import logger
-from reviewagent.opencode.client import OpencodeOutputError, client as opencode
+from reviewagent.llm import OpencodeOutputError, get_client
 
 
 # Backward-compat re-exports
@@ -94,6 +94,19 @@ class ImproveCommand(BaseCommand):
                 "improve.file_limit project={} mr={} total={} kept={} skipped={}",
                 self.project_id, self.mr_iid, len(all_files), len(files), len(skipped_files),
             )
+            # C1: metrics 记录截断事件
+            from reviewagent.metrics import inc as _metric_inc
+            _metric_inc(
+                "reviewagent_improve_file_limit_total",
+                project_id=str(self.project_id),
+                mr_iid=str(self.mr_iid),
+            )
+            _metric_inc(
+                "reviewagent_improve_files_skipped_total",
+                amount=float(len(skipped_files)),
+                project_id=str(self.project_id),
+                mr_iid=str(self.mr_iid),
+            )
         else:
             files = all_files
             skipped_files = []
@@ -148,7 +161,8 @@ class ImproveCommand(BaseCommand):
             "improve.chunk_start project={} mr={} file={}",
             self.project_id, self.mr_iid, file_path,
         )
-        oc_result = opencode.run(
+        client = get_client()
+        oc_result = client.run(
             agent=self.DEFAULT_AGENT,
             prompt=prompt,
             workdir=ws.worktree,
@@ -574,9 +588,18 @@ class ImproveCommand(BaseCommand):
             if truncated_count > 0:
                 merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
             if skipped_files:
-                merged_summary += f"\n\n> ⚠️ 以下文件因数量超限未检视: {', '.join(skipped_files)}"
+                merged_summary += (
+                    f"\n\n> ⚠️ 因 IMPROVE_MAX_FILES={max_files} 限制, 以下 {len(skipped_files)} 个文件未检视: "
+                    f"{', '.join(skipped_files)}"
+                )
         else:
             merged_summary = "## 改进总览\n\n未发现问题。"
+            # 即使没出建议, 也要告诉用户有文件被截断 (否则静默丢失)
+            if skipped_files:
+                merged_summary += (
+                    f"\n\n> ⚠️ 以下文件因 IMPROVE_MAX_FILES={max_files} 超限未检视: "
+                    f"{', '.join(skipped_files)}"
+                )
 
         return {
             "summary_md": merged_summary,

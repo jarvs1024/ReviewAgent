@@ -235,11 +235,12 @@ class TelemetryCollector:
     ) -> str:
         """调 opencode(agent=weekly_inspection_summary) 生成叙事性检视汇总; 失败返回空串."""
         from reviewagent.config import config
-        from reviewagent.opencode.client import client as opencode
+        from reviewagent.llm import get_client
 
         prompt = self._build_llm_prompt(data, prev_data)
         try:
-            oc_result = opencode.run(
+            client = get_client()
+            oc_result = client.run(
                 agent="weekly_inspection_summary",
                 prompt=prompt,
                 workdir=Path.cwd(),

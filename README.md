@@ -163,8 +163,8 @@ reviewagent/
 | 分组 | 变量 | 说明 |
 |---|---|---|
 | GitLab | `GITLAB_URL` `GITLAB_PERSONAL_ACCESS_TOKEN` `GITLAB_WEBHOOK_SECRET` `GITLAB_BOT_USERNAME` | 必填；PAT 最低 `api` scope |
-| opencode | `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | 默认 `http://localhost:4096`，模型 `minimax/MiniMax-M2.7`；`OPENCODE_TIMEOUT` 默认 900s |
-| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` | 队列名两环境不同（`review`/`review-v2`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`，周报专用、与主队列隔离；`RQ_WORKER_COUNT` 并发 worker 数（默认 3） |
+| opencode | `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | 默认 `http://localhost:4096`，模型 `deepseek/deepseek-v4-flash`；`OPENCODE_TIMEOUT` 默认 900s |
+| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` `RQ_WORKER_CLASS` | 队列名两环境不同（`review`/`review-v2`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数；macOS 使用 `ReviewAgentSpawnWorker` 避免 RQ fork crash |
 | 存储 | `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` | 默认 `./data` |
 | 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过 |
 | 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库读 `AGENTS.md` / `.agents/rules/*.md`；`REPO_CONTEXT_MAX_LINES` 规则文件最大行数（默认 2000） |
@@ -200,8 +200,7 @@ reviewagent/
 
 ## 安全与维护待办
 
-1. **密钥外置（生产前必做）**：`scripts/run_webhook.sh` 与 `scripts/run_worker.sh` 当前**硬编码了真实 GitLab PAT 与 webhook secret**（明文）。应改为从 `.env` 读取（参考 `scripts/run_weekly_report.sh` 的 `source .env` 做法），并把仓库里的明文清掉、轮换密钥。
-   - 另：`docs/DEPLOYMENT.md` 历史里记录的旧 secret（DeepSeek key、`glpat-...`、`414d0c...`）均已废弃，需轮换。
+1. **历史密钥轮换**：启动脚本已统一从 `.env` 读取凭据；Git 历史和 `docs/DEPLOYMENT.md` 中出现过的旧 secret 仍需保持废弃状态。
 2. **opencode 接入 systemd**（86 服务器），避免重启丢失。
 3. **监控告警**与上一步一并考虑。
 4. **多项目扩展**（见路线图）。

@@ -30,19 +30,34 @@ class Config:
     gitlab_pat: str
     gitlab_webhook_secret: str
     gitlab_bot_username: str = "review-agent"
+    gitlab_disable_bot_loop_check: bool = False  # True 则 is_bot() 永远返回 False；测试/临时场景用 (避免 bot 误判)
 
     # ---- opencode ----
     opencode_url: str = "http://localhost:4096"
     opencode_username: str = "opencode"
     opencode_password: str = ""
-    opencode_model: str = "minimax/MiniMax-M2.7"
+    opencode_model: str = "deepseek/deepseek-v4-flash"
     opencode_timeout: int = 900  # opencode HTTP 请求默认超时（秒）
+
+    # ---- LLM Provider 适配层 ----
+    # 通过 LLM_PROVIDER=opencode|qodercli 在两者之间切换；详见 docs/LLM_PROVIDER_ADAPTER.md.
+    llm_provider: str = "opencode"          # "opencode" | "qodercli"
+
+    # ---- qodercli 专属配置 ----
+    qodercli_node_path: str = ""            # node 可执行文件；空则用 shutil.which("node")
+    qodercli_js_path: str = ""              # qodercli.js 绝对路径；空则用 readlink -f $(which qodercli)
+    qodercli_model: str = "DeepSeek-V4-Flash"
+    qodercli_timeout: int = 600             # subprocess 默认超时（秒）
+    # ---- qodercli driver ----
+    # subprocess 是当前唯一启用路径；ACP 代码保留用于上游 stdin hang 修复后的复测.
+    qodercli_permission_mode: str = ""        # Headless --permission-mode (accept_edits / bypass_permissions / dont_ask / auto). 空字符串 = 不传.
+    qodercli_max_turns: int = 0               # Headless --max-turns 上限. 0 = 不传 (用 qodercli 默认).
 
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
     rq_queue_name: str = "review"
     rq_weekly_queue_name: str = "review-weekly"  # 周报专用队列，与 review 命令队列物理隔离
-    rq_worker_timeout: int = 600  # 单任务超时（秒）
+    rq_worker_timeout: int = 1200  # RQ job_timeout（秒），必须 >= max(QODERCLI_TIMEOUT, OPENCODE_TIMEOUT) + 300s buffer，否则 RQ 会 SIGKILL horse 引发 stuck-run
     rq_worker_count: int = 3  # 并发 worker 数
 
     # ---- 命令链（每个 MR 按顺序串行执行）----
@@ -69,7 +84,7 @@ class Config:
 
     # ---- improve 并行 + 限流 ----
     improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
-    improve_max_files: int = 10              # 单次检视最大文件数 (0=不限, 超出跳过)
+    improve_max_files: int = 20              # 单次检视最大文件数 (0=不限, 超出截断并发 warning)
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
     improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
 
@@ -107,15 +122,23 @@ class Config:
             gitlab_pat=_env("GITLAB_PERSONAL_ACCESS_TOKEN", required=True),
             gitlab_webhook_secret=_env("GITLAB_WEBHOOK_SECRET", required=True),
             gitlab_bot_username=_env("GITLAB_BOT_USERNAME", "review-agent"),
+            gitlab_disable_bot_loop_check=_env("GITLAB_DISABLE_BOT_LOOP_CHECK", "false").lower() in ("1", "true", "yes"),
             opencode_url=_env("OPENCODE_URL", "http://localhost:4096"),
             opencode_username=_env("OPENCODE_USERNAME", "opencode"),
             opencode_password=_env("OPENCODE_PASSWORD", ""),
-            opencode_model=_env("OPENCODE_MODEL", "minimax/MiniMax-M2.7"),
+            opencode_model=_env("OPENCODE_MODEL", "deepseek/deepseek-v4-flash"),
             opencode_timeout=int(_env("OPENCODE_TIMEOUT", "900")),
+            llm_provider=_env("LLM_PROVIDER", "opencode"),
+            qodercli_node_path=_env("QODERCLI_NODE_PATH", ""),
+            qodercli_js_path=_env("QODERCLI_JS_PATH", ""),
+            qodercli_model=_env("QODERCLI_MODEL", "DeepSeek-V4-Flash"),
+            qodercli_timeout=int(_env("QODERCLI_TIMEOUT", "600")),
+            qodercli_permission_mode=_env("QODERCLI_PERMISSION_MODE", ""),
+            qodercli_max_turns=int(_env("QODERCLI_MAX_TURNS", "0")),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=rq_queue_name,
             rq_weekly_queue_name=rq_weekly_queue_name,
-            rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "600")),
+            rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "1200")),
             rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
             pr_commands=_env_tuple("PR_COMMANDS", "describe,improve"),
             push_commands=_env_tuple("PUSH_COMMANDS", "describe,improve"),
@@ -130,7 +153,7 @@ class Config:
             rule_key_prefix=_env("RULE_KEY_PREFIX", "SSD"),
             repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "2000")),
             improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
-            improve_max_files=int(_env("IMPROVE_MAX_FILES", "10")),
+            improve_max_files=int(_env("IMPROVE_MAX_FILES", "20")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
             improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
             review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",

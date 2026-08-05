@@ -378,3 +378,22 @@ bash scripts/services_ops.sh restart
 - `reviewagent/opencode/client.py` — 当前 opencode 调用实现
 - `reviewagent/prompts/loader.py` — agent prompt 加载逻辑
 - `reviewagent/commands/_common.py` — 上层调用入口
+
+---
+
+## v2→v3 历史：QoderCLI ACP driver (2026-08-03 ~ 2026-08-05)
+
+v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。实现跑通 162/162 单测，端到端 3 并发 8.82s 返回，但在 MR 176 实战 (run 577) 上游 `qodercli --acp` 把 session/prompt 响应流稳卡 7+ 分钟，CPU 0%，只能 `SIGTERM` 杀掉。
+
+**结论 (2026-08-05)**：ACP driver 整链从代码库彻底删除，包括：
+
+- `reviewagent/llm/qodercli_acp.py`（366 行客户端）
+- `scripts/probe_qodercli_acp.py`（端到端 probe）
+- 5 个 `tests/test_qodercli_acp_*.py`
+- `Config` 字段：`qodercli_driver`、`qodercli_acp_extra_args`、`qodercli_max_concurrent_sessions`、`qodercli_queue_wait_timeout`、`qodercli_session_reuse_window`、`qodercli_session_timeout`
+- 全部 `.env` / `.env.example` 上的 `QODERCLI_DRIVER` / `QODERCLI_ACP_*` / `QODERCLI_SESSION_*` 变量
+
+如果上游修了 stdin hang，新接入应该另起独立模块（不要再 import 这套旧代码），并在复测前先用最小单 case 验证 `agent_message_chunk` 不会卡死。
+
+回溯阅读：[实施计划](superpowers/plans/2026-08-03-qodercli-acp-provider.md) /
+[设计稿](superpowers/specs/2026-08-03-qodercli-acp-provider-design.md)。

@@ -85,6 +85,9 @@ class GitLabClient:
         """拉取 MR 的变更文件列表（结构化数据，含 old/new path / additions / deletions / diff）.
 
         优先用 /changes 端点（单次返回元信息 + diffs），简化逻辑.
+
+        默认过滤掉 deleted_file=True（这些 diff 全是 - 行, 对 improve / describe
+        都没意义, 还会污染 LLM context 触发 false positive).
         """
         try:
             project = self._get_project(project_id)
@@ -93,9 +96,19 @@ class GitLabClient:
             raise GitLabError(f"get_mr_changes failed: {e}") from e
 
         diffs = changes.get("changes", [])
-        logger.info("gitlab.get_mr_changes project={} mr={} files={}",
-                    project_id, mr_iid, len(diffs))
-        return [dict(d) if not isinstance(d, dict) else d for d in diffs]
+        all_count = len(diffs)
+        filtered = [d for d in diffs if not (isinstance(d, dict) and d.get("deleted_file"))]
+        skipped = all_count - len(filtered)
+        if skipped:
+            logger.info(
+                "gitlab.get_mr_changes filtered deleted files project={} mr={} "
+                "all={} kept={} skipped={}",
+                project_id, mr_iid, all_count, len(filtered), skipped,
+            )
+        else:
+            logger.info("gitlab.get_mr_changes project={} mr={} files={}",
+                        project_id, mr_iid, len(filtered))
+        return [dict(d) if not isinstance(d, dict) else d for d in filtered]
 
     def get_mr_diff(self, project_id: int, mr_iid: int) -> str:
         """拉取 MR 的 unified diff（Python 端不解析，原文返回给 agent）."""
