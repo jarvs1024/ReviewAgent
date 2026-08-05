@@ -400,7 +400,9 @@ def run_adopt(mr_iid: int, round_idx: int, log: list[str]) -> FeatureResult:
     if status != 200 or body.get("status") != "queued" or body.get("action") != "adopt":
         return FeatureResult("/adopt", round_idx, target_mr, False,
                               f"webhook status={status} body={body}", log)
-    deadline = time.time() + 120
+    deadline = time.time() + 300
+    # 300s timeout: adopt/dismiss 要过 chain lock + suggestion validation,
+    # 串行 RQ 处理实测比 120s 慢很多 (R12 MR 207 adopt-r1 跑了 ~3min).
     while time.time() < deadline:
         after = get_action_count(target_mr, "adopted")
         if after > before_actions:
@@ -426,7 +428,9 @@ def run_dismiss(mr_iid: int, round_idx: int, log: list[str]) -> FeatureResult:
     if status != 200 or body.get("status") != "queued" or body.get("action") != "dismiss":
         return FeatureResult("/dismiss", round_idx, target_mr, False,
                               f"webhook status={status} body={body}", log)
-    deadline = time.time() + 120
+    deadline = time.time() + 300
+    # 300s timeout: adopt/dismiss 要过 chain lock + suggestion validation,
+    # 串行 RQ 处理实测比 120s 慢很多 (R12 MR 207 adopt-r1 跑了 ~3min).
     while time.time() < deadline:
         after = get_action_count(target_mr, "dismissed")
         if after > before_actions:
