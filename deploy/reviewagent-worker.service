@@ -1,13 +1,18 @@
 [Unit]
-Description=ReviewAgent Weekly Report Enqueue (oneshot)
+Description=ReviewAgent Worker (RQ, main review queue)
 After=network.target redis-server.service
 
 [Service]
-Type=oneshot
+Type=simple
 User=workflow
 WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/workflow/ReviewAgent/.env
-ExecStart=/home/workflow/ReviewAgent/.venv/bin/python /home/workflow/ReviewAgent/scripts/weekly_report.py --enqueue
+ExecStart=/home/workflow/ReviewAgent/.venv/bin/rq worker review --url redis://127.0.0.1:6379/0
+Restart=always
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

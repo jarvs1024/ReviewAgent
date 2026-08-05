@@ -4,7 +4,7 @@ After=network.target redis-server.service
 
 [Service]
 Type=simple
-User=root
+User=workflow
 WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/workflow/ReviewAgent/.env

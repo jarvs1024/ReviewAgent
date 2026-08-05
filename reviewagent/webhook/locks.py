@@ -56,7 +56,13 @@ class MRLockManager:
             return True
 
     def is_bot(self, username: str) -> bool:
-        """判断是否为 bot 自己（防回环）. 支持 '名字@工号' 格式."""
+        """判断是否为 bot 自己 (防回环). 支持 "名字@工号" 格式.
+
+        - GITLAB_DISABLE_BOT_LOOP_CHECK=true → 永远 False（测试/临时场景显式跳过）
+        - 否则按 username @后部分 与 GITLAB_BOT_USERNAME 比对
+        """
+        if config.gitlab_disable_bot_loop_check:
+            return False
         if not username:
             return False
         # 兼容 "中文名字@工号" 格式: 取 @ 后的部分比较

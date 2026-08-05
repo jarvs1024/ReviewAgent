@@ -21,10 +21,7 @@ dependencies = [
     "loguru>=0.7",
     # 提示词 frontmatter
     "python-frontmatter>=1.1",
-    "pyyaml>=6.0",
     # 工具
-    "tenacity>=9.0",
-    "python-dateutil>=2.9",
     # 周报
     "openpyxl>=3.1",
 ]
