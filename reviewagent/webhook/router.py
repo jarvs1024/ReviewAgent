@@ -136,6 +136,33 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         _metric_inc("reviewagent_webhook_skipped_total", reason=f"action_{mr.action}")
         return {"status": "skipped", "reason": f"action={mr.action}"}
 
+    # 5b. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
+    # Why: 用户在 GitLab UI 点 Apply suggestion 后, 代码会变但不会触发
+    #      note 事件, 之前的 /adopt 处理就跑了. 这里在 head_sha 变时
+    #      主动探测所有 open suggestions, 把已被 UI apply 的转 state=applied.
+    # 重要: 必须在 cooldown check 之前, 否则连续 2 次 head_sha 变化
+    #       (21:32 MR update + 21:32:51 再次 MR update) 第二次会被 cooldown 跳过,
+    #       永远不跑 auto_detect_applied → telemetry 看不到 applied 状态.
+    if mr.action == "update":
+        try:
+            from reviewagent.commands.suggestion_actions import auto_detect_applied
+            ad_result = auto_detect_applied(
+                project_id=mr.project_id,
+                mr_iid=mr.mr_iid,
+                head_sha=mr.head_sha,
+                actor_username=mr.actor_username or "auto-detect",
+            )
+            if ad_result.get("applied"):
+                logger.info(
+                    "webhook.auto_detect_applied project={} mr={} applied={}",
+                    mr.project_id, mr.mr_iid, ad_result["applied"],
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "webhook.auto_detect_applied failed (non-fatal) project={} mr={}: {}",
+                mr.project_id, mr.mr_iid, e,
+            )
+
     # 5a. head_sha 变化时 — 先把 head_sha != current 的 state=open suggestions 标 superseded
     #     (避免老 apply 建议在新一轮检视里仍被当作"未应用"误报)
     # Why: UI Apply suggestion / 新 push 都改 head_sha, 老 suggestions 的
@@ -171,33 +198,6 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
             "webhook.supersede_stale failed (non-fatal) project={} mr={}: {}",
             mr.project_id, mr.mr_iid, e,
         )
-
-    # 5b. head_sha 变化时 (UI apply / push) — 先 auto-detect 已应用建议
-    # Why: 用户在 GitLab UI 点 Apply suggestion 后, 代码会变但不会触发
-    #      note 事件, 之前的 /adopt 处理就跑了. 这里在 head_sha 变时
-    #      主动探测所有 open suggestions, 把已被 UI apply 的转 state=applied.
-    # 重要: 必须在 cooldown check 之前, 否则连续 2 次 head_sha 变化
-    #       (21:32 MR update + 21:32:51 再次 MR update) 第二次会被 cooldown 跳过,
-    #       永远不跑 auto_detect_applied → telemetry 看不到 applied 状态.
-    if mr.action == "update":
-        try:
-            from reviewagent.commands.suggestion_actions import auto_detect_applied
-            ad_result = auto_detect_applied(
-                project_id=mr.project_id,
-                mr_iid=mr.mr_iid,
-                head_sha=mr.head_sha,
-                actor_username=mr.actor_username or "auto-detect",
-            )
-            if ad_result.get("applied"):
-                logger.info(
-                    "webhook.auto_detect_applied project={} mr={} applied={}",
-                    mr.project_id, mr.mr_iid, ad_result["applied"],
-                )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "webhook.auto_detect_applied failed (non-fatal) project={} mr={}: {}",
-                mr.project_id, mr.mr_iid, e,
-            )
 
     # 6a. max review calls — 防无限循环
     skip_max, current_count = locks.should_skip_max_review_calls(
