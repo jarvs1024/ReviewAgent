@@ -255,14 +255,24 @@ class MRLockManager:
         """判断是否为 bot 自己 (防回环). 支持 "名字@工号" 格式.
 
         - GITLAB_DISABLE_BOT_LOOP_CHECK=true → 永远 False (测试/临时场景显式跳过)
-        - 否则按 username @后部分 与 GITLAB_BOT_USERNAME 比对
+        - GITLAB_BOT_USERNAME 支持逗号分隔多个别名
+        - 显示名为 "名字@用户名" 时, 两侧任一命中都视为 bot
         """
         if config.gitlab_disable_bot_loop_check:
             return False
         if not username:
             return False
-        bare = username.rsplit("@", 1)[-1] if "@" in username else username
-        return bare.lower() == config.gitlab_bot_username.lower()
+        aliases = {
+            item.strip().lower()
+            for item in config.gitlab_bot_username.split(",")
+            if item.strip()
+        }
+        identities = {
+            item.strip().lower()
+            for item in username.split("@")
+            if item.strip()
+        }
+        return bool(aliases & identities)
 
     # ---------- max_review_calls ----------
     def should_skip_max_review_calls(
