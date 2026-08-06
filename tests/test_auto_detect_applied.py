@@ -56,6 +56,7 @@ def test_changed_target_lines_get_marked_applied(tmp_telemetry):
     _seed_suggestion(s)
 
     gl = MagicMock()
+    gl.is_discussion_resolved.return_value = True
     posted = (
         "def foo():\n"
         "    pass\n"
@@ -96,6 +97,7 @@ def test_unchanged_target_lines_stay_open(tmp_telemetry):
     _seed_suggestion(s)
 
     gl = MagicMock()
+    gl.is_discussion_resolved.return_value = False
     unchanged_file = (
         "def foo():\n"
         "    pass\n"
@@ -129,6 +131,7 @@ def test_missing_file_is_counted_as_error(tmp_telemetry):
     _seed_suggestion(s)
 
     gl = MagicMock()
+    gl.is_discussion_resolved.return_value = True
     gl.get_file_at_sha.return_value = None  # file not found
 
     with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
@@ -153,6 +156,7 @@ def test_non_open_suggestions_are_skipped(tmp_telemetry):
     _seed_suggestion(s, state="dismissed", note_id="dismissed-1")
 
     gl = MagicMock()
+    gl.is_discussion_resolved.return_value = False
     # even if the file changed, dismissed stays dismissed
     gl.get_file_at_sha.return_value = "def foo():\n    pass\n    return 2\n"
 

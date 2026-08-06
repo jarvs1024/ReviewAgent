@@ -312,6 +312,26 @@ class GitLabClient:
             )
             return []
 
+    def is_discussion_resolved(
+        self, project_id: int, mr_iid: int, discussion_id: str
+    ) -> bool | None:
+        """返回 discussion 的 resolved 状态；API 失败时返回 None."""
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            discussion = mr.discussions.get(discussion_id)
+            notes = discussion.attributes.get("notes", []) or []
+            resolvable = [note for note in notes if note.get("resolvable")]
+            if not resolvable:
+                return False
+            return all(bool(note.get("resolved")) for note in resolvable)
+        except gitlab.exceptions.GitlabError as e:
+            logger.warning(
+                "gitlab.is_discussion_resolved failed project={} mr={} discussion={}: {}",
+                project_id, mr_iid, discussion_id, e,
+            )
+            return None
+
     def list_repository_tree(
         self, project_id: int, path: str, ref: str, *, recursive: bool = True
     ) -> list[dict[str, Any]]:

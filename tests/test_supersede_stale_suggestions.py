@@ -162,3 +162,44 @@ def test_supersede_only_open_not_applied(tmp_telemetry):
     states = {r["note_id"]: r["state"] for r in rows}
     assert states["applied-old"] == "applied"
     assert states["dismissed-old"] == "dismissed"
+
+
+@pytest.mark.asyncio
+async def test_update_does_not_supersede_unapplied_open_suggestions(monkeypatch):
+    """A new head must not hide still-unresolved suggestions from pending counts."""
+    from unittest.mock import MagicMock
+    import reviewagent.webhook.router as router
+
+    payload = {
+        "object_kind": "merge_request",
+        "event_type": "merge_request",
+        "project": {"id": 34},
+        "user": {"username": "root"},
+        "object_attributes": {
+            "iid": 234,
+            "action": "update",
+            "state": "opened",
+            "source_branch": "fixture",
+            "target_branch": "main",
+            "last_commit": {"id": "new-head"},
+            "head_sha": "new-head",
+        },
+    }
+    fake_locks = MagicMock()
+    fake_locks.is_bot.return_value = False
+    fake_locks.check_diff_head_changed.return_value = True
+    fake_locks.should_skip_max_review_calls.return_value = (False, 0)
+    fake_locks.should_skip_cooldown.return_value = True
+    monkeypatch.setattr(router, "locks", fake_locks)
+
+    store = MagicMock()
+    monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: store)
+    monkeypatch.setattr(
+        "reviewagent.commands.suggestion_actions.auto_detect_applied",
+        lambda **kwargs: {"scanned": 2, "applied": 1, "unchanged": 1, "errors": 0},
+    )
+
+    result = await router._handle_code_change(payload, "merge_request", MagicMock())
+
+    assert result["status"] == "skipped"
+    store.supersede_stale_open_suggestions.assert_not_called()

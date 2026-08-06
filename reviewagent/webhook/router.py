@@ -163,42 +163,6 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                 mr.project_id, mr.mr_iid, e,
             )
 
-    # 5a. head_sha 变化时 — 先把 head_sha != current 的 state=open suggestions 标 superseded
-    #     (避免老 apply 建议在新一轮检视里仍被当作"未应用"误报)
-    # Why: UI Apply suggestion / 新 push 都改 head_sha, 老 suggestions 的
-    #      行号 / 上下文可能已失效, 留着 state=open 会:
-    #        - 前端 V{N} 列表里看到一堆"仍 open"但实际已 outdated
-    #        - dedup_at_line 把它们当"已发过"而漏掉新 bug
-    #        - /adopt 时跟新建议互相干扰
-    # 注: 只标状态, 不删 GitLab note (note 仍是审计轨迹; 历史可查).
-    try:
-        from reviewagent.telemetry.store import get_store
-        superseded_note_ids = get_store().supersede_stale_open_suggestions(
-            project_id=mr.project_id,
-            mr_iid=mr.mr_iid,
-            current_head_sha=mr.head_sha,
-        )
-        if superseded_note_ids:
-            try:
-                _metric_inc(
-                    "reviewagent_suggestion_supersede_total",
-                    amount=len(superseded_note_ids),
-                    project_id=str(mr.project_id),
-                    mr_iid=str(mr.mr_iid),
-                )
-            except Exception:
-                pass
-            logger.info(
-                "webhook.supersede_stale project={} mr={} current_head={} count={} note_ids={}",
-                mr.project_id, mr.mr_iid, mr.head_sha[:8], len(superseded_note_ids),
-                ",".join(superseded_note_ids[:5]) + (" ..." if len(superseded_note_ids) > 5 else ""),
-            )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "webhook.supersede_stale failed (non-fatal) project={} mr={}: {}",
-            mr.project_id, mr.mr_iid, e,
-        )
-
     # 6a. max review calls — 防无限循环
     skip_max, current_count = locks.should_skip_max_review_calls(
         mr.project_id, mr.mr_iid, commands,

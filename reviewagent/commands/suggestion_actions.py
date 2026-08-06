@@ -754,6 +754,13 @@ def auto_detect_applied(
         if not (note_id and file_path and target_line and existing_code):
             continue
 
+        resolved = gl.is_discussion_resolved(project_id, mr_iid, note_id)
+        if resolved is not True:
+            result["unchanged"] += 1
+            if resolved is None:
+                result["errors"] += 1
+            continue
+
         # 拿当前 head_sha 下的文件内容
         current_content = gl.get_file_at_sha(project_id, file_path, head_sha)
         if current_content is None:
