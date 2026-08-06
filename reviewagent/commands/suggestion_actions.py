@@ -171,6 +171,29 @@ def _extract_identifiers(code: str) -> set[str]:
     return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code)) - _KEYWORDS
 
 
+def _exact_improved_code_near_target(
+    current_content: str,
+    improved_code: str,
+    *,
+    line: int,
+    line_end: int,
+    context_lines: int = 8,
+) -> bool:
+    """检查建议代码是否完整出现在目标行附近，忽略行首尾空白."""
+    improved_lines = [item.strip() for item in improved_code.splitlines() if item.strip()]
+    if not improved_lines:
+        return False
+    current_lines = current_content.splitlines()
+    start = max(0, line - 1 - context_lines)
+    end = min(len(current_lines), line_end + context_lines + len(improved_lines))
+    nearby = [item.strip() for item in current_lines[start:end]]
+    width = len(improved_lines)
+    return any(
+        nearby[index:index + width] == improved_lines
+        for index in range(max(0, len(nearby) - width + 1))
+    )
+
+
 def _token_adoption_match(
     posted_content: str,
     current_content: str,
@@ -755,11 +778,6 @@ def auto_detect_applied(
             continue
 
         resolved = gl.is_discussion_resolved(project_id, mr_iid, note_id)
-        if resolved is not True:
-            result["unchanged"] += 1
-            if resolved is None:
-                result["errors"] += 1
-            continue
 
         # 拿当前 head_sha 下的文件内容
         current_content = gl.get_file_at_sha(project_id, file_path, head_sha)
@@ -780,9 +798,28 @@ def auto_detect_applied(
             project_id, file_path, sug.get("head_sha") or head_sha
         )
 
-        # 比对目标行是否被改
+        sug_improved = (sug.get("improved_code") or "").strip()
+        exact_match = _exact_improved_code_near_target(
+            current_content,
+            sug_improved,
+            line=target_line,
+            line_end=target_line_end,
+        )
+
+        # unresolved discussion 只接受建议代码精确落地，避免把同位置的其它修改误算采纳。
+        if resolved is not True:
+            if not exact_match:
+                result["unchanged"] += 1
+                if resolved is None:
+                    result["errors"] += 1
+                continue
+            changed = True
+        else:
+            changed = exact_match
+
+        # resolved discussion 可兼容等价改写：比对目标行是否被改
         try:
-            if posted_content is not None:
+            if not changed and posted_content is not None:
                 # 用 posted 时代整个文件 + 当前整个文件, _target_region_changed 能正确工作
                 changed = _target_region_changed(
                     posted_content,
@@ -790,7 +827,7 @@ def auto_detect_applied(
                     line=target_line,
                     line_end=target_line_end,
                 )
-            else:
+            elif not changed:
                 # 拿不到 posted 时代文件, fallback 用 existing_code (有局限)
                 changed = _target_region_changed(
                     existing_code,
@@ -809,7 +846,6 @@ def auto_detect_applied(
         # Fallback: 严格 strip 比对失败时, 用 token 重叠判定.
         # 适用: 用户改了格式/空白/或用等效写法但引入的关键标识符仍在目标行附近.
         if not changed:
-            sug_improved = (sug.get("improved_code") or "").strip()
             if sug_improved:
                 try:
                     changed = _token_adoption_match(

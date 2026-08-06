@@ -216,3 +216,52 @@ def test_auto_detect_delete_range_requires_block_removed():
     assert not block_removed, (
         "delete_range 误判: 用户没删 (def probe 仍在), 不应被 auto_detect 标 applied"
     )
+
+
+def test_exact_manual_change_is_applied_even_when_discussion_unresolved(tmp_telemetry):
+    """A committed exact suggestion must count as adopted before /adopt reply."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    store = get_store()
+    _seed_suggestion(store)
+
+    gitlab = MagicMock()
+    gitlab.is_discussion_resolved.return_value = False
+    posted = "def foo():\n    pass\n    return 1\n"
+    current = "def foo():\n    pass\n    return 2\n"
+    gitlab.get_file_at_sha.side_effect = [current, posted]
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gitlab), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=store):
+        result = auto_detect_applied(
+            project_id=34,
+            mr_iid=200,
+            head_sha="newhead",
+            actor_username="root",
+        )
+
+    assert result["applied"] == 1
+    assert store.get_suggestion_by_note_id("note-1")["state"] == "applied"
+
+
+def test_unresolved_unrelated_target_change_stays_open(tmp_telemetry):
+    """An unresolved discussion must not use a loose changed-line signal."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    store = get_store()
+    _seed_suggestion(store)
+
+    gitlab = MagicMock()
+    gitlab.is_discussion_resolved.return_value = False
+    posted = "def foo():\n    pass\n    return 1\n"
+    current = "def foo():\n    pass\n    return calculate_value()\n"
+    gitlab.get_file_at_sha.side_effect = [current, posted]
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gitlab), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=store):
+        result = auto_detect_applied(project_id=34, mr_iid=200, head_sha="newhead")
+
+    assert result["applied"] == 0
+    assert store.get_suggestion_by_note_id("note-1")["state"] == "open"
