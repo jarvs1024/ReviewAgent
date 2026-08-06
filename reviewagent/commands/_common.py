@@ -161,7 +161,7 @@ class BaseCommand:
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 _mark_finished(
-                    run_id, status="skipped", model=model_used,
+                    status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
                 )
@@ -177,7 +177,7 @@ class BaseCommand:
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 _mark_finished(
-                    run_id, status="skipped", model=model_used,
+                    status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
                 )
@@ -208,7 +208,7 @@ class BaseCommand:
                     pass  # best-effort comment
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 _mark_finished(
-                    run_id, status="skipped", model=model_used,
+                    status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
                 )
@@ -239,7 +239,7 @@ class BaseCommand:
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 _mark_finished(
-                    run_id, status="skipped", model=model_used,
+                    status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
                     duration_ms=duration_ms,
                 )
@@ -279,7 +279,7 @@ class BaseCommand:
             # 7. 标记成功
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
-                run_id, status="success", model=model_used,
+                status="success", model=model_used,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
@@ -294,7 +294,7 @@ class BaseCommand:
         except (OpencodeTimeoutError, OpencodeOutputError, OpencodeError) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
-                run_id, status="failed", error=f"opencode: {e}",
+                status="failed", error=f"opencode: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
@@ -302,7 +302,7 @@ class BaseCommand:
         except (WorkspaceError, GitLabError) as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
-                run_id, status="failed", error=f"infra: {e}",
+                status="failed", error=f"infra: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
@@ -310,7 +310,7 @@ class BaseCommand:
         except Exception as e:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
-                run_id, status="failed", error=f"unexpected: {e}",
+                status="failed", error=f"unexpected: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 duration_ms=duration_ms,
             )
