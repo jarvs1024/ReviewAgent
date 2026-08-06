@@ -1282,9 +1282,25 @@ class ImproveCommand(BaseCommand):
                     # 也不应误杀 (例: NO-MUTABLE-DEFAULT L10 vs NO-LOG-EXC L12)
                     _raw_rks = (raw.get("rule_keys") if isinstance(raw, dict) else None)
                     if isinstance(_raw_rks, list):
-                        _dedup_rks = ",".join(str(x) for x in _raw_rks if x)
+                        _dedup_rks_list = [str(x) for x in _raw_rks if x]
                     else:
-                        _dedup_rks = _raw_rks or ""
+                        _dedup_rks_list = []
+                    # === 兜底: LLM 不输出 rule_keys 字段时, 从 rationale/header
+                    #     抽 R-XXX / R-OTHER:* / SSD-RULE-* 前缀, 避免 dedup 退化为
+                    #     纯 (file, line) 兜底而误杀不同规则的建议
+                    #     (MR 239 other.py L4 medium R-OTHER:magic_number
+                    #      被 L2 low SSD-RULE-TYPEHINTS 命中 → skip).
+                    if not _dedup_rks_list:
+                        try:
+                            _dedup_text = (
+                                (normalised.get("rationale") or "")
+                                + "\n"
+                                + (normalised.get("header") or "")
+                            )
+                            _dedup_rks_list = _RULE_REF_REGEX.findall(_dedup_text)
+                        except Exception:
+                            _dedup_rks_list = []
+                    _dedup_rks = ",".join(_dedup_rks_list)
                     if _dedup_db.suggestion_exists_at_line(
                         self.project_id, self.mr_iid, file_path,
                         decision["new_line"], _sev, head_sha=_head_sha,

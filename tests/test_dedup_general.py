@@ -490,3 +490,87 @@ def test_max_review_calls_limit(tmp_telemetry, monkeypatch):
     # 降到 max=5 → 不超限
     skip5, cur5 = locks.should_skip_max_review_calls(34, 167, ("describe", "improve"), max_calls=5)
     assert skip5 is False
+
+
+def test_dedup_falls_back_to_rationale_rule_keys_when_raw_empty(tmp_telemetry):
+    """Regression: dedup 查询时 raw.rule_keys 为空, 应从 normalised.rationale 抽取.
+
+    MR 239 场景: other.py L4 (R-OTHER:magic_number, severity=medium)
+    被 L2 (SSD-RULE-TYPEHINTS, severity=low) 在 line_tolerance=2 范围内
+    命中 → skip_at_line → 资源泄漏建议丢失.
+    修复: raw.rule_keys 为空时, 从 normalised.rationale 用 _RULE_REF_REGEX
+    抽 rule_keys 用于 dedup 查询, 让 L4 的 R-OTHER:magic_number 不与
+    L2 的 SSD-RULE-TYPEHINTS 误命中.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.telemetry.store import get_store
+
+    head_sha = "abcdef01" * 5
+    s = get_store()
+    # Pre-seed: SSD-RULE-TYPEHINTS at L2 (其他规则, low)
+    s.record_suggestion(
+        project_id=34, mr_iid=239, note_id="seed-typehints",
+        file_path="fixtures/qodercli_manual_20260806_232415/other.py",
+        target_line=2, target_line_end=2,
+        existing_code="from __future__ import annotations",
+        improved_code="from __future__ import annotations\nfrom collections.abc import Callable",
+        header="类型注解", label="code quality",
+        severity="low",
+        rule_keys=["SSD-RULE-TYPEHINTS"],
+        fingerprint="tyhintfp01", cohort_key="tyhintco01",
+        severity_source="rule",
+        head_sha=head_sha,
+    )
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute(
+        "UPDATE suggestions SET head_sha=?, state='open' WHERE note_id='seed-typehints'",
+        (head_sha,),
+    )
+    conn.commit()
+    conn.close()
+
+    # 新建议: L4 R-OTHER:magic_number (medium), raw.rule_keys 字段缺失
+    # rationale 里包含 "R-OTHER:magic_number" → 应被抽出
+    new_raw = {
+        "file": "fixtures/qodercli_manual_20260806_232415/other.py",
+        "line": 4,
+        "header": "常量提取",
+        "label": "code quality",
+        "rationale": "R-OTHER:magic_number: 定义具名常量 POLL_INTERVAL_S = 0.619, "
+                     "消除无解释的硬编码间隔",
+        "severity": "medium",
+        "improved_code": "POLL_INTERVAL_S = 0.619\n\ndef poll_ready(check, attempts: int = 4):",
+        "existing_code": "def poll_ready(check, attempts: int = 4):",
+        # 注意: 故意不放 rule_keys, 模拟 LLM 不输出 rule_keys 字段
+    }
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 239
+    cmd.gitlab = MagicMock()
+    cmd.gitlab.post_mr_discussion.return_value = "note-new"
+    cmd.HELP_TEXT_FOOTER = ""
+
+    cmd._normalise_suggestion = lambda r: {
+        "file": r["file"], "new_line": r["line"],
+        "header": r["header"], "label": r["label"],
+        "rationale": r["rationale"], "severity": r["severity"],
+        "improved_code": r["improved_code"],
+        "body": "**b**",
+    }
+    cmd._validate_suggestion = lambda **kw: {"action": "post", "new_line": kw["start_line"]}
+    cmd._get_mr_head_sha = lambda: head_sha
+    cmd._diff_line_map = lambda: {}
+    cmd._read_file_lines = lambda *a, **kw: []
+
+    with patch("reviewagent.telemetry.store.get_store", return_value=s):
+        result = cmd._publish({"summary_md": "", "suggestions": [new_raw]})
+
+    # 修复后: dedup 查询从 rationale 抽到 R-OTHER:magic_number,
+    # 与 seed 的 SSD-RULE-TYPEHINTS 不重叠 → 不命中 → 应正常发布
+    assert result["inline_posted"] == 1, (
+        f"修复后, 从 rationale 抽到 R-OTHER:magic_number 不应被 SSD-RULE-TYPEHINTS 命中 dedup. "
+        f"实际 posted={result['inline_posted']} skipped={result['inline_skipped']}"
+    )
+    assert result["inline_skipped"] == 0
+    cmd.gitlab.post_mr_discussion.assert_called_once()

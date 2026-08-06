@@ -218,3 +218,103 @@ class TestResolveScriptPath:
         msg = str(ei.value)
         assert "PATH" in msg or "env" in msg.lower(), \
             f"error msg should mention PATH/env, got: {msg!r}"
+
+
+def test_subprocess_path_strips_line_number_prefix_from_inner(
+    tmp_path: Path,
+) -> None:
+    """qodercli 偶尔在 stdout 前面给每行加 ``15| def ...`` 行号前缀 (MR 239 core.py bug).
+
+    不剥离则 ``_extract_inner_json`` 拿到的不是 JSON, 整 chunk 解析失败 → 4 条
+    AGENTS / 通用 bug 全丢. 验证剥离后能正常解析为 JSON 对象.
+    """
+    inner = (
+        '15| def collect_name(name: str, names=[]):\n'
+        '16|     names.append(name)\n'
+        '17|     return names\n'
+        '{"summary_md": "x", "suggestions": []}'
+    )
+    fake_proc = MagicMock()
+    fake_proc.stdout = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": inner,
+        "stop_reason": "end_turn",
+        "usage": {},
+    })
+    fake_proc.stderr = ""
+    fake_proc.returncode = 0
+
+    with patch("subprocess.run", return_value=fake_proc):
+        result = run_subprocess(
+            agent="improve",
+            prompt="x",
+            workdir=tmp_path,
+            files=[],
+            timeout=30,
+            tolerant_markdown=False,
+        )
+
+    assert result.data == {"summary_md": "x", "suggestions": []}
+    assert result.provider == "qodercli"
+
+
+def test_subprocess_path_strip_prefix_skipped_when_too_few_lines_match(
+    tmp_path: Path,
+) -> None:
+    """行号前缀只在 ≥50% 行都匹配时才剥离 (避免误删 JSON 里的数字字段).
+
+    场景: JSON 字符串里包含 ``"42"`` 之类的数字字段, 不应被剥离.
+    """
+    inner = json.dumps({"k": 42, "list": [1, 2, 3]})
+    fake_proc = MagicMock()
+    fake_proc.stdout = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": inner,
+        "stop_reason": "end_turn",
+        "usage": {},
+    })
+    fake_proc.stderr = ""
+    fake_proc.returncode = 0
+
+    with patch("subprocess.run", return_value=fake_proc):
+        result = run_subprocess(
+            agent="describe",
+            prompt="x",
+            workdir=tmp_path,
+            files=[],
+            timeout=30,
+            tolerant_markdown=False,
+        )
+
+    assert result.data == {"k": 42, "list": [1, 2, 3]}
+
+
+def test_subprocess_path_strip_prefix_preserves_normal_json_with_md_fence(
+    tmp_path: Path,
+) -> None:
+    """行号前缀剥离不应破坏正常的 markdown 围栏 JSON (deepseek 常见输出)."""
+    inner = '```json\n{"ok": true}\n```'
+    fake_proc = MagicMock()
+    fake_proc.stdout = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "result": inner,
+        "stop_reason": "end_turn",
+        "usage": {},
+    })
+    fake_proc.stderr = ""
+    fake_proc.returncode = 0
+
+    with patch("subprocess.run", return_value=fake_proc):
+        result = run_subprocess(
+            agent="describe",
+            prompt="x",
+            workdir=tmp_path,
+            files=[],
+            timeout=30,
+            tolerant_markdown=False,
+        )
+
+    assert result.data == {"ok": True}

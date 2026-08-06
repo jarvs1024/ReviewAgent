@@ -31,6 +31,7 @@ stdout JSON shape (top-level wrapper produced by qodercli):
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -112,6 +113,42 @@ def _cleanup_attachment(attachment: Path | None) -> None:
         attachment.unlink()
     except OSError:
         pass
+
+
+_LINE_NUMBER_PREFIX = re.compile(r"^\s*\d+\|\s?")
+
+
+def _strip_line_number_prefix(text: str) -> str:
+    """剥离 qodercli 偶发 stdout 行号前缀 (e.g. ``15| def foo():``).
+
+    DeepSeek-V4-Flash 经 qodercli 输出时, 部分 chunk 会把 stdout 当 code-cat
+    展示: 每行前面带 ``<行号>| `` 前缀 (类似 ``15| def collect_name(...)``).
+    这种前缀会污染 ``_extract_inner_json``, 整 chunk 解析失败 → 该文件所有
+    检视建议丢失 (MR 239 core.py 4 条 AGENTS/通用 bug 全丢即为此场景).
+
+    启发式: 至少 50% 行 + >=2 行匹配才执行剥离, 避免误删 JSON 里
+    ``"k": 42`` 这类行首数字字段.
+
+    同时裁掉剥离后 JSON 之前残留的 prose (LLM 偶发把整段文件内容回显后再
+    输出 JSON), 让后续 ``raw_decode`` 能从 leading whitespace 后命中 JSON.
+    """
+    if not text:
+        return text
+    lines = text.split("\n")
+    matched = sum(1 for ln in lines if _LINE_NUMBER_PREFIX.match(ln))
+    if matched < 2 or matched < len(lines) * 0.5:
+        return text
+    stripped = "\n".join(_LINE_NUMBER_PREFIX.sub("", ln) for ln in lines)
+    # 找 JSON 起点 (首个未被引号包裹的 ``{`` 之前必有空白或行尾)
+    first_brace = stripped.find("{")
+    if first_brace <= 0:
+        return stripped
+    # 裁掉 ``{`` 之前的 non-JSON prose. 保守: 只在前面只含 prose-like 字符时裁
+    pre = stripped[:first_brace]
+    if not pre.strip():
+        return stripped
+    # JSON 之前还有 prose 字符 → 截掉 (后续 raw_decode 仍可命中 JSON)
+    return stripped[first_brace:]
 
 
 def _extract_inner_json(text: str) -> object:
@@ -347,7 +384,9 @@ def run_subprocess(
         )
 
     # `result` is a string — could be a JSON-encoded blob or plain markdown.
-    text = _strip_fence(str(inner))
+    # 先剥离偶发的行号前缀 (qodercli 输出形态), 再按 fence / JSON 解析.
+    text = _strip_line_number_prefix(str(inner))
+    text = _strip_fence(text)
     try:
         data = _extract_inner_json(text)
         if not isinstance(data, dict):
