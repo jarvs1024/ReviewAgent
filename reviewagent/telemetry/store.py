@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS suggestion_actions (
     actor_username      TEXT,
     reason              TEXT,
     validation_status   TEXT,                  -- /adopt: ok / target-unchanged / content-unavailable etc.
+    adoption_source     TEXT,                  -- ui_apply / manual_change / adopt_command / unknown
     head_sha_posted     TEXT,                  -- /adopt: suggestion 发布时的 head_sha
     head_sha_current    TEXT,                  -- /adopt: 当前 head_sha
     created_at          TIMESTAMP NOT NULL
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
     head_sha            TEXT NOT NULL,         -- 发布时的 head_sha
     state               TEXT DEFAULT 'open',   -- open / applied / dismissed / superseded
     applied_at          TIMESTAMP,
+    adoption_source     TEXT,                  -- ui_apply / manual_change / adopt_command / unknown
     dismissed_at        TIMESTAMP,
     dismissed_by        TEXT,
     created_at          TIMESTAMP NOT NULL,
@@ -178,6 +180,7 @@ class Store:
                 "severity_source": "ALTER TABLE suggestions ADD COLUMN severity_source TEXT",
                 "label": "ALTER TABLE suggestions ADD COLUMN label TEXT",
                 "posted_at": "ALTER TABLE suggestions ADD COLUMN posted_at TIMESTAMP",
+                "adoption_source": "ALTER TABLE suggestions ADD COLUMN adoption_source TEXT",
             }
             for column, sql in migrations.items():
                 if column not in columns:
@@ -190,6 +193,36 @@ class Store:
             }.items():
                 if column not in run_columns:
                     conn.execute(sql)
+            action_columns = {row[1] for row in conn.execute("PRAGMA table_info(suggestion_actions)")}
+            if "adoption_source" not in action_columns:
+                conn.execute("ALTER TABLE suggestion_actions ADD COLUMN adoption_source TEXT")
+            conn.execute(
+                """
+                UPDATE suggestion_actions
+                SET adoption_source = CASE
+                    WHEN action != 'adopted' THEN NULL
+                    WHEN validation_status = 'gitlab-ui-apply' THEN 'ui_apply'
+                    WHEN validation_status = 'ui-apply' THEN 'ui_apply'
+                    WHEN validation_status = 'ok' THEN 'adopt_command'
+                    ELSE 'unknown'
+                END
+                WHERE adoption_source IS NULL
+                """
+            )
+            conn.execute(
+                """
+                UPDATE suggestions
+                SET adoption_source = COALESCE(
+                    (SELECT sa.adoption_source
+                     FROM suggestion_actions sa
+                     WHERE sa.suggestion_note_id = suggestions.note_id
+                       AND sa.action = 'adopted'
+                     ORDER BY sa.id DESC LIMIT 1),
+                    'unknown'
+                )
+                WHERE state = 'applied' AND adoption_source IS NULL
+                """
+            )
             # mr_activity.last_activity_at — 任何 review / suggestion / action 触发后更新
             # dashboard 用 "MR 最后活动时间" (区别于 last_review_at = 上次触发 review).
             mr_columns = {row[1] for row in conn.execute("PRAGMA table_info(mr_activity)")}
@@ -785,6 +818,7 @@ class Store:
         *,
         actor_username: str | None = None,
         dismissed_reason: str | None = None,
+        adoption_source: str | None = None,
     ) -> None:
         """标记 suggestion 为 applied / dismissed / superseded."""
         with self._conn() as conn:
@@ -793,6 +827,8 @@ class Store:
                 UPDATE suggestions
                 SET state = ?, updated_at = ?,
                     applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END,
+                    adoption_source = CASE WHEN ? = 'applied' AND ? IS NOT NULL
+                                           THEN ? ELSE adoption_source END,
                     dismissed_at = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_at END,
                     dismissed_by = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_by END,
                     dismissed_reason = CASE WHEN ? = 'dismissed' AND ? IS NOT NULL
@@ -801,6 +837,7 @@ class Store:
                 """,
                 (state, _fmt_dt(_utcnow()),
                  state, _fmt_dt(_utcnow()),
+                 state, adoption_source, adoption_source,
                  state, _fmt_dt(_utcnow()),
                  state, actor_username,
                  state, dismissed_reason, dismissed_reason,
@@ -1008,6 +1045,7 @@ class Store:
         actor_username: str | None = None,
         reason: str | None = None,
         validation_status: str | None = None,
+        adoption_source: str | None = None,
         head_sha_posted: str | None = None,
         head_sha_current: str | None = None,
     ) -> int:
@@ -1018,14 +1056,14 @@ class Store:
                 INSERT INTO suggestion_actions (
                     project_id, mr_iid, suggestion_note_id, file_path, target_line,
                     action, actor_username, reason,
-                    validation_status, head_sha_posted, head_sha_current,
+                    validation_status, adoption_source, head_sha_posted, head_sha_current,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id, mr_iid, suggestion_note_id, file_path, target_line,
                     action, actor_username, reason,
-                    validation_status, head_sha_posted, head_sha_current,
+                    validation_status, adoption_source, head_sha_posted, head_sha_current,
                     _fmt_dt(_utcnow()),
                 ),
             )

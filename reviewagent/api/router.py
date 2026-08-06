@@ -21,6 +21,17 @@ from reviewagent.telemetry.store import get_store, _enrich_web_url
 
 router = APIRouter(prefix="/api/v1/telemetry", tags=["telemetry"])
 
+_ADOPTION_SOURCE_LABELS = {
+    "ui_apply": "应用建议",
+    "manual_change": "手动修改",
+    "adopt_command": "/adopt",
+    "unknown": "历史数据",
+}
+
+
+def _adoption_source_label(source: str | None) -> str | None:
+    return _ADOPTION_SOURCE_LABELS.get(source) if source else None
+
 
 def _parse_iso(s: str | None) -> str | None:
     """把 ISO 8601 字符串归一为 SQLite 能比较的 ISO 格式 (含时区)."""
@@ -109,6 +120,9 @@ async def mr_suggestions(
         project_id=project_id, mr_iid=mr_iid, state=state,
         limit=limit, offset=offset,
     )
+    for row in rows:
+        source = row.get("adoption_source")
+        row["adoption_source_label"] = _adoption_source_label(source)
     return {"total": len(rows), "limit": limit, "offset": offset, "suggestions": rows}
 
 

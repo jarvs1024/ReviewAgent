@@ -597,7 +597,8 @@ def process_adopt(
         return {"action": "adopt-failed", "reason": "resolve_failed"}
 
     store.update_suggestion_state(
-        suggestion_note_id, "applied", actor_username=actor_username
+        suggestion_note_id, "applied", actor_username=actor_username,
+        adoption_source="adopt_command",
     )
     store.record_suggestion_action(
         project_id=project_id,
@@ -609,6 +610,7 @@ def process_adopt(
         actor_username=actor_username,
         reason=reason,
         validation_status="ok",
+        adoption_source="adopt_command",
         head_sha_posted=head_sha_posted,
         head_sha_current=head_sha_current,
     )
@@ -709,7 +711,8 @@ def mark_suggestion_applied_by_diff(
         return None
     try:
         store.update_suggestion_state(
-            note_id, "applied", actor_username=actor_username
+            note_id, "applied", actor_username=actor_username,
+            adoption_source="ui_apply",
         )
         store.record_suggestion_action(
             project_id=project_id,
@@ -721,6 +724,7 @@ def mark_suggestion_applied_by_diff(
             actor_username=actor_username,
             reason="adopted via GitLab UI",
             validation_status="gitlab-ui-apply",
+            adoption_source="ui_apply",
         )
     except Exception as e:  # pragma: no cover
         logger.warning("system_applied update failed: {}", e)
@@ -903,8 +907,10 @@ def auto_detect_applied(
         except GitLabError as e:
             logger.warning("auto_detect_applied resolve failed: {}", e)
 
+        adoption_source = "ui_apply" if resolved is True else "manual_change"
         store.update_suggestion_state(
-            note_id, "applied", actor_username=actor_username
+            note_id, "applied", actor_username=actor_username,
+            adoption_source=adoption_source,
         )
         store.record_suggestion_action(
             project_id=project_id,
@@ -916,6 +922,7 @@ def auto_detect_applied(
             actor_username=actor_username,
             reason="auto-detected: user adopted via GitLab UI before reply /adopt",
             validation_status="ui-apply",
+            adoption_source=adoption_source,
             head_sha_posted=sug.get("head_sha"),
             head_sha_current=head_sha,
         )

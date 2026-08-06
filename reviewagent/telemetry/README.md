@@ -34,6 +34,7 @@
 | `existing_code`, `improved_code` | text | 原文 / 修正 (供 /adopt 校验) |
 | `head_sha` | text | 发布时的 MR head_sha |
 | `state` | text | `open` / `applied` / `dismissed` / `superseded` |
+| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` |
 | `applied_at` / `dismissed_at` | timestamp | 状态变更时间 |
 | `dismissed_by` | text | dismiss 操作者 |
 | `dismissed_reason` | text | 用户提供的 dismiss 原因 (供 dashboard 聚合) |

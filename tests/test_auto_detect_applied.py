@@ -243,6 +243,7 @@ def test_exact_manual_change_is_applied_even_when_discussion_unresolved(tmp_tele
 
     assert result["applied"] == 1
     assert store.get_suggestion_by_note_id("note-1")["state"] == "applied"
+    assert store.get_suggestion_by_note_id("note-1")["adoption_source"] == "manual_change"
 
 
 def test_unresolved_unrelated_target_change_stays_open(tmp_telemetry):

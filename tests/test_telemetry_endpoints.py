@@ -83,3 +83,40 @@ def test_dismissals_by_rule_aggregates():
         ]
     finally:
         tmp.cleanup()
+
+
+def test_adoption_source_persists_on_suggestion_and_action():
+    store, tmp = _make_store()
+    try:
+        store.upsert_mr(MRRecord(34, 903, "source", "alice", "f", "m", "opened"))
+        store.record_suggestion(
+            project_id=34, mr_iid=903, note_id="source-1",
+            file_path="a.py", target_line=1, header="h", severity="low", head_sha="sha",
+        )
+        store.update_suggestion_state(
+            "source-1", "applied", actor_username="alice",
+            adoption_source="manual_change",
+        )
+        store.record_suggestion_action(
+            project_id=34, mr_iid=903, suggestion_note_id="source-1",
+            file_path="a.py", target_line=1, action="adopted",
+            actor_username="alice", validation_status="ui-apply",
+            adoption_source="manual_change",
+        )
+
+        suggestion = store.get_suggestion_by_note_id("source-1")
+        actions = store.list_suggestion_actions(project_id=34, mr_iid=903)
+        assert suggestion["adoption_source"] == "manual_change"
+        assert actions[0]["adoption_source"] == "manual_change"
+    finally:
+        tmp.cleanup()
+
+
+def test_adoption_source_labels_are_frontend_ready():
+    from reviewagent.api.router import _adoption_source_label
+
+    assert _adoption_source_label("ui_apply") == "应用建议"
+    assert _adoption_source_label("manual_change") == "手动修改"
+    assert _adoption_source_label("adopt_command") == "/adopt"
+    assert _adoption_source_label("unknown") == "历史数据"
+    assert _adoption_source_label(None) is None
