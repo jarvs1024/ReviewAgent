@@ -356,6 +356,39 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
 
 # ---------- Note Hook ----------
 
+
+def _reply_action_hint(
+    note: "NoteHookPayload",
+    action: str,
+    message: str,
+) -> dict:
+    """当 /adopt /dismiss 找不到目标时, 在 note 下回复一条使用提示.
+
+    Why: 之前静默 ignored (return {"status": "ignored", ...}), 用户看不到反馈, 误以为命令没生效.
+    现在复用 reviewagent.gitlab.client.client 复用一条简短回复, 让用户立刻知道该怎么做.
+    仅当 note 是 thread reply (DiffNote) 时回在 thread 内; MR-level note 时回在 MR 顶层.
+    """
+    try:
+        from reviewagent.gitlab.client import client as gl
+        body = f"⚠️ `{action}` 未生效: {message}"
+        if note.note_type == "DiffNote" and note.discussion_id:
+            gl.reply_to_discussion(
+                project_id=note.project_id,
+                mr_iid=note.mr_iid,
+                discussion_id=note.discussion_id,
+                body=body,
+            )
+        else:
+            gl.post_mr_comment(
+                project_id=note.project_id,
+                mr_iid=note.mr_iid,
+                body=body,
+            )
+    except Exception as e:  # pragma: no cover
+        logger.warning("webhook.action_hint_reply_failed: {}", e)
+    return {"status": "ignored", "reason": f"{action}_no_target", "hint": message[:80]}
+
+
 async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
     note = NoteHookPayload.from_payload(payload)
     if note is None:
@@ -396,9 +429,74 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
     action_info = extract_action(note.note_body)
     if action_info:
         action, reason = action_info
-        # /adopt /dismiss 必须是对 inline suggestion 的回复 (DiffNote + 有 discussion_id)
-        if note.note_type != "DiffNote" or not note.discussion_id:
-            return {"status": "ignored", "reason": f"{action}_requires_diffnote"}
+        # /adopt /dismiss 三种目标场景 (按优先级):
+        #   (a) DiffNote + discussion_id: 线程回复 — 直接绑定到对应 suggestion
+        #   (b) DiffNote 有 file:line 但无 discussion_id: 系统 note 旁路或 webhook 丢包
+        #       → 用 file:line 查 DB 找 open suggestion
+        #   (c) MR-level note (type=None / "DiscussionNote"): 用户在 MR 顶层评论里写了 /dismiss
+        #       → 若 MR 只有 1 条 open suggestion 当作目标, 否则回复让用户指明
+        # 注意: MR-level note 的 webhook 也会带 discussion_id (GitLab 把每个 MR-level note
+        #       视作独立讨论), 但这个 id 对应的不是 inline suggestion thread — 必须忽略.
+        is_thread_reply = note.note_type == "DiffNote"
+        target_disc_id = note.discussion_id if is_thread_reply else ""
+        target_file = (note.diff_file if is_thread_reply else "") or ""
+        target_line = int(note.diff_line) if (is_thread_reply and note.diff_line) else 0
+
+        if not target_disc_id and note.note_type == "DiffNote" and target_file and target_line:
+            # 场景 (b): DiffNote 但 discussion_id 缺失 — 从 DB 找同 file:line 的 open suggestion
+            from reviewagent.telemetry.store import get_store
+            sug = get_store().find_open_suggestion_by_line(
+                project_id=note.project_id, mr_iid=note.mr_iid,
+                file_path=target_file, target_line=target_line,
+            )
+            if sug and sug.get("note_id"):
+                target_disc_id = sug["note_id"]
+                logger.info(
+                    "webhook.{}_by_diffnote_line project={} mr={} file={} line={} suggestion={}",
+                    action, note.project_id, note.mr_iid, target_file, target_line, target_disc_id,
+                )
+            else:
+                logger.info(
+                    "webhook.{}_no_match_diffnote_line project={} mr={} file={} line={}",
+                    action, note.project_id, note.mr_iid, target_file, target_line,
+                )
+                return _reply_action_hint(
+                    note, action,
+                    f"未找到该位置的未处理建议 ({target_file}:{target_line}); "
+                    "该建议可能已被处理或被新 commit 取代。请到具体建议线程内回复 `/dismiss [理由]` 或 `/adopt [说明]`。",
+                )
+
+        if not target_disc_id:
+            # 场景 (c): MR-level note — 尝试定位目标 suggestion
+            from reviewagent.telemetry.store import get_store
+            open_sugs = get_store().list_open_suggestions(
+                project_id=note.project_id, mr_iid=note.mr_iid,
+            )
+            if len(open_sugs) == 1:
+                target_disc_id = open_sugs[0].get("note_id", "") or ""
+                target_file = open_sugs[0].get("file_path", "") or target_file
+                target_line = int(open_sugs[0].get("target_line") or target_line or 0)
+                logger.info(
+                    "webhook.{}_single_open_fallback project={} mr={} suggestion={} file={} line={}",
+                    action, note.project_id, note.mr_iid, target_disc_id, target_file, target_line,
+                )
+            elif len(open_sugs) == 0:
+                return _reply_action_hint(
+                    note, action,
+                    "当前 MR 没有未处理的建议, /dismiss 无目标。请到具体建议线程内回复。",
+                )
+            else:
+                sample = "\n".join(
+                    f"- `{s.get('file_path')}:{s.get('target_line')}` (note_id={s.get('note_id', '')[:8]}...)"
+                    for s in open_sugs[:5]
+                )
+                more = f"\n... 还有 {len(open_sugs) - 5} 条" if len(open_sugs) > 5 else ""
+                return _reply_action_hint(
+                    note, action,
+                    f"当前 MR 有 {len(open_sugs)} 条未处理建议, 无法确定目标:\n{sample}{more}\n"
+                    "请到具体建议线程内回复 `/dismiss [理由]`。",
+                )
+
         if locks.should_skip_cooldown(note.project_id, note.mr_iid, action):
             return {"status": "skipped", "reason": "cooldown"}
         # 入队 (带 file_path/target_line 让 process_adopt 在 note_id 未建库时 fallback)
@@ -407,15 +505,15 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
             action=action,
             project_id=note.project_id,
             mr_iid=note.mr_iid,
-            suggestion_note_id=note.discussion_id,
+            suggestion_note_id=target_disc_id,
             actor_username=note.actor_username,
             reason=reason,
-            file_path=note.diff_file or "",
-            target_line=int(note.diff_line) if note.diff_line else 0,
+            file_path=target_file or "",
+            target_line=target_line or 0,
         )
         logger.info(
-            "webhook.queued action={} project={} mr={} discussion={} job={}",
-            action, note.project_id, note.mr_iid, note.discussion_id, job_id,
+            "webhook.queued action={} project={} mr={} discussion={} file={} line={} job={}",
+            action, note.project_id, note.mr_iid, target_disc_id, target_file, target_line, job_id,
         )
         return {"status": "queued", "action": action, "job_id": job_id}
 

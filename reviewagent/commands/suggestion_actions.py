@@ -23,21 +23,55 @@ from reviewagent.gitlab.client import GitLabError, GitLabClient
 from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
 
-
 # ---------- 解析 ----------
-_DISMISS_RE = re.compile(r"(?<![A-Za-z0-9])dismiss(?![A-Za-z0-9])", re.IGNORECASE)
-_ADOPT_RE = re.compile(r"(?<![A-Za-z0-9])adopt(?![A-Za-z0-9])", re.IGNORECASE)
+# 命令关键字的边界: 前后不允许出现 ASCII 字母/数字/下划线 (下划线算 word char)
+# - 中文 / 空格 / 标点 不在边界排除集里 → `/dismiss测试`, `/dismiss log`, `/dismiss 关闭这条` 都允许
+# - `/dismissed`, `dismissal`, `/dismiss_xxx` 会被拒 (避免误匹配 dismiss 的子串)
+_DISMISS_RE = re.compile(r"(?<![A-Za-z0-9_])dismiss(?![A-Za-z0-9_])", re.IGNORECASE)
+_ADOPT_RE = re.compile(r"(?<![A-Za-z0-9_])adopt(?![A-Za-z0-9_])", re.IGNORECASE)
+# 包裹字符: 开头/结尾的空白 / 斜杠 / 各种标点 / 全角符号 / 破折号 / 下划线 / 括号 都剥掉
 _WRAPPER_STRIP = re.compile(
-    r"^[\s/\\?\"'\u2018\u2019\u201c\u201d,;:。,;:：!\-—_()]+"
-    r"|"
-    r"[\s/\\?\"'\u2018\u2019\u201c\u201d,;:。,;:：!\-—_()]+$"
+    r"""^[\s/\\?\"'\u2018\u2019\u201c\u201d,;:。,;:：!\-—_()【】《》「」『』]+"""
+    r"""|"""
+    r"""[\s/\\?\"'\u2018\u2019\u201c\u201d,;:。,;:：!\-—_()【】《》「」『』]+$"""
 )
+# 内部多空白 → 单空白; 兼容 tab / 全角空格 / 换行
+_INTERNAL_WS = re.compile(r"[\s\u3000]+")
+# 中间散落的 "/" 紧跟空白 (命令语法残留) → 去掉
+_INTERNAL_SLASH = re.compile(r"/[\s\u3000]+|[\s\u3000]+/")
+
+
+def _normalize_reason(text: str) -> str:
+    """归一化 reason: 剥包裹 + 去掉中间散落的 "/" + 压多空白 + strip.
+
+    处理链:
+      - 剥掉开头/结尾的 空白/标点/全角符号 (见 _WRAPPER_STRIP)
+      - 去掉中间紧贴空白的 "/" (命令语法残留, "some random /dismiss foo"
+        → reason 不应含 "random / foo")
+      - 压内部多空白为单空白 (tab / 全角空格 / 换行也兼容)
+      - 最终 strip
+    """
+    if not text:
+        return ""
+    cleaned = _WRAPPER_STRIP.sub("", text)
+    cleaned = _INTERNAL_SLASH.sub(" ", cleaned)
+    cleaned = _INTERNAL_WS.sub(" ", cleaned)
+    return cleaned.strip()
 
 
 def extract_action(body: str) -> tuple[str, str] | None:
     """从 note body 提取 action (adopt/dismiss) 和原因.
 
-    Returns: (\"adopt\"|\"dismiss\", reason) 或 None
+    Returns: ("adopt"|"dismiss", reason) 或 None
+
+    兼容:
+      - `/dismiss` → ("dismiss", "")
+      - `/dismiss log` → ("dismiss", "log")
+      - `/dismiss测试` → ("dismiss", "测试")
+      - `/dismiss   log   reason` → ("dismiss", "log reason")
+      - `/dismiss - 关闭这条理由` → ("dismiss", "关闭这条理由")
+      - `/Dismiss LOG` (大小写不敏感) → ("dismiss", "LOG")
+      - `/dismissed` / `dismissal` 不匹配 (子串被 word boundary 排除)
     """
     if not body:
         return None
@@ -46,13 +80,13 @@ def extract_action(body: str) -> tuple[str, str] | None:
     if m:
         word = m.group(0)
         before, _sep, after = body.partition(word)
-        reason = _WRAPPER_STRIP.sub("", (before + after)).strip()
+        reason = _normalize_reason(before + after)
         return ("adopt", reason)
     m = _DISMISS_RE.search(body)
     if m:
         word = m.group(0)
         before, _sep, after = body.partition(word)
-        reason = _WRAPPER_STRIP.sub("", (before + after)).strip()
+        reason = _normalize_reason(before + after)
         return ("dismiss", reason)
     return None
 
