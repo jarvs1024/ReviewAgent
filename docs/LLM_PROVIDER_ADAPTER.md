@@ -395,5 +395,4 @@ v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。�
 
 如果上游修了 stdin hang，新接入应该另起独立模块（不要再 import 这套旧代码），并在复测前先用最小单 case 验证 `agent_message_chunk` 不会卡死。
 
-回溯阅读：[实施计划](superpowers/plans/2026-08-03-qodercli-acp-provider.md) /
-[设计稿](superpowers/specs/2026-08-03-qodercli-acp-provider-design.md)。
+回溯阅读：本文档即为完整实施记录。
