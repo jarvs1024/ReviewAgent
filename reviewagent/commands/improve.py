@@ -802,169 +802,30 @@ class ImproveCommand(BaseCommand):
             f"{files_text}\n"
         )
 
-    def _build_overview_table(
-        self,
-        inline_posted: list[dict[str, Any]],
-        inline_skipped: list[dict[str, Any]],
-        total_agent_suggestions: int,
-    ) -> str:
-        """生成 MR 顶部检视总览表格 (markdown).
-
-        设计:
-        - 顶部 V{N} 状态汇总 (待处理 / 已采纳 / 已忽略 + 总数)
-        - 中段本次新发现: V{N} 这次发布的 inline suggestions
-        - 下段本次未发布: skipped reasons
-        - 底部: 时间戳 + V 版本号
-
-        数据来源:
-        - 该 MR 全部 suggestions 状态聚合 → suggestion_stats() (open / applied / dismissed)
-        - 本次 V{N} 内 inline_posted → 来自循环变量
-        - 版本号 V{N} → list_runs 计数 (含本次正在跑的)
-
-        与旧 _build_summary_v2 的关系:
-        - 旧: 列表格式 (## 改进总览 V{N} ... 列表项), 仅在 _publish 循环结束后调用一次
-        - 新: 表格格式, _publish 循环每发一条 inline 都会调一次 → 实时刷新
-        - _build_summary_v2 保留为 fallback (循环结束后用于最终一次刷新, 内容跟表格等价)
-        """
-        try:
-            from reviewagent.telemetry.store import get_store
-            store = get_store()
-            stats = store.suggestion_stats(self.project_id, self.mr_iid)
-            runs = store.list_runs(
-                project_id=self.project_id,
-                mr_iid=self.mr_iid,
-                command="improve",
-                limit=1000,
-            )
-            # V{N}: 含本次正在跑, 所以 len(runs) 即当前次数
-            version = len(runs)
-            # 也列一下本次 V{N} 之前的所有 suggestions, 便于合并者一眼看到全部遗留
-            all_sugs = store.list_suggestions(
-                project_id=self.project_id,
-                mr_iid=self.mr_iid,
-                limit=500,
-            )
-        except Exception as e:
-            logger.warning("improve.overview_query failed (non-fatal): {}", e)
-            stats = {"total": 0, "open": 0, "adopted": 0, "dismissed": 0}
-            version = 1
-            all_sugs = []
-
-        total = stats.get("total", 0)
-        open_n = stats.get("open", 0)
-        adopted = stats.get("adopted", 0)
-        dismissed = stats.get("dismissed", 0)
-        skipped_dup = sum(
-            1 for s in inline_skipped
-            if s.get("reason") in ("duplicate_at_line", "duplicate_fingerprint")
-        )
-        skipped_other = len(inline_skipped) - skipped_dup
-
-        lines: list[str] = []
-        lines.append(f"## 检视总览 V{version}")
-        lines.append("")
-        # === 顶部状态汇总表 ===
-        lines.append("| 状态 | 数量 | 备注 |")
-        lines.append("|---|---|---|")
-        lines.append(f"| 总建议 | {total} | 历次累计 |")
-        lines.append(f"| ⏳ 待处理 | {open_n} | open, 未处理 |")
-        lines.append(f"| ✅ 已采纳 | {adopted} | ui_apply / adopt_command / manual_change |")
-        lines.append(f"| ❌ 已忽略 | {dismissed} | 含理由 (dismissed_reason) |")
-        if inline_posted:
-            lines.append(f"| 🆕 本次新发现 | {len(inline_posted)} | V{version} 新增 |")
-        if skipped_dup or skipped_other:
-            detail = []
-            if skipped_dup:
-                detail.append(f"{skipped_dup} 重复")
-            if skipped_other:
-                detail.append(f"{skipped_other} 校验失败")
-            lines.append(f"| ⚠️ 本次未发布 | {len(inline_skipped)} | {', '.join(detail)} |")
-        lines.append("")
-
-        # === 本次新发现明细 ===
-        if inline_posted:
-            lines.append(f"### 本次新发现 (V{version})")
-            lines.append("")
-            lines.append("| 文件 | 行 | 严重度 | 标题 | 规则 |")
-            lines.append("|---|---|---|---|---|")
-            for entry in inline_posted:
-                norm = entry.get("normalised") or {}
-                raw = entry.get("raw") or {}
-                fp = norm.get("file") or raw.get("file", "")
-                # 截短路径: 只显示 fixtures/.../file.py 或 file.py
-                fp_short = fp.split("fixtures/", 1)[-1] if "fixtures/" in fp else fp.split("/")[-1]
-                line = norm.get("new_line") or raw.get("start_line", "")
-                severity = (norm.get("severity") or raw.get("severity") or "medium").lower()
-                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
-                severity_label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(severity, severity.upper())
-                header = (norm.get("header") or raw.get("header") or "建议").strip()
-                rk = (raw.get("rule_keys") if isinstance(raw, dict) else None) or []
-                if isinstance(rk, list):
-                    rk_str = ", ".join(str(x) for x in rk if x) or "—"
-                else:
-                    rk_str = str(rk) if rk else "—"
-                lines.append(
-                    f"| `{fp_short}` | L{line} | {severity_emoji} {severity_label} | {header} | `{rk_str}` |"
-                )
-            lines.append("")
-
-        # === 全部待处理 (含历次, 便于合并者一眼看到全部遗留) ===
-        # 按 file+line 排序, 排除 dismissed/applied/superseded, open 才显示
-        open_rows = [
-            s for s in all_sugs
-            if (s.get("state") or "open") == "open"
-        ]
-        if open_rows and inline_posted:
-            lines.append(f"### 待处理建议 ({open_n})")
-            lines.append("")
-            lines.append("| 文件 | 行 | 严重度 | 标题 | 规则 | 状态 |")
-            lines.append("|---|---|---|---|---|---|")
-            # 按文件 + 行号排序
-            open_rows.sort(key=lambda s: (s.get("file_path") or "", s.get("target_line") or 0))
-            for s in open_rows:
-                fp = s.get("file_path") or ""
-                fp_short = fp.split("fixtures/", 1)[-1] if "fixtures/" in fp else fp.split("/")[-1]
-                line = s.get("target_line") or ""
-                severity = (s.get("severity") or "medium").lower()
-                severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
-                severity_label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(severity, severity.upper())
-                header = (s.get("header") or "建议").strip()
-                rk = s.get("rule_keys") or ""
-                lines.append(
-                    f"| `{fp_short}` | L{line} | {severity_emoji} {severity_label} | {header} | `{rk or '—'}` | ⏳ 待处理 |"
-                )
-            lines.append("")
-
-        # === 本次未发布原因 (简短提示) ===
-        if skipped_dup or skipped_other:
-            lines.append("### 本次未发布")
-            lines.append("")
-            if skipped_dup:
-                lines.append(f"- `{skipped_dup}` 条与历史建议重复 (已在历次检视中发过)")
-            if skipped_other:
-                lines.append(f"- `{skipped_other}` 条建议因行号/校验未通过未发布")
-            lines.append("")
-
-        # === 底部时间戳 ===
-        import datetime as _dt
-        ts = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        lines.append(f"_最后更新: {ts} · V{version}_")
-        lines.append("")
-        return "\n".join(lines)
-
     def _build_summary_placeholder(
         self,
         inline_posted: list[dict[str, Any]],
         inline_skipped: list[dict[str, Any]],
         total_agent_suggestions: int,
     ) -> str:
-        """保留旧 placeholder 接口: 直接走 _build_overview_table 占位.
+        """生成 summary placeholder (在 inline 循环之前先发, 拿到 note_id 后 edit 为完整内容).
 
-        Why: _publish 循环前发 placeholder 时 inline_posted=[] (还没发布),
-        但顶部状态汇总仍能从 telemetry 拿到 (上次 run 的累积). 表格形态跟
-        循环结束后最终刷新保持一致, 避免 placeholder 和最终内容 form factor 突变.
+        placeholder 包含版本号 V{N} 让用户在看到第一条 inline 之前就知道这是第几次检视.
+        内容会在循环结束后被 edit 为 _build_summary_v2 的完整输出.
         """
-        return self._build_overview_table(inline_posted, inline_skipped, total_agent_suggestions)
+        try:
+            from reviewagent.telemetry.store import get_store
+            store = get_store()
+            runs = store.list_runs(
+                project_id=self.project_id,
+                mr_iid=self.mr_iid,
+                command="improve",
+                limit=1000,
+            )
+            version = len(runs)
+        except Exception:
+            version = 1
+        return f"## 改进总览 V{version}\n\n_加载中…_"
 
     @staticmethod
     def _collect_defined_names(
@@ -1338,41 +1199,6 @@ class ImproveCommand(BaseCommand):
             summary += f"\n\n> ⚠️ 另有 {skipped_other} 条因校验未通过未发布"
         return summary
 
-    def _refresh_overview_table(
-        self,
-        top_comment_id: str | None,
-        inline_posted: list[dict[str, Any]],
-        inline_skipped: list[dict[str, Any]],
-        total_agent_suggestions: int,
-    ) -> None:
-        """调 GitLab update_mr_comment 刷新顶部检视总览表格.
-
-        Why: 表格在 _publish 循环里每发一条都会调一次, 让合并者能在
-        GitLab UI 上看到表格随检视实时生长. 失败非致命 (网络/限速),
-        下次刷新会自动覆盖.
-
-        Args:
-            top_comment_id: 循环前 post_mr_comment 拿到的 note_id.
-                为 None 时跳过 (placeholder 创建失败 / dismiss 流程).
-            inline_posted: 当前 run 已发布的 inline suggestions.
-            inline_skipped: 当前 run 被跳过的 suggestions (含 dedup/校验失败).
-            total_agent_suggestions: LLM 输出的总 suggestions 数 (含已发布的).
-        """
-        if not top_comment_id:
-            return
-        try:
-            body = self._build_overview_table(
-                inline_posted, inline_skipped, total_agent_suggestions,
-            )
-            self.gitlab.update_mr_comment(
-                self.project_id, self.mr_iid, top_comment_id, body,
-            )
-        except GitLabError as e:
-            logger.warning(
-                "improve.update_overview_table_failed (non-fatal) project={} mr={} err={}",
-                self.project_id, self.mr_iid, e,
-            )
-
     def _publish(self, agent_result: dict[str, Any]) -> dict[str, Any]:
         summary_md = (agent_result.get("summary_md") or "").strip()
         suggestions = agent_result.get("suggestions") or []
@@ -1388,28 +1214,12 @@ class ImproveCommand(BaseCommand):
         #    这样 GitLab UI 按 created_at 排序时 summary 永远在该 run 顶部.
         # Why: 之前 V{N} 实现的 placeholder 创建位置写在循环后, 仍排 inline 之后.
         #      修复: placeholder 循环前发, edit 留到循环后.
-        top_comment_id: str | None = None
+        top_comment_id: int | None = None
         try:
             placeholder_body = self._build_summary_placeholder([], [], len(suggestions))
             top_comment_id = self.gitlab.post_mr_comment(
                 self.project_id, self.mr_iid, placeholder_body
             )
-            # 持久化 note_id 到 review_runs.top_comment_id, 便于 /adopt /dismiss 后反查刷新
-            # COALESCE 语义: 多次刷新只保留第一次的 note_id
-            if top_comment_id:
-                try:
-                    from reviewagent.telemetry.store import get_store
-                    runs = get_store().list_runs(
-                        project_id=self.project_id, mr_iid=self.mr_iid,
-                        command="improve", limit=1,
-                    )
-                    if runs:
-                        get_store().finish_run(
-                            runs[0]["id"], status="running",
-                            top_comment_id=str(top_comment_id),
-                        )
-                except Exception as e:
-                    logger.warning("improve.save_top_comment_id failed (non-fatal): {}", e)
         except GitLabError as e:
             logger.warning(
                 "improve.post_summary_placeholder_failed (non-fatal) project={} mr={} err={}",
@@ -1596,20 +1406,6 @@ class ImproveCommand(BaseCommand):
                         "improve.post_inline project={} mr={} file={} line={}",
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                     )
-                    # 实时刷新顶部检视总览表格: 每发一条就 update 一次,
-                    # 让合并者能在 GitLab UI 上看到表格随检视实时生长.
-                    # 失败非致命 (网络抖动 / 限速), 循环后还会再刷一次最终版.
-                    if top_comment_id:
-                        try:
-                            self._refresh_overview_table(
-                                top_comment_id, inline_posted, inline_skipped,
-                                len(suggestions),
-                            )
-                        except Exception as _e:
-                            logger.warning(
-                                "improve.refresh_overview_after_post failed (non-fatal): {}",
-                                _e,
-                            )
                     # 记录 suggestion 到 telemetry (用于后续 /adopt 验证 + 跨次去重)
                     try:
                         from reviewagent.telemetry.store import get_store
@@ -1686,29 +1482,25 @@ class ImproveCommand(BaseCommand):
                         self.project_id, self.mr_iid, file_path, decision["new_line"],
                         decision["reason"],
                     )
-                    if top_comment_id:
-                        try:
-                            self._refresh_overview_table(
-                                top_comment_id, inline_posted, inline_skipped,
-                                len(suggestions),
-                            )
-                        except Exception as _e:
-                            logger.warning(
-                                "improve.refresh_overview_after_general failed (non-fatal): {}",
-                                _e,
-                            )
                 else:
                     inline_skipped.append({"suggestion": raw, "reason": "gitlab_rejected"})
             else:
                 # action == "drop" — 不发任何评论, 仅记 telemetry
                 inline_skipped.append({"suggestion": raw, "reason": decision["reason"]})
 
-        # 3. 循环结束后最终刷新顶部表格 (placeholder → 最终汇总)
-        #    每条 inline 已实时刷过, 此处再做一次以确保最终状态 (含 skipped 计数)
-        #    与 telemetry 同步 (e.g. /adopt /dismiss 期间的并发改动).
-        self._refresh_overview_table(
-            top_comment_id, inline_posted, inline_skipped, len(suggestions),
-        )
+        # 3. edit placeholder 为完整 summary (含实际 inline_posted 列表).
+        #    placeholder 已在循环前创建 (见顶部 step 0), 此处只更新正文.
+        summary_md = self._build_summary_v2(inline_posted, inline_skipped, len(suggestions))
+        if top_comment_id and summary_md:
+            try:
+                self.gitlab.update_mr_comment(
+                    self.project_id, self.mr_iid, top_comment_id, summary_md
+                )
+            except GitLabError as e:
+                logger.warning(
+                    "improve.update_summary_failed (non-fatal) project={} mr={} err={}",
+                    self.project_id, self.mr_iid, e,
+                )
 
         return {
             "top_comment_id": top_comment_id,

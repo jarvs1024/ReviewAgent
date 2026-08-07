@@ -709,12 +709,7 @@ def test_build_summary_v2_version_increments_per_run():
 
 
 def test_build_summary_placeholder_contains_version():
-    """placeholder 必须包含 V{N} + 顶部状态表格 + 时间戳.
-
-    设计变更 (表格化): placeholder 现在直接走 _build_overview_table 而不是
-    "_加载中…_" 占位 — 这样表格 form factor 跟最终汇总保持一致, 用户从
-    GitLab UI 上看到的就是同一形态 (只是 inline_posted / inline_skipped 列表为空).
-    """
+    """placeholder 必须包含 V{N}, 即使还没拿到 inline_posted 数据"""
     from reviewagent.commands.improve import ImproveCommand
     cmd = ImproveCommand.__new__(ImproveCommand)
     cmd.project_id = 34
@@ -724,12 +719,9 @@ def test_build_summary_placeholder_contains_version():
         inline_skipped=[],
         total_agent_suggestions=0,
     )
-    # 必有 V{N}
+    # 必有 V{N} + 加载中
     import re
     m = re.search(r"V(\d+)", out)
     assert m, f"未匹配 V{{N}}: {out!r}"
-    # 必有 markdown 表格头 (状态汇总)
-    assert "## 检视总览" in out, f"placeholder 应以检视总览表格开头: {out!r}"
-    assert "| 状态 | 数量 | 备注 |" in out, f"placeholder 应有状态汇总表头: {out!r}"
-    # 必有底部时间戳
-    assert "最后更新:" in out, f"placeholder 应有最后更新时间戳: {out!r}"
+    assert "加载中" in out, f"placeholder 应有'加载中'提示: {out!r}"
+    assert out.startswith("## 改进总览")

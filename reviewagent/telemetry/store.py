@@ -190,7 +190,6 @@ class Store:
                 "triggered_by": "ALTER TABLE review_runs ADD COLUMN triggered_by TEXT",
                 "rule_keys_cited": "ALTER TABLE review_runs ADD COLUMN rule_keys_cited TEXT",
                 "suggestion_count": "ALTER TABLE review_runs ADD COLUMN suggestion_count INTEGER DEFAULT 0",
-                "top_comment_id": "ALTER TABLE review_runs ADD COLUMN top_comment_id TEXT",
             }.items():
                 if column not in run_columns:
                     conn.execute(sql)
@@ -450,30 +449,6 @@ class Store:
         ranked = sorted(bucket.items(), key=lambda x: (-x[1], x[0]))
         return ranked[:top_n]
 
-    def get_latest_top_comment_id(
-        self,
-        *,
-        project_id: int,
-        mr_iid: int,
-        command: str = "improve",
-    ) -> str | None:
-        """返回该 MR 最近一次成功 ``command`` run 的 top_comment_id, 用于
-        suggestion_actions 模块在 /adopt /dismiss 后实时刷新汇总表.
-
-        边界:
-        - 多个并发 run: 返回最新 started_at 的; 但并发场景不常见 (chain.lock_acquired 互斥)
-        - 之前没存过: 返回 None, 调用方选择跳过刷新
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT top_comment_id FROM review_runs "
-                "WHERE project_id=? AND mr_iid=? AND command=? "
-                "  AND top_comment_id IS NOT NULL "
-                "ORDER BY started_at DESC LIMIT 1",
-                (project_id, mr_iid, command),
-            ).fetchone()
-            return row["top_comment_id"] if row else None
-
     # ---------- Review Run ----------
     def insert_run(self, run: ReviewRun) -> int:
         with self._conn() as conn:
@@ -501,15 +476,7 @@ class Store:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         duration_ms: int = 0,
-        top_comment_id: str | None = None,
     ) -> None:
-        """完成一条 run. ``top_comment_id`` 是检视总览 top-level 汇总评论的 note_id
-        (GitLab 返回的字符串型 note ID), 用于 /adopt /dismiss 后反查并实时刷新该表.
-
-        多次刷新场景: placeholder 在循环前 post (note_id 已知), 循环里每发一条
-        inline suggestion 调一次 refresh, 循环结束再 refresh 一次. 这三次写 note_id
-        都应该用同一个值, 所以 finish_run 在最后一次刷新时调用.
-        """
         with self._conn() as conn:
             now = _fmt_dt(_utcnow())
             conn.execute(
@@ -517,15 +484,13 @@ class Store:
                 UPDATE review_runs
                 SET finished_at = ?, status = ?, error = ?, model = ?,
                     prompt_tokens = ?, completion_tokens = ?,
-                    total_tokens = ?, duration_ms = ?,
-                    top_comment_id = COALESCE(?, top_comment_id)
+                    total_tokens = ?, duration_ms = ?
                 WHERE id = ?
                 """,
                 (
                     now, status, error, model,
                     prompt_tokens, completion_tokens,
                     prompt_tokens + completion_tokens, duration_ms,
-                    top_comment_id,
                     run_id,
                 ),
             )
