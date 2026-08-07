@@ -901,6 +901,25 @@ def auto_detect_applied(
             result["unchanged"] += 1
             continue
 
+        # 二次校验: 用户可能在 auto_detect 处理这条 (slow 文件读取 / diff 计算)
+        # 期间通过 /dismiss 把 state 改成 dismissed, 此时不应再覆盖为 applied.
+        # Race 修复 Fix D: 重新 fetch 当前 state, 若非 open 则跳过.
+        # Why: list_open_suggestions 在循环开始时一次性 fetch, 单条处理可能耗
+        #      1-2s (网络往返 + LCS diff), 用户 /dismiss 命中后这条会被标 dismissed.
+        #      若不重检, dismiss 状态会被 silently 覆盖成 applied, 数据失真.
+        current = store.get_suggestion_by_note_id(note_id)
+        if current is None or current.get("state") != "open":
+            cur_state = (current or {}).get("state") or "missing"
+            logger.info(
+                "auto_detect_applied skip (state changed mid-scan) project={} mr={} note={} state={}",
+                project_id, mr_iid, note_id[:8], cur_state,
+            )
+            if cur_state == "dismissed":
+                result["dismissed_during_scan"] = result.get("dismissed_during_scan", 0) + 1
+            else:
+                result["unchanged"] += 1
+            continue
+
         # 已应用 → resolve + 记录 + 改 state
         try:
             gl.resolve_discussion(project_id, mr_iid, note_id)
