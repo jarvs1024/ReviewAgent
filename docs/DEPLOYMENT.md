@@ -1,12 +1,12 @@
 # 部署文档
 
-> 更新日期：2026-08-07 · 生产服务器：25（ci-runner, 10.20.65.25）
+> 更新日期：2026-08-07
 
-ReviewAgent 当前部署在 **25 服务器**（ci-runner），通过 systemd 管理全部服务。
+ReviewAgent 通过 systemd 管理全部服务，部署在 Linux 服务器上。
 
-| 维度 | 25 服务器（ci-runner） |
+| 维度 | 生产服务器 |
 |---|---|
-| 主机 | `ci-runner`（workflow@10.20.65.25） |
+| 主机 | Linux（workflow 用户） |
 | OS | Linux (Anolis/CentOS) |
 | webhook 端口 | `:3000` |
 | RQ 队列 | `review`（主队列） + `review-weekly`（周报） |
@@ -70,7 +70,7 @@ systemctl enable --now reviewagent-weekly.timer
 
 ## 四、GitLab webhook（GitLab 侧手动）
 
-- URL：`http://10.20.65.25:3000/webhook`
+- URL：`http://<server-ip>:3000/webhook`
 - Secret token：与 `.env` 的 `GITLAB_WEBHOOK_SECRET` 一致
 - Trigger：☑ Merge request events  ☑ Comments  ☑ Push events
 
