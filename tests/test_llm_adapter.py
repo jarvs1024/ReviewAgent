@@ -442,6 +442,28 @@ class TestBaseCommandExceptionHandling:
         ):
             assert cls in src, f"{cls} missing from commands/_common.py except clauses"
 
+    def test_base_command_uses_configured_provider_model_for_skip_records(self, monkeypatch):
+        """qodercli 的跳过/幂等记录不能回退到 opencode_model."""
+        from types import SimpleNamespace
+        import reviewagent.commands._common as common
+
+        monkeypatch.setattr(
+            common,
+            "config",
+            SimpleNamespace(
+                llm_provider="qodercli",
+                opencode_model="deepseek/deepseek-v4-flash",
+                qodercli_model="Lite",
+            ),
+        )
+
+        class _T(common.BaseCommand):
+            COMMAND_NAME = "describe"
+            DEFAULT_AGENT = "describe"
+
+        cmd = _T(project_id=1, mr_iid=240)
+        assert cmd.model == "Lite"
+
     def test_base_command_catches_qodercli_error(self, monkeypatch):
         """集成回归:BaseCommand.run() 在 qodercli 抛 QoderCLIError 时走 LLM 分支.
 

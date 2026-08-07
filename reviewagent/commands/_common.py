@@ -79,7 +79,11 @@ class BaseCommand:
 
         self.gitlab = GitLabClient()
         self.prompt_cfg = loader.load(self.COMMAND_NAME)
-        self.model = config.opencode_model  # 已配置 minimax/MiniMax-M2.7
+        self.model = (
+            config.qodercli_model
+            if config.llm_provider == "qodercli"
+            else config.opencode_model
+        )
         self.repo_context: str = ""  # AGENTS.md 等仓库规则 (run() 中填充)
         self._last_oc_result = None  # 最后一次 opencode 调用结果 (token 统计用)
 
