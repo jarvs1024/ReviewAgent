@@ -316,6 +316,9 @@ def process_dismiss(
         reply = "✅ 已关闭建议。\n\n_理由已记录，用于改进后续建议。_"
     gl.reply_to_discussion(project_id, mr_iid, suggestion_note_id, reply)
 
+    # 实时刷新顶部检视总览表格 (open → dismissed, 状态变化需反映到汇总)
+    _refresh_overview_for_mr(project_id=project_id, mr_iid=mr_iid)
+
     return {"action": "dismissed", "reason": reason}
 
 
@@ -626,6 +629,11 @@ def process_adopt(
         project_id, mr_iid, suggestion_note_id, reason[:50] if reason else "",
     )
 
+    # 实时刷新顶部检视总览表格 (open → applied).
+    # 注: /adopt 之后还会 enqueue re-improve, 那次会自然刷新一次, 这里多刷一次
+    # 保证合并者能立刻在 UI 看到 "已采纳 +1" (不必等 reimprove 入队+执行完).
+    _refresh_overview_for_mr(project_id=project_id, mr_iid=mr_iid)
+
     reimprove_job = _maybe_enqueue_reimprove(
         project_id=project_id, mr_iid=mr_iid, actor_username=actor_username,
     )
@@ -637,6 +645,111 @@ def process_adopt(
 # ---------- /adopt 自动重检 ----------
 # 在 /adopt 通过验证后, 用同样的 MR head 触发一次 /improve,
 # 这样 reviewer 采纳一条建议后能立刻看到 diff 的最新状态, 不必手动 @reviewagent。
+
+
+def _refresh_overview_for_mr(*, project_id: int, mr_iid: int) -> bool:
+    """/adopt /dismiss 后调一次, 实时刷新 MR 顶部检视总览表格.
+
+    从 review_runs.top_comment_id 拿最近一次 improve run 的 placeholder note_id,
+    然后从 telemetry store 取最新 stats + suggestions, 生成表格更新上去.
+
+    Returns: True 表示刷新成功, False 表示跳过 (找不到 note_id / 无 store / 网络失败).
+    """
+    try:
+        from reviewagent.telemetry.store import get_store
+        from reviewagent.llm.client import get_client
+    except Exception:
+        return False
+    try:
+        store = get_store()
+        note_id = store.get_latest_top_comment_id(
+            project_id=project_id, mr_iid=mr_iid, command="improve",
+        )
+        if not note_id:
+            return False
+        # 拿客户端构造 provider (git client 等)
+        from reviewagent.gitlab.client import GitLabClient
+        gl = GitLabClient()
+        # 重新生成表格: 传空的 inline_posted / inline_skipped, 这样表格只显示
+        # "状态汇总 + 全部待处理建议" (不含本次 V{N} 新发现, 因为本次 V{N} 是另一个 run).
+        # Note: 这里拿不到 ImproveCommand 实例, 走 provider 抽 helper 也复杂,
+        # 因此直接走 telemetry 数据 + 简易 markdown 重建 (不调 _build_overview_table).
+        body = _build_overview_from_store(
+            store, project_id=project_id, mr_iid=mr_iid,
+        )
+        gl.update_mr_comment(project_id, mr_iid, note_id, body)
+        from reviewagent.logging_setup import logger as _logger
+        _logger.info(
+            "/action.refresh_overview project={} mr={} note_id={} ok",
+            project_id, mr_iid, note_id[:12],
+        )
+        return True
+    except Exception as e:
+        from reviewagent.logging_setup import logger as _logger
+        _logger.warning(
+            "/action.refresh_overview failed project={} mr={} err={}",
+            project_id, mr_iid, e,
+        )
+        return False
+
+
+def _build_overview_from_store(store, *, project_id: int, mr_iid: int) -> str:
+    """从 telemetry store 重建检视总览表格 (供 /adopt /dismiss 后刷新用).
+
+    与 ImproveCommand._build_overview_table 区别:
+    - 不知道本次 V{N} 内的 inline_posted (那是 ImproveCommand 的循环变量)
+    - 只能基于 telemetry 拿到 "跨 run 累计" 视图
+    - 所以 "本次新发现" 这一节不显示, 只显示 "状态汇总 + 待处理建议"
+    """
+    stats = store.suggestion_stats(project_id, mr_iid)
+    all_sugs = store.list_suggestions(
+        project_id=project_id, mr_iid=mr_iid, limit=500,
+    )
+    runs = store.list_runs(
+        project_id=project_id, mr_iid=mr_iid, command="improve", limit=1000,
+    )
+    version = len(runs)
+    total = stats.get("total", 0)
+    open_n = stats.get("open", 0)
+    adopted = stats.get("adopted", 0)
+    dismissed = stats.get("dismissed", 0)
+    open_rows = [s for s in all_sugs if (s.get("state") or "open") == "open"]
+
+    lines = [f"## 检视总览 V{version}", ""]
+    lines.append("| 状态 | 数量 | 备注 |")
+    lines.append("|---|---|---|")
+    lines.append(f"| 总建议 | {total} | 历次累计 |")
+    lines.append(f"| ⏳ 待处理 | {open_n} | open, 未处理 |")
+    lines.append(f"| ✅ 已采纳 | {adopted} | ui_apply / adopt_command / manual_change |")
+    lines.append(f"| ❌ 已忽略 | {dismissed} | 含理由 (dismissed_reason) |")
+    lines.append("")
+
+    if open_rows:
+        lines.append(f"### 待处理建议 ({open_n})")
+        lines.append("")
+        lines.append("| 文件 | 行 | 严重度 | 标题 | 规则 | 状态 |")
+        lines.append("|---|---|---|---|---|---|")
+        open_rows.sort(key=lambda s: (s.get("file_path") or "", s.get("target_line") or 0))
+        for s in open_rows:
+            fp = s.get("file_path") or ""
+            fp_short = fp.split("fixtures/", 1)[-1] if "fixtures/" in fp else fp.split("/")[-1]
+            line = s.get("target_line") or ""
+            severity = (s.get("severity") or "medium").lower()
+            severity_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+            severity_label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(severity, severity.upper())
+            header = (s.get("header") or "建议").strip()
+            rk = s.get("rule_keys") or ""
+            lines.append(
+                f"| `{fp_short}` | L{line} | {severity_emoji} {severity_label} | {header} | `{rk or '—'}` | ⏳ 待处理 |"
+            )
+        lines.append("")
+
+    import datetime as _dt
+    ts = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines.append(f"_最后更新: {ts} · V{version} · /adopt 或 /dismiss 后刷新_")
+    lines.append("")
+    return "\n".join(lines)
+
 # cooldown 由 `locks.should_skip_cooldown` 控制: 用户连续 /adopt 不会无限循环。
 def _maybe_enqueue_reimprove(
     *, project_id: int, mr_iid: int, actor_username: str,
