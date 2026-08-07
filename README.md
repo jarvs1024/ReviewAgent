@@ -34,7 +34,7 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 | 建议采纳/驳回 | 对 inline suggestion 回复 `/adopt [理由]` · `/dismiss [理由]` | ✅ |
 | GitLab UI Apply 自动识别 | 用户在 UI 点 "Apply suggestion" 或 push 改写代码 | ✅ |
 | Telemetry API（`/api/v1/telemetry/*`） | — | ✅ |
-| 周报（JSON + Markdown + XLSX，可推钉钉，含固有代码全量扫描） | 脚本 / 定时 | ✅ |
+| 周报（JSON + Markdown，可推钉钉，含固有代码全量扫描） | 脚本 / 定时 | ✅ |
 | `/review`（深度代码检视） | — | ❌ 未实现 |
 
 > 注：`prompts/` 里已为 `/review` 预留规划，但 `commands/review.py` 尚未编写，webhook 也不识别 `/review`。
@@ -151,7 +151,6 @@ reviewagent/
 │   ├── notifiers/         #   base / dingtalk
 │   ├── artifact.py        #   WeeklyArtifact 数据契约
 │   ├── renderer.py        #   markdown 渲染 + 分块
-│   ├── xlsx.py            #   XLSX 导出
 │   ├── rule_translate.py  #   规则键 → 中文翻译
 │   ├── config.py          #   WeeklyReportConfig
 │   └── runner.py          #   run_weekly_job 主入口
@@ -198,7 +197,7 @@ reviewagent/
 - `/improve` + 可 Apply 的 inline suggestion（`/adopt` `/dismiss` + GitLab UI Apply 自动识别）。
 - LLM Provider 适配层（`reviewagent/llm/`）：qodercli subprocess（默认）+ opencode HTTP API，配置一键切换。
 - Telemetry API（`/api/v1/telemetry/*`：health / runs / mr / suggestions / stats / timeline / metrics / dismissals / weekly-reports）。
-- 周报生成（JSON + MD + XLSX，钉钉推送支持，默认 dry_run）。三段 LLM 调用。
+- 周报生成（JSON + MD，钉钉推送支持，默认 dry_run）。三段 LLM 调用。
 - 跨次建议去重（fingerprint）+ 跨文件引用分析 + 评分过滤。
 
 ### 计划 / 进行中

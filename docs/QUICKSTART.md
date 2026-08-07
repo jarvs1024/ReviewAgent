@@ -75,7 +75,7 @@ curl -X POST http://localhost:3000/webhook \
 ## 四、周报
 
 ```bash
-# 生成本周周报（JSON + MD + XLSX，默认 dry_run 不推送）
+# 生成本周周报（JSON + MD，默认 dry_run 不推送）
 bash scripts/run_weekly_report.sh
 
 # 真实推送到钉钉

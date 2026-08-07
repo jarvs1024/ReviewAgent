@@ -12,7 +12,7 @@
     4. /adopt /dismiss (Note on DiffNote reply)    → resolve discussion + state change
     5. UI Apply 自动识别 (merge_request update, head_sha 变) → auto_detect_applied
     6. Telemetry API   (GET 端点)                   → 200 + 数据结构完整
-    7. 周报             (scripts/weekly_report.py)  → json + md + xlsx + 钉钉
+    7. 周报             (scripts/weekly_report.py)  → json + md + 钉钉
 
 每个 feature 跑 N 轮 (默认 3). 用 --mr 指定每轮用的 MR 编号.
 
@@ -518,10 +518,9 @@ def run_weekly_report(round_idx: int, log: list[str]) -> FeatureResult:
                               f"exit={p.returncode} stderr={p.stderr[-400:].decode('utf-8', errors='ignore')}", log)
     jsons = sorted(out_dir.glob("*.json"))
     mds = sorted(out_dir.glob("*.md"))
-    xlsxs = sorted(out_dir.glob("*.xlsx"))
-    ok = bool(jsons) and bool(mds) and bool(xlsxs)
+    ok = bool(jsons) and bool(mds)
     return FeatureResult("weekly_report", round_idx, 0, ok,
-                          f"mode={mode} files: json={len(jsons)} md={len(mds)} xlsx={len(xlsxs)}", log)
+                          f"mode={mode} files: json={len(jsons)} md={len(mds)}", log)
 
 
 # ---------- main ----------

@@ -34,7 +34,6 @@ from .config import WeeklyReportConfig
 from .notifiers import DeliveryResult, Notifier
 from .notifiers.dingtalk import DingTalkNotifier
 from .renderer import render_markdown, split_markdown
-from .xlsx import write_xlsx
 
 
 def _week_bounds(
@@ -181,10 +180,6 @@ def run_weekly_job(
     md_path.write_text(md_text, encoding="utf-8")
     logger.info("reporting.markdown written path={} bytes={}", md_path, len(md_text.encode("utf-8")))
 
-    xlsx_path = output_dir / f"weekly-{artifact.week_label}.xlsx"
-    write_xlsx(artifact, xlsx_path)
-    logger.info("reporting.xlsx written path={} bytes={}", xlsx_path, xlsx_path.stat().st_size)
-
     # 4. notify
     delivery: dict[str, Any] = {"skipped": True}
     if push or not cfg.dingtalk_dry_run:
@@ -221,7 +216,6 @@ def run_weekly_job(
         "week_label": artifact.week_label,
         "artifact_path": str(artifact_path),
         "markdown_path": str(md_path),
-        "xlsx_path": str(xlsx_path),
         "delivery": delivery,
         "sections": {n: sr.status for n, sr in sections.items()},
     }
