@@ -577,13 +577,13 @@ def test_dedup_falls_back_to_rationale_rule_keys_when_raw_empty(tmp_telemetry):
 
 
 def test_overview_summary_format_with_full_data(tmp_telemetry):
-    """_build_overview_summary 应生成固定 header + 2 表格 + 底部时间戳.
+    """_build_overview_summary 应生成固定 header + 单表 + 元信息行 (方案 A).
 
     验证:
     - header 固定 `## 检视汇总` (无 V{N})
-    - 状态汇总表 5 行 (总/待处理/已采纳/已忽略/本次新增)
-    - 严重度分布表 3 行 (HIGH/MEDIUM/LOW × 待处理/采纳/忽略)
-    - 底部时间戳 + HEAD sha
+    - 单表 5 列: 严重度 × {待处理/已采纳/已忽略/合计}
+    - 末行 加粗"总计"
+    - 底部单行元信息: 本次新增 + CST 时间 + HEAD sha
     """
     from reviewagent.commands.improve import ImproveCommand
     from reviewagent.telemetry.store import get_store
@@ -636,26 +636,22 @@ def test_overview_summary_format_with_full_data(tmp_telemetry):
     assert "V0" not in out and "V1" not in out and "V2" not in out, \
         f"不应有 V{{N}} 版本号: {out!r}"
 
-    # 2. 状态汇总表
-    assert "| 总建议 | 3 |" in out
-    assert "| ⏳ 待处理 | 1 |" in out
-    assert "| ✅ 已采纳 | 1 |" in out
-    assert "| ❌ 已忽略 | 1 |" in out
-    assert "| 🆕 本次新增 | 2 |" in out
+    # 2. 单表 5 列 (严重度 × 状态 × 合计)
+    assert "| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 合计 |" in out
+    # HIGH: 1 open / 0 applied / 0 dismissed / 1 sum
+    assert "| 🔴 HIGH | 1 | 0 | 0 | 1 |" in out
+    # MEDIUM: 0 open / 1 applied / 0 dismissed / 1 sum
+    assert "| 🟡 MEDIUM | 0 | 1 | 0 | 1 |" in out
+    # LOW: 0 open / 0 applied / 1 dismissed / 1 sum
+    assert "| 🟢 LOW | 0 | 0 | 1 | 1 |" in out
 
-    # 3. 严重度分布表 (HIGH/MEDIUM/LOW × 待处理/采纳/忽略)
-    assert "| 严重度 | 待处理 | 采纳 | 忽略 |" in out
-    # HIGH: 1 open / 0 applied / 0 dismissed
-    assert "| 🔴 HIGH | 1 | 0 | 0 |" in out
-    # MEDIUM: 0 open / 1 applied / 0 dismissed
-    assert "| 🟡 MEDIUM | 0 | 1 | 0 |" in out
-    # LOW: 0 open / 0 applied / 1 dismissed
-    assert "| 🟢 LOW | 0 | 0 | 1 |" in out
+    # 3. 加粗总计行: 1+0+0 / 0+1+0 / 0+0+1 / 3 total
+    assert "| **总计** | **1** | **1** | **1** | **3** |" in out
 
-    # 4. 底部时间戳 + HEAD sha 短码
-    assert "🔄 _最近更新:" in out
+    # 4. 单行元信息: 本次新增 + CST 时间 + HEAD sha 短码
+    assert "🆕 本次新增 2 条" in out
+    assert "CST" in out, f"时间应为 CST (本地时间), 避免与 UTC 混淆: {out!r}"
     assert "0123456" in out, f"应有 head_sha 短码 (前7位): {out!r}"
-    assert "UTC" in out
 
 
 def test_overview_summary_works_with_empty_state(tmp_telemetry):
@@ -671,14 +667,13 @@ def test_overview_summary_works_with_empty_state(tmp_telemetry):
     )
 
     assert "## 检视汇总" in out
-    assert "| 总建议 | 0 |" in out
-    assert "| ⏳ 待处理 | 0 |" in out
-    assert "| ✅ 已采纳 | 0 |" in out
-    assert "| ❌ 已忽略 | 0 |" in out
-    # 没 inline_posted 时不显示 "本次新增" 行
-    assert "| 🆕 本次新增 |" not in out
-    # 严重度行存在 (即使全 0)
-    assert "| 🔴 HIGH | 0 | 0 | 0 |" in out
-    assert "| 🟡 MEDIUM | 0 | 0 | 0 |" in out
-    assert "| 🟢 LOW | 0 | 0 | 0 |" in out
+    # 单表 + 总计行 (新格式: 严重度 × 状态 × 合计)
+    assert "| 🔴 HIGH | 0 | 0 | 0 | 0 |" in out
+    assert "| 🟡 MEDIUM | 0 | 0 | 0 | 0 |" in out
+    assert "| 🟢 LOW | 0 | 0 | 0 | 0 |" in out
+    assert "| **总计** | **0** | **0** | **0** | **0** |" in out
+    # 没 inline_posted 时不显示 "本次新增"
+    assert "🆕 本次新增" not in out
+    # CST 时间与 head_sha 短码
+    assert "CST" in out
     assert "abcdef0" in out

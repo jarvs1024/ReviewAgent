@@ -1208,30 +1208,30 @@ class ImproveCommand(BaseCommand):
     ) -> str:
         """生成 MR 顶部"检视汇总"固定表格 (无 V{N}, 每次检视刷新).
 
-        设计:
+        设计 (方案 A - 单表合并):
         - Header 固定: `## 检视汇总` (pr_agent 风格, 不带版本号)
-        - 表格 1: 状态汇总 (总建议 / ⏳待处理 / ✅已采纳 / ❌已忽略 / 🆕本次新增)
-        - 表格 2: 严重度分布 (HIGH/MEDIUM/LOW × 待处理/采纳/忽略)
-        - 底部时间戳 + HEAD sha 让 reviewer 判断新鲜度
+        - 单表 5 列: 严重度 × {待处理 / 已采纳 / 已忽略 / 合计}
+        - 末行 加粗"总计"行
+        - 底部单行元信息: 本次新增 + CST 时间 + HEAD sha
 
         数据来源:
-        - telemetry store.suggestion_stats() 聚合 open/applied/dismissed
-        - telemetry store 按 severity 分组聚合
+        - telemetry store.list_suggestions() 聚合 severity × state
         - inline_posted 数量 = 本次新增
 
         调用: _publish_persistent_overview 找/创/更新同一评论时使用
         """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        # 严重度 × 状态聚合 (open / applied / dismissed 分桶)
+        sev_buckets: dict[str, dict[str, int]] = {
+            "high": {"open": 0, "applied": 0, "dismissed": 0},
+            "medium": {"open": 0, "applied": 0, "dismissed": 0},
+            "low": {"open": 0, "applied": 0, "dismissed": 0},
+        }
         try:
             from reviewagent.telemetry.store import get_store
             store = get_store()
-            stats = store.suggestion_stats(self.project_id, self.mr_iid)
-            # 严重度 × 状态聚合 (open / applied / dismissed 分桶)
-            sev_buckets: dict[str, dict[str, int]] = {
-                "high": {"open": 0, "applied": 0, "dismissed": 0},
-                "medium": {"open": 0, "applied": 0, "dismissed": 0},
-                "low": {"open": 0, "applied": 0, "dismissed": 0},
-            }
-            # 拉全部 suggestions 做 severity × state 聚合
             all_sugs = store.list_suggestions(
                 project_id=self.project_id, mr_iid=self.mr_iid, limit=500,
             )
@@ -1245,54 +1245,60 @@ class ImproveCommand(BaseCommand):
                 sev_buckets[sev][state] += 1
         except Exception as e:
             logger.warning("improve.overview_query failed (non-fatal): {}", e)
-            stats = {"total": 0, "open": 0, "adopted": 0, "dismissed": 0}
-            sev_buckets = {
-                "high": {"open": 0, "applied": 0, "dismissed": 0},
-                "medium": {"open": 0, "applied": 0, "dismissed": 0},
-                "low": {"open": 0, "applied": 0, "dismissed": 0},
-            }
 
-        total = stats.get("total", 0)
-        open_n = stats.get("open", 0)
-        adopted = stats.get("adopted", 0)
-        dismissed = stats.get("dismissed", 0)
+        # 行聚合 (合计 = open + applied + dismissed)
+        rows: list[dict[str, int | str]] = []
+        total_open = total_applied = total_dismissed = 0
+        for sev in ("high", "medium", "low"):
+            emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}[sev]
+            label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}[sev]
+            bucket = sev_buckets.get(sev, {"open": 0, "applied": 0, "dismissed": 0})
+            open_n = bucket["open"]
+            applied_n = bucket["applied"]
+            dismissed_n = bucket["dismissed"]
+            total_open += open_n
+            total_applied += applied_n
+            total_dismissed += dismissed_n
+            rows.append({
+                "label": f"{emoji} {label}",
+                "open": open_n,
+                "applied": applied_n,
+                "dismissed": dismissed_n,
+                "sum": open_n + applied_n + dismissed_n,
+            })
+        grand_total = total_open + total_applied + total_dismissed
         new_count = len(inline_posted)
         head_short = (head_sha or "")[:7] if head_sha else ""
 
         lines: list[str] = []
-        # 固定 header (不带版本号, 每次刷新都是这个标题)
         lines.append("## 检视汇总")
         lines.append("")
-        # === 表格 1: 状态汇总 ===
-        lines.append("| 状态 | 数量 | 备注 |")
-        lines.append("|---|---|---|")
-        lines.append(f"| 总建议 | {total} | 历次累计 |")
-        lines.append(f"| ⏳ 待处理 | {open_n} | open, 未处理 |")
-        lines.append(f"| ✅ 已采纳 | {adopted} | ui_apply / adopt / manual |")
-        lines.append(f"| ❌ 已忽略 | {dismissed} | 含理由 |")
-        if new_count > 0:
-            lines.append(f"| 🆕 本次新增 | {new_count} | — |")
-        lines.append("")
-        # === 表格 2: 严重度分布 ===
-        lines.append("| 严重度 | 待处理 | 采纳 | 忽略 |")
-        lines.append("|---|---|---|---|")
-        for sev in ("high", "medium", "low"):
-            emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}[sev]
-            label = sev.upper()
-            bucket = sev_buckets.get(sev, {"open": 0, "applied": 0, "dismissed": 0})
+        # 单表 5 列: 严重度 × {待处理/采纳/忽略/合计}
+        lines.append("| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 合计 |")
+        lines.append("|:---:|:---:|:---:|:---:|:---:|")
+        for row in rows:
             lines.append(
-                f"| {emoji} {label} | {bucket['open']} | {bucket['applied']} | {bucket['dismissed']} |"
+                f"| {row['label']} | {row['open']} | {row['applied']} | {row['dismissed']} | {row['sum']} |"
             )
+        lines.append(
+            f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{grand_total}** |"
+        )
         lines.append("")
-        # === 底部: 时间戳 + HEAD sha 让 reviewer 判断新鲜度 ===
-        import datetime as _dt
-        ts = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        # 底部: 单行紧凑元信息 (CST 时间与本地对齐)
+        try:
+            ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S CST")
+        except Exception:
+            ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        meta_parts: list[str] = []
+        if new_count > 0:
+            meta_parts.append(f"🆕 本次新增 {new_count} 条")
+        meta_parts.append(f"⏱ {ts}")
         if head_short:
-            lines.append(f"🔄 _最近更新: {ts} · HEAD {head_short}_")
-        else:
-            lines.append(f"🔄 _最近更新: {ts}_")
+            meta_parts.append(f"HEAD {head_short}")
+        lines.append(" · ".join(meta_parts))
         lines.append("")
         return "\n".join(lines)
+
 
     def _publish_persistent_overview(
         self,
@@ -1368,10 +1374,34 @@ class ImproveCommand(BaseCommand):
         line_map = self._diff_line_map()
         file_sources: dict[str, list[str]] = {}
 
-        # 0. 顶层 summary placeholder: 必须在 inline 循环之前先发,
-        #    这样 GitLab UI 按 created_at 排序时 summary 永远在该 run 顶部.
+        # === Head SHA 提前到循环外算一次 (race 修复 Fix A) ===
+        # Why: 之前在 dedup check 和 record_suggestion 里各调一次 _get_mr_head_sha (网络),
+        #      6 条 suggestion 会触发 12 次 get_mr_diff_refs 调用, 单条 200-800ms 网络往返.
+        #      串行叠加后 ~2-9 秒, 这段时间里 _publish 完成 post_mr_discussion 但 SQLite 还没 INSERT,
+        #      webhook 上的 /adopt 抢先查到 get_suggestion_by_note_id 返回 None → 误入 no_record 分支
+        #      ("✅ 已采纳建议 (无历史记录)").
+        # 修复: 进入循环前调用一次 _get_mr_head_sha, 把 head_sha 缓存给所有 iteration 共用.
+        # 边界: _get_mr_head_sha 内部已经 try/except (网络失败返回 None), 不会阻塞发布流程.
+        _publish_head_sha = self._get_mr_head_sha() or ""
+
+        # === 0a. 顶部"检视汇总"持久评论: 循环前先创建或刷新一次 ===
+        # pr_agent 风格: header "## 检视汇总" 自描述锚点, list_mr_notes 本地过滤
+        # 找到则 update, 没找到则 post (不存 note_id 到 DB, 避免 schema 迁移).
+        # Why 先于 placeholder 创建: GitLab UI 按 created_at 升序展示, 检视汇总要排在
+        #      改进总览 V{N} 之上. 失败非致命, 循环结束后还会再调一次.
+        try:
+            _overview_body = self._build_overview_summary(
+                [], [], len(suggestions), head_sha=_publish_head_sha,
+            )
+            self._publish_persistent_overview(_overview_body, head_sha=_publish_head_sha)
+        except Exception as _e:
+            logger.warning("improve.overview_initial_failed (non-fatal): {}", _e)
+
+        # === 0b. 顶层 summary placeholder: 必须在 inline 循环之前先发, ===
+        # === 这样 GitLab UI 按 created_at 排序时 summary 永远在该 run 顶部. ===
         # Why: 之前 V{N} 实现的 placeholder 创建位置写在循环后, 仍排 inline 之后.
         #      修复: placeholder 循环前发, edit 留到循环后.
+        # 顺序: 检视汇总 (0a) → 改进总览 placeholder (0b) → inline 循环 → 两者最终刷新.
         top_comment_id: int | None = None
         try:
             placeholder_body = self._build_summary_placeholder([], [], len(suggestions))
@@ -1383,6 +1413,7 @@ class ImproveCommand(BaseCommand):
                 "improve.post_summary_placeholder_failed (non-fatal) project={} mr={} err={}",
                 self.project_id, self.mr_iid, e,
             )
+
         # 1. 每条 suggestion：先校验 new_line + improved_code 对齐
         # 注意: 顶层 summary 不再这里发, 改到循环结束后基于 inline_posted 重新生成.
         # Why: 之前 summary 在循环前基于 agent 给的所有 suggestions 生成, 会包含
@@ -1390,28 +1421,6 @@ class ImproveCommand(BaseCommand):
         #      现在 summary 只显示本次循环内 inline_posted 的内容, 标题带 V{N} 版本号.
         inline_posted: list[dict[str, Any]] = []
         inline_skipped: list[dict[str, Any]] = []
-
-        # === Head SHA 提前到循环外算一次 (race 修复 Fix A) ===
-        # Why: 之前在 dedup check 和 record_suggestion 里各调一次 _get_mr_head_sha (网络),
-        #      6 条 suggestion 会触发 12 次 get_mr_diff_refs 调用, 单条 200-800ms 网络往返.
-        #      串行叠加后 ~2-9 秒, 这段时间里 _publish 完成 post_mr_discussion 但 SQLite 还没 INSERT,
-        #      webhook 上的 /adopt 抢先查到 get_suggestion_by_note_id 返回 None → 误入 no_record 分支
-        #      ("✅ 已采纳建议 (无历史记录)").
-        # 修复: 进入循环前调用一次 _get_mr_head_sha, 把 head_sha 缓存给所有 iteration 共用.
-        # 边界: _get_mr_head_sha 内部已经 try/except (网络失败返回 None), 不会阻塞发布流程.
-        _publish_head_sha = self._get_mr_head_sha() or ""
-
-        # === 顶部"检视汇总"持久评论: 循环前先刷新一次 (创建或 update) ===
-        # pr_agent 风格: header "## 检视汇总" 自描述锚点, list_mr_notes 本地过滤
-        # 找到则 update, 没找到则 post (不存 note_id 到 DB, 避免 schema 迁移).
-        # 失败非致命, 循环结束后还会再调一次.
-        try:
-            _overview_body = self._build_overview_summary(
-                [], [], len(suggestions), head_sha=_publish_head_sha,
-            )
-            self._publish_persistent_overview(_overview_body, head_sha=_publish_head_sha)
-        except Exception as _e:
-            logger.warning("improve.overview_initial_failed (non-fatal): {}", _e)
 
         for raw in suggestions:
             try:
