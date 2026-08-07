@@ -160,6 +160,28 @@ class GitLabClient:
                     project_id, mr_iid, note_id)
         return True
 
+    def list_mr_notes(self, project_id: int, mr_iid: int) -> list[dict[str, Any]]:
+        """拉 MR 全部普通评论 (notes, 非 DiffNote). 一次性 API 调用, 本地过滤 header.
+
+        Why: 持久评论模式 (pr_agent 风格) 需要按 header 找到上一轮评论,
+        然后 update 而不是 post 新评论. 每次只调一次 API, 内部过滤.
+
+        Returns: [{"id": int|str, "body": str}, ...] (按 created_at 升序).
+        Raises: GitLabError.
+        """
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            notes = mr.notes.list(get_all=True)
+        except gitlab.exceptions.GitlabError as e:
+            raise GitLabError(f"list_mr_notes failed: {e}") from e
+        result = [{"id": n.id, "body": n.body} for n in notes]
+        logger.info(
+            "gitlab.list_notes project={} mr={} count={}",
+            project_id, mr_iid, len(result),
+        )
+        return result
+
     # ---------- 行内评论 (Discussion) ----------
     def get_mr_diff_refs(self, project_id: int, mr_iid: int) -> dict[str, str]:
         """拉 MR 的 diff_refs（base_sha / start_sha / head_sha），用于发布行内评论.

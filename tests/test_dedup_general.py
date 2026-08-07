@@ -574,3 +574,111 @@ def test_dedup_falls_back_to_rationale_rule_keys_when_raw_empty(tmp_telemetry):
     )
     assert result["inline_skipped"] == 0
     cmd.gitlab.post_mr_discussion.assert_called_once()
+
+
+def test_overview_summary_format_with_full_data(tmp_telemetry):
+    """_build_overview_summary 应生成固定 header + 2 表格 + 底部时间戳.
+
+    验证:
+    - header 固定 `## 检视汇总` (无 V{N})
+    - 状态汇总表 5 行 (总/待处理/已采纳/已忽略/本次新增)
+    - 严重度分布表 3 行 (HIGH/MEDIUM/LOW × 待处理/采纳/忽略)
+    - 底部时间戳 + HEAD sha
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.telemetry.store import get_store
+
+    head_sha = "01234567" * 5
+    s = get_store()
+
+    # 预置: 1 open (HIGH) + 1 applied (MEDIUM) + 1 dismissed (LOW)
+    for i, (state, sev, line, header, rule) in enumerate([
+        ("open", "high", 10, "可变默认参数", "SSD-RULE-NO-MUTABLE-DEFAULT"),
+        ("applied", "medium", 15, "类型注解", "SSD-RULE-TYPEHINTS"),
+        ("dismissed", "low", 20, "注释修正", "R-OTHER:stale_comment"),
+    ]):
+        s.record_suggestion(
+            project_id=34, mr_iid=300,
+            note_id=f"seed-{i}",
+            file_path=f"services/sample_{i}.py",
+            target_line=line, target_line_end=line,
+            existing_code="x = 1", improved_code="x = 2",
+            header=header, label="code quality",
+            severity=sev, head_sha=head_sha,
+            rule_keys=[rule],
+            fingerprint=f"fp{i}", cohort_key=f"co{i}",
+            severity_source="rule",
+        )
+        conn = sqlite3.connect(tmp_telemetry)
+        conn.execute(
+            "UPDATE suggestions SET state=? WHERE note_id=?",
+            (state, f"seed-{i}"),
+        )
+        conn.commit()
+        conn.close()
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 300
+
+    # 模拟本次新增 2 条 (inline_posted)
+    inline_posted = [
+        {"note_id": "new-1", "raw": {"severity": "high"}, "normalised": {"severity": "high"}, "kind": "inline"},
+        {"note_id": "new-2", "raw": {"severity": "medium"}, "normalised": {"severity": "medium"}, "kind": "inline"},
+    ]
+    out = cmd._build_overview_summary(
+        inline_posted, inline_skipped=[], total_agent_suggestions=5,
+        head_sha=head_sha,
+    )
+
+    # 1. header 固定不带 V{N}
+    assert "## 检视汇总" in out, f"应有固定 header '## 检视汇总': {out!r}"
+    assert "V0" not in out and "V1" not in out and "V2" not in out, \
+        f"不应有 V{{N}} 版本号: {out!r}"
+
+    # 2. 状态汇总表
+    assert "| 总建议 | 3 |" in out
+    assert "| ⏳ 待处理 | 1 |" in out
+    assert "| ✅ 已采纳 | 1 |" in out
+    assert "| ❌ 已忽略 | 1 |" in out
+    assert "| 🆕 本次新增 | 2 |" in out
+
+    # 3. 严重度分布表 (HIGH/MEDIUM/LOW × 待处理/采纳/忽略)
+    assert "| 严重度 | 待处理 | 采纳 | 忽略 |" in out
+    # HIGH: 1 open / 0 applied / 0 dismissed
+    assert "| 🔴 HIGH | 1 | 0 | 0 |" in out
+    # MEDIUM: 0 open / 1 applied / 0 dismissed
+    assert "| 🟡 MEDIUM | 0 | 1 | 0 |" in out
+    # LOW: 0 open / 0 applied / 1 dismissed
+    assert "| 🟢 LOW | 0 | 0 | 1 |" in out
+
+    # 4. 底部时间戳 + HEAD sha 短码
+    assert "🔄 _最近更新:" in out
+    assert "0123456" in out, f"应有 head_sha 短码 (前7位): {out!r}"
+    assert "UTC" in out
+
+
+def test_overview_summary_works_with_empty_state(tmp_telemetry):
+    """MR 第一次检视前 telemetry 为空, 表格应仍可生成."""
+    from reviewagent.commands.improve import ImproveCommand
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 999  # 没数据
+    out = cmd._build_overview_summary(
+        inline_posted=[], inline_skipped=[], total_agent_suggestions=0,
+        head_sha="abcdef00",
+    )
+
+    assert "## 检视汇总" in out
+    assert "| 总建议 | 0 |" in out
+    assert "| ⏳ 待处理 | 0 |" in out
+    assert "| ✅ 已采纳 | 0 |" in out
+    assert "| ❌ 已忽略 | 0 |" in out
+    # 没 inline_posted 时不显示 "本次新增" 行
+    assert "| 🆕 本次新增 |" not in out
+    # 严重度行存在 (即使全 0)
+    assert "| 🔴 HIGH | 0 | 0 | 0 |" in out
+    assert "| 🟡 MEDIUM | 0 | 0 | 0 |" in out
+    assert "| 🟢 LOW | 0 | 0 | 0 |" in out
+    assert "abcdef0" in out
