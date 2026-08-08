@@ -298,17 +298,36 @@ def _render_telemetry(d: dict[str, Any]) -> str:
             value = f"{value} (→)"
         return (label, value)
 
-    rows: list[tuple[str, str]] = [
-        _row("本周窗口 MR 数", str(mr_count), deltas.get("mr_count")),
-        ("项目累计 MR 数", str(mr_total)),
-        _row("本周 suggestion 数", str(suggestion_count), deltas.get("suggestion_count")),
-        ("累计 suggestion 数", str(suggestion_total)),
-        _row("累计采纳率", f"{adoption_rate}%", deltas.get("adoption_rate_pct"), "pp"),
+    # ---- 渲染指标表 (3 列加宽, 跟上方 bullet 段视觉协调) ----
+    # 列: 指标 | 当前数值 | 较上周环比
+    # 加宽手法: (1) 多加一列让横向占用更多；
+    #          (2) 行内加 emoji 占位让单元格视觉更醒目;
+    #          (3) 表格列分隔用 `|:-:|` 居中对齐让钉钉渲染更稳.
+    def _fmt_trend(delta) -> str:
+        if delta is None:
+            return "— (新项目无对比)"
+        if delta == 0:
+            return "→ 持平"
+        arrow = "↑" if delta > 0 else "↓"
+        return f"{arrow}{abs(delta)}"
+
+    rows = [
+        ("📥 本周窗口 MR 数",        str(mr_count),       _fmt_trend(deltas.get("mr_count"))),
+        ("📂 项目累计 MR 数",        str(mr_total),       _fmt_trend(deltas.get("mr_total"))),
+        ("💡 本周 suggestion 数",    str(suggestion_count), _fmt_trend(deltas.get("suggestion_count"))),
+        ("📊 累计 suggestion 数",    str(suggestion_total), _fmt_trend(deltas.get("suggestion_total"))),
+        ("✅ 累计采纳率",            f"{adoption_rate}%",  _fmt_trend(deltas.get("adoption_rate_pct"))),
     ]
-    lines.append("| 指标 | 数值 |")
-    lines.append("|---|---|")
-    for label, value in rows:
-        lines.append(f"| {label} | {value} |")
+    # adoption_rate_pct 的 delta 是 pp 单位 (>0.1 等较小), 在箭头后补 pp 后缀让语义清楚
+    if deltas.get("adoption_rate_pct") not in (None, 0):
+        rows[-1] = ("✅ 累计采纳率", f"{adoption_rate}%",
+                    f"{'↑' if deltas['adoption_rate_pct'] > 0 else '↓'}"
+                    f"{abs(round(float(deltas['adoption_rate_pct']), 1))} pp")
+
+    lines.append("| 📋 指标 | 📈 当前数值 | 📉 较上周环比 |")
+    lines.append("|:-:|:-:|:-:|")
+    for label, value, trend in rows:
+        lines.append(f"| {label} | {value} | {trend} |")
 
     return "\n".join(lines) + "\n"
 
@@ -382,24 +401,22 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
 
     style_total = sum(n for _, n in style_items)
     logic_total = sum(n for _, n in logic_items)
-    if style_items and logic_items:
-        dom = "代码规范类" if style_total >= logic_total else "正确性/稳定性类"
-        problem_types = (
-            f"主要归为两类：代码规范类（{_fmt(style_items)}）"
-            f"和正确性/稳定性类（{_fmt(logic_items)}），后者会直接影响运行行为。"
-            f"{dom}出现次数最多。"
-        )
-    elif style_items:
-        problem_types = (
-            f"以代码规范类为主（{_fmt(style_items)}），可下沉到 CI 机械拦截，"
-            f"减少人肉 review 噪音。"
-        )
-    elif logic_items:
-        problem_types = (
-            f"以正确性/稳定性类为主（{_fmt(logic_items)}），应优先人工跟进排查运行期风险。"
-        )
+    dom = (
+        "代码规范类" if style_total >= logic_total else "正确性/稳定性类"
+    ) if (style_items or logic_items) else ""
+
+    # 跟「跟进建议」/ LLM 输出格式对齐: 按序列 bullet, 每个高频类别一行
+    problem_lines: list[str] = []
+    for cat_name, items in (("代码规范类", style_items), ("正确性/稳定性类", logic_items)):
+        for name, n in sorted(items, key=lambda x: -x[1]):
+            problem_lines.append(
+                f"- **{name}** ×{n}：归为「{cat_name}」，直接影响 review 流程或运行期行为"
+            )
+    if not problem_lines:
+        problem_lines.append("- 本周未捕捉到具体规则命中的分布。")
     else:
-        problem_types = "本周未捕捉到具体规则命中的分布。"
+        problem_lines.append(f"- {dom}出现次数最多。")
+    problem_types = "\n".join(problem_lines)
 
     # 跟进建议不再用"规范 CI / 正确性人工"这种万能套话, 改为基于
     # 本周 top_rules 给出针对性 1~3 条具体动作. 规则前缀 -> 具体建议的
