@@ -40,7 +40,6 @@ from reviewagent.llm import (
     QoderCLITimeoutError,
     get_client,
 )
-from reviewagent.prompts import loader
 from reviewagent.repo_context import build_repo_context
 from reviewagent.telemetry import events
 from reviewagent.telemetry.models import MRRecord, ReviewRun
@@ -78,7 +77,6 @@ class BaseCommand:
         self.actor_username = actor_username
 
         self.gitlab = GitLabClient()
-        self.prompt_cfg = loader.load(self.COMMAND_NAME)
         self.model = (
             config.qodercli_model
             if config.llm_provider == "qodercli"

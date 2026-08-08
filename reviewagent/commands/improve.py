@@ -563,7 +563,7 @@ class ImproveCommand(BaseCommand):
         max_suggestions = config.improve_max_suggestions
         truncated_count = 0
         if max_suggestions > 0 and len(merged_suggestions) > max_suggestions:
-            sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+            sev_rank = {"high": 3, "medium": 2, "low": 1}
             merged_suggestions.sort(
                 key=lambda s: sev_rank.get((s.get("severity") or "medium").lower(), 2),
                 reverse=True,
@@ -1935,7 +1935,7 @@ class ImproveCommand(BaseCommand):
         """对单条建议评分 (0~100), 用于过滤低质量建议."""
         score = 0
         # severity (0~35)
-        sev_map = {"critical": 35, "high": 30, "medium": 20, "low": 10}
+        sev_map = {"high": 30, "medium": 20, "low": 10}
         score += sev_map.get((s.get("severity") or "medium").lower(), 20)
         # label (0~30) — cross-file impact 与 potential bug 同级, 体现 P1 优先级
         label_map = {

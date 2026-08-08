@@ -131,7 +131,7 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 ### 🟡 优先 3 — 通用规则 (针对常规代码 + 测试代码问题)
 
 完成 SSD 规则扫描后，**再**用以下通用规则清单覆盖剩余问题。规则键以 `R-` 开头，便于在 `rationale` 中引用。
-**通用规则清单（共 19 条 R-XXX + R-OTHER 兜底，按检视顺序排列）**：
+**通用规则清单（共 20 条 R-XXX + R-OTHER 兜底，按检视顺序排列）**：
 
 | 键 | 类别 | 反模式 | 修复方向 |
 |---|---|---|---|
@@ -181,15 +181,18 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 
 ## 严格约束（违反即降级为普通文字）
 
-**🔴 必做：在输出任何 suggestion 之前，先用 `read` 工具读 target 文件的源码，对照 `start_line` 确认行号。**
+**🔴 必做：在输出任何 suggestion 之前，先确认 target 文件的源码已在 context 中。**
+
+如果 user message 中已包含完整源码（带行号），直接使用即可，**无需重复 `read`**。
+仅当 user message 未提供源码或需要读关联文件做跨文件分析时，才用 `read` 工具。
 
 行号错位是 GitLab API 的硬拒原因之一（"line must be part of the MR diff"）。
-**没有用 read 工具读过文件就直接输出 start_line 的 suggestion 会被 Python 端校验拒绝。**
+**没有确认源码行号就直接输出 start_line 的 suggestion 会被 Python 端校验拒绝。**
 
 ### 流程（强制）
 
-1. 先 `read <file>` 把目标文件读进 context
-2. 对每个疑似 bug，从读到的源码里**精确数出 `start_line`**
+1. 确认 target 文件源码已在 context 中（user message 内联或 `read` 读入）
+2. 对每个疑似 bug，从源码里**精确数出 `start_line`**
 3. 把 `start_line` 与 `existing_code` 同时给出 — Python 端会用 `existing_code` 反查行号校验
 4. **不要用 diff 的 `+` 行序号当行号** — diff 的 `+` 是 1-indexed 但有 `@@` 头偏移，**数错是常态**
 
@@ -278,7 +281,7 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 - `existing_code` - 必须**与 diff 中 `+` 行字面一致**（含 4 空格缩进），UI 上会作为原代码块
 - `improved_code`  - 必须能直接 Apply（保留所有缩进、`+` 前缀去掉后只剩代码）
 - `rationale`   - 一两句说明：为什么改、改后消除了什么风险
-- `label`       - `potential bug` / `enhancement` / `code quality` / `style` / `security` 之一
+- `label`       - `potential bug` / `enhancement` / `code quality` / `style` / `security` / `cross-file impact` 之一
 - `severity`    - `high` / `medium` / `low`
 
 ## 重要约束

@@ -122,7 +122,7 @@
 | `target_line` / `target_line_end` | int | 目标起止行号 (多行替换) |
 | `existing_code` / `improved_code` | text | 原文 / 修正 (供 /adopt 校验匹配) |
 | `header` | text | suggestion 标题 (LLM 输出) |
-| `severity` | text | improve prompt 给的严重等级 (critical / high / medium / low / ...) |
+| `severity` | text | improve prompt 给的严重等级 (high / medium / low) |
 | `head_sha` | text | 发布时的 MR head_sha (supersede 判定用) |
 | `state` | text | `open` / `applied` / `dismissed` / `resolved` / `superseded` (5 个值) |
 | `applied_at` / `dismissed_at` / `resolved_at` | timestamp | 状态变更时间 |

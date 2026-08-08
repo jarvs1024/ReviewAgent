@@ -64,7 +64,7 @@ class TelemetryCollector:
             # store 返回 0~1 小数, renderer 再 *100 = %, 这里不要多除一次
             adoption_rate = all_metrics.get("adoption_rate", 0.0) or 0.0
 
-            # severity 重整: severity_counts -> severity_breakdown (按 high/medium/low/critical)
+            # severity 重整: severity_counts -> severity_breakdown (按 high/medium/low; 兼容历史 critical 数据)
             sev = win_metrics.get("severity_counts") or {}
             # 兼容 'unspecified' 标签
             severity_breakdown = {k: v for k, v in sev.items() if k != "unspecified"}
