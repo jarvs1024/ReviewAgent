@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
     header              TEXT,
     severity            TEXT,
     head_sha            TEXT NOT NULL,         -- 发布时的 head_sha
-    state               TEXT DEFAULT 'open',   -- open / applied / dismissed / superseded
+    state               TEXT DEFAULT 'open',   -- open / applied / dismissed / resolved / superseded
     applied_at          TIMESTAMP,
     adoption_source     TEXT,                  -- ui_apply / manual_change / adopt_command / unknown
     dismissed_at        TIMESTAMP,
@@ -180,7 +180,10 @@ class Store:
                 "severity_source": "ALTER TABLE suggestions ADD COLUMN severity_source TEXT",
                 "label": "ALTER TABLE suggestions ADD COLUMN label TEXT",
                 "posted_at": "ALTER TABLE suggestions ADD COLUMN posted_at TIMESTAMP",
-                "adoption_source": "ALTER TABLE suggestions ADD COLUMN adoption_source TEXT",
+    "adoption_source": "ALTER TABLE suggestions ADD COLUMN adoption_source TEXT",
+                "resolved_at": "ALTER TABLE suggestions ADD COLUMN resolved_at TIMESTAMP",
+                "resolved_by": "ALTER TABLE suggestions ADD COLUMN resolved_by TEXT",
+                "resolution_source": "ALTER TABLE suggestions ADD COLUMN resolution_source TEXT",
             }
             for column, sql in migrations.items():
                 if column not in columns:
@@ -820,7 +823,7 @@ class Store:
         dismissed_reason: str | None = None,
         adoption_source: str | None = None,
     ) -> None:
-        """标记 suggestion 为 applied / dismissed / superseded."""
+        """标记 suggestion 为 applied / dismissed / resolved / superseded."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -833,6 +836,10 @@ class Store:
                     dismissed_by = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_by END,
                     dismissed_reason = CASE WHEN ? = 'dismissed' AND ? IS NOT NULL
                                             THEN ? ELSE dismissed_reason END
+                    ,resolved_at = CASE WHEN ? = 'resolved' THEN ? ELSE resolved_at END
+                    ,resolved_by = CASE WHEN ? = 'resolved' THEN ? ELSE resolved_by END
+                    ,resolution_source = CASE WHEN ? = 'resolved' AND ? IS NOT NULL
+                                              THEN ? ELSE resolution_source END
                 WHERE note_id = ?
                 """,
                 (state, _fmt_dt(_utcnow()),
@@ -841,6 +848,9 @@ class Store:
                  state, _fmt_dt(_utcnow()),
                  state, actor_username,
                  state, dismissed_reason, dismissed_reason,
+                 state, _fmt_dt(_utcnow()),
+                 state, actor_username,
+                 state, adoption_source, adoption_source,
                  note_id),
             )
 
@@ -941,13 +951,16 @@ class Store:
         total = sum(states.values())
         adopted = states.get("applied", 0)
         dismissed = states.get("dismissed", 0)
+        resolved = states.get("resolved", 0)
+        processed = adopted + dismissed + resolved
         return {
             "total": total, "state_counts": states,
             "action_counts": action_counts,
             "severity_counts": {row["severity"]: row["n"] for row in severities},
-            "adopted": adopted, "dismissed": dismissed,
+            "adopted": adopted, "dismissed": dismissed, "resolved": resolved,
+            "processed": processed,
             "open": states.get("open", 0),
-            "adoption_rate": round(adopted / (adopted + dismissed) * 100, 1) if adopted + dismissed else 0.0,
+            "adoption_rate": round(adopted / processed * 100, 1) if processed else 0.0,
         }
 
     def suggestion_metrics(self, *, project_id: int | None = None,
@@ -964,6 +977,8 @@ class Store:
             by_action[row["action"]] = by_action.get(row["action"], 0) + 1
         adopted = by_state.get("applied", 0)
         dismissed = by_state.get("dismissed", 0)
+        resolved = by_state.get("resolved", 0)
+        processed = adopted + dismissed + resolved
         total = len(suggestions)
         # 采纳率 = applied / total (含 open). 前端 renderer 期望 0~1 小数
         # (再 * 100 = %), 与 my-pr-agent reporting/renderer.py 一致.
@@ -975,6 +990,8 @@ class Store:
             "action_counts": by_action,
             "adopted": adopted,
             "dismissed": dismissed,
+            "resolved": resolved,
+            "processed": processed,
             "adoption_rate": adoption_rate,
             # 兼容老前端: 直接给百分数字段
             "adoption_pct": round(adoption_rate * 100, 1),

@@ -119,6 +119,31 @@ def test_unchanged_target_lines_stay_open(tmp_telemetry):
 
     sug = s.get_suggestion_by_note_id("note-1")
     assert sug["state"] == "open"
+
+
+def test_resolved_discussion_without_code_change_is_unclassified(tmp_telemetry):
+    """直接点“解决主题”不能误记为采纳或忽略。"""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    _seed_suggestion(s)
+    gl = MagicMock()
+    gl.is_discussion_resolved.return_value = True
+    unchanged_file = "def foo():\n    pass\n    return 1\nprint('after')\n"
+    gl.get_file_at_sha.side_effect = [unchanged_file, unchanged_file]
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=s):
+        result = auto_detect_applied(
+            project_id=34, mr_iid=200, head_sha="newhead", actor_username="root",
+        )
+
+    assert result["resolved"] == 1
+    assert result["applied"] == 0
+    suggestion = s.get_suggestion_by_note_id("note-1")
+    assert suggestion["state"] == "resolved"
+    assert suggestion["resolution_source"] == "gitlab_resolve"
     gl.resolve_discussion.assert_not_called()
 
 

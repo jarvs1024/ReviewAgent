@@ -1223,11 +1223,22 @@ class ImproveCommand(BaseCommand):
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
-        # 严重度 × 状态聚合 (open / applied / dismissed 分桶)
+        # 在汇总前同步 GitLab 直接解决的 Discussion；代码落地仍优先判定为 applied。
+        if head_sha:
+            try:
+                from reviewagent.commands.suggestion_actions import auto_detect_applied
+                auto_detect_applied(
+                    project_id=self.project_id, mr_iid=self.mr_iid,
+                    head_sha=head_sha, actor_username="telemetry-sync",
+                )
+            except Exception as e:
+                logger.warning("improve.overview_sync_resolved failed (non-fatal): {}", e)
+
+        # 严重度 × 状态聚合 (open / applied / dismissed / resolved 分桶)
         sev_buckets: dict[str, dict[str, int]] = {
-            "high": {"open": 0, "applied": 0, "dismissed": 0},
-            "medium": {"open": 0, "applied": 0, "dismissed": 0},
-            "low": {"open": 0, "applied": 0, "dismissed": 0},
+            "high": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
+            "medium": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
+            "low": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
         }
         try:
             from reviewagent.telemetry.store import get_store
@@ -1239,7 +1250,7 @@ class ImproveCommand(BaseCommand):
                 sev = (s.get("severity") or "medium").lower()
                 state = (s.get("state") or "open").lower()
                 if sev not in sev_buckets:
-                    sev_buckets[sev] = {"open": 0, "applied": 0, "dismissed": 0}
+                    sev_buckets[sev] = {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0}
                 if state not in sev_buckets[sev]:
                     sev_buckets[sev][state] = 0
                 sev_buckets[sev][state] += 1
@@ -1248,25 +1259,28 @@ class ImproveCommand(BaseCommand):
 
         # 行聚合 (合计 = open + applied + dismissed)
         rows: list[dict[str, int | str]] = []
-        total_open = total_applied = total_dismissed = 0
+        total_open = total_applied = total_dismissed = total_resolved = 0
         for sev in ("high", "medium", "low"):
             emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}[sev]
             label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}[sev]
-            bucket = sev_buckets.get(sev, {"open": 0, "applied": 0, "dismissed": 0})
+            bucket = sev_buckets.get(sev, {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0})
             open_n = bucket["open"]
             applied_n = bucket["applied"]
             dismissed_n = bucket["dismissed"]
+            resolved_n = bucket["resolved"]
             total_open += open_n
             total_applied += applied_n
             total_dismissed += dismissed_n
+            total_resolved += resolved_n
             rows.append({
                 "label": f"{emoji} {label}",
                 "open": open_n,
                 "applied": applied_n,
                 "dismissed": dismissed_n,
-                "sum": open_n + applied_n + dismissed_n,
+                "resolved": resolved_n,
+                "sum": open_n + applied_n + dismissed_n + resolved_n,
             })
-        grand_total = total_open + total_applied + total_dismissed
+        grand_total = total_open + total_applied + total_dismissed + total_resolved
         new_count = len(inline_posted)
         head_short = (head_sha or "")[:7] if head_sha else ""
 
@@ -1274,14 +1288,14 @@ class ImproveCommand(BaseCommand):
         lines.append("## 检视汇总")
         lines.append("")
         # 单表 5 列: 严重度 × {待处理/采纳/忽略/合计}
-        lines.append("| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 合计 |")
-        lines.append("|:---:|:---:|:---:|:---:|:---:|")
+        lines.append("| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 🔒 已关闭（未分类） | 合计 |")
+        lines.append("|:---:|:---:|:---:|:---:|:---:|:---:|")
         for row in rows:
             lines.append(
-                f"| {row['label']} | {row['open']} | {row['applied']} | {row['dismissed']} | {row['sum']} |"
+                f"| {row['label']} | {row['open']} | {row['applied']} | {row['dismissed']} | {row['resolved']} | {row['sum']} |"
             )
         lines.append(
-            f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{grand_total}** |"
+            f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{total_resolved}** | **{grand_total}** |"
         )
         lines.append("")
         # 底部: 单行紧凑元信息 (CST 时间与本地对齐)

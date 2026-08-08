@@ -26,6 +26,15 @@ _ADOPTION_SOURCE_LABELS = {
     "manual_change": "手动修改",
     "adopt_command": "/adopt",
     "unknown": "历史数据",
+    "gitlab_resolve": "GitLab 直接解决主题",
+}
+
+_STATE_LABELS = {
+    "open": "待处理",
+    "applied": "已采纳",
+    "dismissed": "已忽略",
+    "resolved": "已关闭（未分类）",
+    "superseded": "已过期",
 }
 
 
@@ -123,6 +132,7 @@ async def mr_suggestions(
     for row in rows:
         source = row.get("adoption_source")
         row["adoption_source_label"] = _adoption_source_label(source)
+        row["state_label"] = _STATE_LABELS.get(row.get("state"), row.get("state"))
     return {"total": len(rows), "limit": limit, "offset": offset, "suggestions": rows}
 
 
@@ -281,4 +291,3 @@ async def read_weekly_report(name: str) -> dict[str, Any]:
     if not path.exists():
         raise HTTPException(404, f"report not found: {name}")
     return {"name": name, "json": json.loads(path.read_text(encoding="utf-8"))}
-

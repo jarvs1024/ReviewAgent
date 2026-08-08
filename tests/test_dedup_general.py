@@ -636,17 +636,17 @@ def test_overview_summary_format_with_full_data(tmp_telemetry):
     assert "V0" not in out and "V1" not in out and "V2" not in out, \
         f"不应有 V{{N}} 版本号: {out!r}"
 
-    # 2. 单表 5 列 (严重度 × 状态 × 合计)
-    assert "| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 合计 |" in out
-    # HIGH: 1 open / 0 applied / 0 dismissed / 1 sum
-    assert "| 🔴 HIGH | 1 | 0 | 0 | 1 |" in out
-    # MEDIUM: 0 open / 1 applied / 0 dismissed / 1 sum
-    assert "| 🟡 MEDIUM | 0 | 1 | 0 | 1 |" in out
-    # LOW: 0 open / 0 applied / 1 dismissed / 1 sum
-    assert "| 🟢 LOW | 0 | 0 | 1 | 1 |" in out
+    # 2. 单表 6 列 (严重度 × 状态 × 合计)
+    assert "| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 🔒 已关闭（未分类） | 合计 |" in out
+    # HIGH: 1 open / 0 applied / 0 dismissed / 0 resolved / 1 sum
+    assert "| 🔴 HIGH | 1 | 0 | 0 | 0 | 1 |" in out
+    # MEDIUM: 0 open / 1 applied / 0 dismissed / 0 resolved / 1 sum
+    assert "| 🟡 MEDIUM | 0 | 1 | 0 | 0 | 1 |" in out
+    # LOW: 0 open / 0 applied / 1 dismissed / 0 resolved / 1 sum
+    assert "| 🟢 LOW | 0 | 0 | 1 | 0 | 1 |" in out
 
     # 3. 加粗总计行: 1+0+0 / 0+1+0 / 0+0+1 / 3 total
-    assert "| **总计** | **1** | **1** | **1** | **3** |" in out
+    assert "| **总计** | **1** | **1** | **1** | **0** | **3** |" in out
 
     # 4. 单行元信息: 本次新增 + CST 时间 + HEAD sha 短码
     assert "🆕 本次新增 2 条" in out

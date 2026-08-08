@@ -770,6 +770,7 @@ def auto_detect_applied(
         "applied": 0,
         "unchanged": 0,
         "errors": 0,
+        "resolved": 0,
         "applied_note_ids": [],
     }
     for sug in open_sugs:
@@ -898,6 +899,30 @@ def auto_detect_applied(
                         )
 
         if not changed:
+            # GitLab “解决主题”只表示 Discussion 被关闭，不能直接算采纳。
+            # 只有前面的代码比对确认目标已落地时才进入 applied；否则单独记录为
+            # resolved，避免覆盖同 diff 手动修改的自动采纳判定。
+            if resolved is True:
+                current = store.get_suggestion_by_note_id(note_id)
+                if current and current.get("state") == "open":
+                    store.update_suggestion_state(
+                        note_id, "resolved", actor_username=actor_username,
+                        adoption_source="gitlab_resolve",
+                    )
+                    store.record_suggestion_action(
+                        project_id=project_id, mr_iid=mr_iid,
+                        suggestion_note_id=note_id, file_path=file_path,
+                        target_line=target_line, action="resolved",
+                        actor_username=actor_username,
+                        reason="GitLab 直接解决主题，未检测到建议代码落地",
+                        validation_status="gitlab-resolve",
+                        adoption_source="gitlab_resolve",
+                        head_sha_posted=sug.get("head_sha"),
+                        head_sha_current=head_sha,
+                    )
+                    result.setdefault("resolved", 0)
+                    result["resolved"] += 1
+                continue
             result["unchanged"] += 1
             continue
 
