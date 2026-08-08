@@ -194,6 +194,30 @@ def _extract_inner_json(text: str) -> object:
     raise json.JSONDecodeError("no json object in inner text", text, 0)
 
 
+def _unwrap_markdown_wrapper(text: str) -> str:
+    """嗅探 text 是否是字面 `{"markdown": "..."}` 包装, 是则剥出 markdown.
+
+    LLM 通过 qodercli 时, result 字段是字符串. 偶尔 LLM 把内层的 JSON
+    也当字符串输出, 出现 `{"markdown": "**概述**\\n\\n..."}` 这种嵌套.
+    直接 fallback 会把整个字面 JSON 当 markdown, 钉钉群里看到一坨裸 JSON.
+    这里再嗅探一次, 找到就剥开.
+    """
+    if not text:
+        return text
+    head = text.lstrip()
+    if not head.startswith("{"):
+        return text
+    try:
+        obj = json.loads(head, strict=False)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(obj, dict):
+        md = obj.get("markdown")
+        if isinstance(md, str):
+            return md
+    return text
+
+
 def _build_cmd(
     *,
     node_path: str,
@@ -399,8 +423,12 @@ def run_subprocess(
             )
     except json.JSONDecodeError:
         if tolerant_markdown:
+            # 嗅探: text 本身可能是字面 JSON 包装 `{"markdown": "..."}`
+            # (LLM 在 result 字段里再嵌一层 JSON 时常见), 这种情况应该
+            # 递归剥一次, 避免 caller 拿到 `{"markdown": "..."}` 字面字符串.
+            stripped = _unwrap_markdown_wrapper(text)
             return LLMResult(
-                data={"markdown": text},
+                data={"markdown": stripped},
                 provider="qodercli",
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,

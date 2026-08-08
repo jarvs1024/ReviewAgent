@@ -214,6 +214,32 @@ def _fmt_delta(delta, suffix: str = "", digits: int = 1) -> str:
     return val
 
 
+def _maybe_unwrap_llm_markdown(text: str | None) -> str:
+    """LLM markdown 字符串嗅探兜底.
+
+    部分 agent (weekly_change_summary / weekly_quality_scan) 即使走
+    tolerant_markdown 模式, 偶尔会把 `{"markdown": "..."}` 字面字符串
+    透传到 `data["markdown"]`. 这里再剥一次, 防止钉钉群里出现一坨裸 JSON.
+
+    非字符串或解析失败时原样返回.
+    """
+    if not text or not isinstance(text, str):
+        return text or ""
+    head = text.lstrip()
+    if not head.startswith("{"):
+        return text
+    import json as _json
+    try:
+        obj = _json.loads(head, strict=False)
+    except _json.JSONDecodeError:
+        return text
+    if isinstance(obj, dict):
+        md = obj.get("markdown")
+        if isinstance(md, str):
+            return md
+    return text
+
+
 def _render_telemetry(d: dict[str, Any]) -> str:
     """检视概况: 叙事性检视汇总(LLM 润色) 在上, 核心指标表在下.
 
@@ -229,7 +255,7 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     deltas = d.get("deltas") or {}
 
     # 汇总段: LLM 润色版优先, 否则确定性兜底
-    llm_summary = (d.get("llm_summary_markdown") or "").strip()
+    llm_summary = _maybe_unwrap_llm_markdown(d.get("llm_summary_markdown")).strip()
     if llm_summary:
         summary = _strip_leading_section_header(
             _demote_llm_headings(llm_summary), "本周检视汇总"
@@ -430,7 +456,7 @@ def _render_merged_mrs(d: dict[str, Any]) -> str:
     mr_list = d.get("mr_list") or []
 
     # 优先用 opencode 生成的 LLM 变更摘要; 为空(LLM 失败/未配置)才回退确定性拼装
-    llm_summary = (d.get("llm_description_markdown") or "").strip()
+    llm_summary = _maybe_unwrap_llm_markdown(d.get("llm_description_markdown")).strip()
     if llm_summary:
         summary = _strip_leading_section_header(_demote_llm_headings(llm_summary), "变更摘要")
     else:
@@ -482,6 +508,7 @@ def _is_core_path_for_scan(path: str) -> bool:
 
 def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
     """本周代码质量全量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
+    pre_rendered = _maybe_unwrap_llm_markdown(pre_rendered)
     if pre_rendered:
         # 防御性: 去掉 LLM 自带的节标题(渲染层已加), 并把 # 降级为粗体
         return _strip_leading_section_header(_demote_llm_headings(pre_rendered), "本周代码质量全量扫描")
