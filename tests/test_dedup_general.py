@@ -649,9 +649,10 @@ def test_overview_summary_format_with_full_data(tmp_telemetry):
     assert "| **总计** | **1** | **1** | **1** | **0** | **3** |" in out
 
     # 4. 单行元信息: 本次新增 + CST 时间 + HEAD sha 短码
-    assert "🆕 本次新增 2 条" in out
+    assert "🆕 **本次新增 2 条**" in out
     assert "CST" in out, f"时间应为 CST (本地时间), 避免与 UTC 混淆: {out!r}"
     assert "0123456" in out, f"应有 head_sha 短码 (前7位): {out!r}"
+    assert "已采纳" in out and "已忽略" in out and "已关闭（未分类）" in out
 
 
 def test_overview_summary_works_with_empty_state(tmp_telemetry):

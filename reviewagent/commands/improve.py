@@ -1212,7 +1212,7 @@ class ImproveCommand(BaseCommand):
         - Header 固定: `## 检视汇总` (pr_agent 风格, 不带版本号)
         - 单表 5 列: 严重度 × {待处理 / 已采纳 / 已忽略 / 合计}
         - 末行 加粗"总计"行
-        - 底部单行元信息: 本次新增 + CST 时间 + HEAD sha
+        - 底部元信息: 时间 + HEAD sha + 状态说明 + 最后一行本次新增
 
         数据来源:
         - telemetry store.list_suggestions() 聚合 severity × state
@@ -1298,18 +1298,22 @@ class ImproveCommand(BaseCommand):
             f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{total_resolved}** | **{grand_total}** |"
         )
         lines.append("")
-        # 底部: 单行紧凑元信息 (CST 时间与本地对齐)
+        # 底部: 时间和状态说明；“本次新增”固定放最后，便于快速确认本轮变化。
         try:
             ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S CST")
         except Exception:
             ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        meta_parts: list[str] = []
-        if new_count > 0:
-            meta_parts.append(f"🆕 本次新增 {new_count} 条")
-        meta_parts.append(f"⏱ {ts}")
+        meta_parts: list[str] = [f"⏱ {ts}"]
         if head_short:
             meta_parts.append(f"HEAD {head_short}")
         lines.append(" · ".join(meta_parts))
+        lines.append("")
+        lines.append("> ✅ **已采纳**：建议代码已通过 GitLab 应用建议、手动修改或 `/adopt` 确认采纳。")
+        lines.append("> ❌ **已忽略**：用户通过 `/dismiss` 明确关闭了建议，并记录忽略理由（如有）。")
+        lines.append("> 🔒 **已关闭（未分类）**：用户在 GitLab 中直接解决了主题，但系统无法确认该建议是采纳还是忽略。")
+        if new_count > 0:
+            lines.append("")
+            lines.append(f"🆕 **本次新增 {new_count} 条**")
         lines.append("")
         return "\n".join(lines)
 
