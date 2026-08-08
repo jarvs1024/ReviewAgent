@@ -1,5 +1,5 @@
 ---
-name: weekly-quality-reviewer
+name: weekly_quality_scan
 description: 本周代码质量全量扫描 — 基于本周所有 MR 变更数据，从整个项目出发做全局代码质量体检，固定输出 高风险模块/新增坏味道/测试覆盖与可靠性/建议跟进 四大小节
 output_schema:
   type: object

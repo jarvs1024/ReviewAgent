@@ -229,21 +229,53 @@ class TelemetryCollector:
             "不要机械罗列所有类别，要有归纳判断；数字准确使用我给的数据，不要编造。",
             "",
             "数据：",
-            f"- 本周 suggestion 数：{data.get('suggestion_count', 0)}",
-            f"- 本周窗口 MR 数：{data.get('mr_count', 0)}",
+            f"- 本周 suggestion 数：{data.get('suggestion_count', 0)} / 累计 {data.get('suggestion_total', 0)} 条",
+            f"- 本周窗口 MR 数：{data.get('mr_count', 0)} / 累计 MR 数：{data.get('mr_total', 0)}",
+            f"- 累计采纳率：{round(float(data.get('adoption_rate', 0)) * 100, 1)}%",
             f"- 严重度：high {hc}（{_p(hc)}%）、medium {med}（{_p(med)}%）、low/warning/other 共 {low}（{_p(low)}%）",
         ]
         if rules:
-            lines.append("- 问题类别(已翻译, 按次数降序)：")
+            lines.append("- 本周问题类别(已翻译, 按次数降序)：")
             for name, n in rules:
                 lines.append(f"    · {name} ×{n}")
         else:
-            lines.append("- 问题类别：无")
+            lines.append("- 本周问题类别：无")
+        # 补充上下文: 给 LLM 看到「为什么这些建议被忽略」和「检视器跑挂在哪」
+        # 这两个信号比裸数字更能洞察 review 噪音源 / CI 链路健康度
+        dismissal_reasons = data.get("dismissal_reasons") or {}
+        if dismissal_reasons:
+            top_dismiss = list(dismissal_reasons.items())[:3]
+            lines.append("- 本周 dismiss 原因 Top 3：")
+            for reason, n in top_dismiss:
+                lines.append(f"    · {reason} ×{n}")
+        failed_runs = data.get("failed_runs") or []
+        if failed_runs:
+            lines.append(f"- 本周检视器失败运行 Top 3（共 {len(failed_runs)} 条）：")
+            for r in failed_runs[:3]:
+                title = (r.get("mr_title") or "").strip()[:50]
+                lines.append(
+                    f"    · MR !{r.get('mr_iid')} ({title}) command={r.get('command')} "
+                    f"error={r.get('error', '')[:80]}"
+                )
+        # 补一个 by_command 健康度; 只能瞥一眼哪个 command 经常挂
+        by_command = data.get("by_command") or {}
+        if by_command:
+            sorted_cmds = sorted(
+                by_command.items(), key=lambda kv: -kv[1].get("failed", 0)
+            )[:5]
+            lines.append("- 本周检视命令 Top 5（按失败数降序）：")
+            for cmd, b in sorted_cmds:
+                lines.append(
+                    f"    · {cmd}: 总 {b.get('count', 0)} / 成功 {b.get('success', 0)} / "
+                    f"失败 {b.get('failed', 0)} / 跳过 {b.get('skipped', 0)}"
+                )
         if prev_data:
             prev_sev = prev_data.get("severity_breakdown") or {}
             prev_hc = prev_sev.get("high", 0) + prev_sev.get("critical", 0)
+            prev_ar = float(prev_data.get("adoption_rate") or 0) * 100
             lines.append(
-                f"- 上周参考：high+critical 共 {prev_hc} 条（用于趋势语感，不要编造具体对比）"
+                f"- 上周参考：high+critical 共 {prev_hc} 条、累计采纳率 {prev_ar:.1f}%"
+                f"（用于趋势语感，不要编造具体对比）"
             )
         return "\n".join(lines)
 

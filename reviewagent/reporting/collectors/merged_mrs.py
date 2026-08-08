@@ -170,6 +170,10 @@ class MergedMrsCollector:
             "- 不要 @ 作者（不要出现 @username）。",
             "- 不要输出 # 顶级标题，不要输出『变更摘要』标题（渲染层会加）。",
             "",
+            "【输入合同】MR 清单每条形如：",
+            "  [iid] 标题 | 作者 | ±additions/-deletions/(changed_files 文件) | 描述",
+            "变更规模量化有助于『新增』『修改』『删除』归类, 别忽略。",
+            "",
             "【输出要求】只输出一个 JSON 对象 {\"markdown\": \"...\"}。",
             "重要：markdown 值里所有换行必须用 \\n 表示，不要出现真实换行符；内部双引号用 \\\" 转义。",
             "示例：{\"markdown\": \"**概述**\n\n本周变更聚焦于随机 IO 工具的无限循环 bug 修复与输入校验增强。\n\n**新增**\n\n- 新增 test_plp_hima3361_17610 固定 IO 脚本（io 工具模块）\n- 新增 services 基础服务模块（root）\n\n**修改**\n\n- 修复 get_rand_io 在无合理 IO 时无限循环的 bug（io 工具模块）\n\n**删除**\n\n- 移除未使用的串行对象\"}",
@@ -181,12 +185,16 @@ class MergedMrsCollector:
             prev_count = prev_data.get("merge_count", prev_data.get("total", 0))
             lines.append(f"上周合并 MR 数：{prev_count}（用于趋势对比，不要编造）。")
         lines.append("")
-        lines.append("MR 清单（iid | 标题 | 作者 | 描述摘要）：")
+        lines.append("MR 清单（iid | 标题 | 作者 | ±增/删行数/(文件数) | 描述）：")
         for m in items[:40]:
             desc = (m.get("description") or "").strip().replace("\n", " ")[:300]
             author = m.get("author") or "?"
+            additions = int(m.get("additions") or 0)
+            deletions = int(m.get("deletions") or 0)
+            changed_files = int(m.get("changed_files") or 0)
             lines.append(
-                f"- [{m.get('iid')}] {m.get('title')} | 作者: {author} | {desc}"
+                f"- [{m.get('iid')}] {m.get('title')} | 作者: {author} "
+                f"| +{additions} -{deletions} ({changed_files} 文件) | {desc}"
             )
         return "\n".join(lines)
 

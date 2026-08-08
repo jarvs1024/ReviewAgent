@@ -1,5 +1,5 @@
 ---
-name: weekly-change-summarizer
+name: weekly_change_summary
 description: 把本周合并到目标分支的 MR 列表汇总成有洞察的中文变更摘要（概述 + 新增/修改/删除 四段式）
 output_schema:
   type: object

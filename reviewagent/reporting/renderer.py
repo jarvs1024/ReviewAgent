@@ -44,6 +44,27 @@ def section_title(name: str, fallback: str | None = None) -> str:
     return SECTION_TITLES.get(name, fallback or name)
 
 
+def _resolve_section_title(name: str, section: "SectionResult | None") -> str:
+    """Resolve SECTION_TITLES.format(...) 占位符.
+
+    段二 `merged_mrs` 标题含 `{branch}`, data 缺失或 section 为 None 时
+    用 "main" 兜底, 避免渲染出字面 `## 二、本周 {branch} 变更汇总`.
+    """
+    title = SECTION_TITLES.get(name, name)
+    if "{branch}" in title:
+        target_branch = None
+        if section is not None:
+            target_branch = (section.data or {}).get("target_branch")
+        if not target_branch:
+            target_branch = "main"
+        try:
+            title = title.format(branch=target_branch)
+        except (KeyError, IndexError):
+            title = title.replace("{branch}", target_branch)
+    return title
+    return SECTION_TITLES.get(name, fallback or name)
+
+
 def _demote_llm_headings(md: str | None) -> str:
     """LLM 输出里 `#` / `##` 标题降级为 `**粗体**`, DingTalk 渲染时不会被放大."""
     if not md:
@@ -510,8 +531,8 @@ def _render_repo_scan(d: dict[str, Any], pre_rendered: str | None) -> str:
     """本周代码质量全量扫描: 优先用 collector 的 markdown 字段, 否则从 data 拼."""
     pre_rendered = _maybe_unwrap_llm_markdown(pre_rendered)
     if pre_rendered:
-        # 防御性: 去掉 LLM 自带的节标题(渲染层已加), 并把 # 降级为粗体
-        return _strip_leading_section_header(_demote_llm_headings(pre_rendered), "本周代码质量全量扫描")
+        # 把 LLM 误用的 # 降级为粗体 (因为钉钉 markdown 渲染时不放大 #)
+        return _demote_llm_headings(pre_rendered)
     # 兜底: 由 data 合成 markdown (与新 collector 返回字段保持一致)
     target_branch = d.get("target_branch", "?")
     total_mrs = d.get("total_mrs", 0)
@@ -579,14 +600,11 @@ def render_markdown(artifact: WeeklyArtifact) -> str:
     for name in ordered:
         section = artifact.sections.get(name)
         if section is None:
-            parts.append(f"\n## {SECTION_TITLES.get(name, name)}\n\n> 本节未启用\n")
+            # section 未启用: 仍然要 resolve 标题 (merged_mrs 含 {branch} 占位)
+            parts.append(f"\n## {_resolve_section_title(name, None)}\n\n> 本节未启用\n")
             continue
 
-        title = SECTION_TITLES.get(name, name)
-        # merged_mrs 标题含 {branch} 占位符, 即使数据缺失也要用默认值替换, 避免残留字面量
-        if name == "merged_mrs":
-            branch = (section.data or {}).get("target_branch") or "main"
-            title = title.format(branch=branch)
+        title = _resolve_section_title(name, section)
 
         parts.append(f"\n## {title}\n")
 
