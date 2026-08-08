@@ -196,12 +196,21 @@ def render_section(name: str, sr: SectionResult) -> str:
     return "```json\n" + str(sr.data)[:1000] + "\n```"
 
 
-def _fmt_delta(delta, suffix: str = "") -> str:
-    """格式化环比 delta 为带箭头的短串; None 返回空串."""
+def _fmt_delta(delta, suffix: str = "", digits: int = 1) -> str:
+    """格式化环比 delta 为带箭头的短串; None 返回空串.
+
+    默认 `digits=1` 把浮点数截断到 1 位小数, 防止 14.7% (↑9.899999999999999pp)
+    这种 IEEE 浮点尾巴泄漏到钉钉表里. `digits=0` 用于整数.
+    """
     if delta is None:
         return ""
     arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
-    val = f"{arrow}{abs(delta)}{suffix}"
+    rounded = round(float(delta), digits)
+    # 兼容 -0.0 → 0
+    if rounded == 0:
+        rounded = 0
+        arrow = "→"
+    val = f"{arrow}{abs(rounded)}{suffix}"
     return val
 
 
@@ -345,10 +354,60 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
     else:
         problem_types = "本周未捕捉到具体规则命中的分布。"
 
-    follow = (
-        "类型标注、docstring 等规范问题可下沉到 CI 机械拦截；"
-        "接口参数、循环、资源等正确性问题应优先人工确认修复。"
-    )
+    # 跟进建议不再用"规范 CI / 正确性人工"这种万能套话, 改为基于
+    # 本周 top_rules 给出针对性 1~3 条具体动作. 规则前缀 -> 具体建议的
+    # 映射可以持续扩展, 缺的类别退化到通用提示 (但不退化成套话).
+    _RULE_ACTIONS = {
+        "SSD-RULE-TYPEHINTS":              "启用 ruff `ANN`/mypy strict 加入 CI, 一次性消存量",
+        "SSD-RULE-DOCSTRING-REQUIRED":     "在 pre-commit 跑 ruff `D` 系列, docstring 缺失直接 fail",
+        "SSD-RULE-NO-LOG-EXC":             "用 ruff `BLE` + `S` (logging 规范) 加 CI, 对裸 `except Exception` 报错",
+        "SSD-RULE-NO-BARE-PRINT":          "用 ruff `T201` (禁止 print) 加入 CI 阻断列表",
+        "SSD-RULE-NO-MUTABLE-DEFAULT":     "用 ruff `B006` 拦截可变默认参数",
+        "SSD-RULE-RESOURCE-CONTEXT-MANAGER": "用 ruff `SIM`/`PTH123` 拦截裸 open/close, 强制 with 语句",
+        "SSD-RULE-FORBIDDEN-COMMENT":      "把无效注释扫一遍存 issue, 用 ruff `ERA` 抑制注释式代码",
+        "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT": "用 ruff `F401`/`F403` 拦截 `from foo import *`",
+        "R-LOOP":                          "把『循环边界/无限循环』作为 review checklist 红线条款",
+        "R-RES":                           "扫一遍 `open/requests/socket` 调用, 强制 `with` + 超时",
+        "R-ERR":                           "把裸 `except:` 与静默 `pass` 列为硬错误, 加入 review 范本",
+        "R-SHELL":                         "对所有 shell 调用加超时 + 异常类型细化 + sandbox 跑",
+        "R-CI":                            "对并行用例加临时目录 PID 隔离 / 串行锁, 修 flaky",
+        "R-OTHER-IMPACT":                  "对跨文件函数签名变化在 MR 描述里点出 caller, 拉对应 owner review",
+    }
+
+    follow_lines: list[str] = []
+    seen_categories: set[str] = set()
+    for raw_key, n in raw_rules:
+        if n <= 0:
+            continue
+        # 命中精确规则 → 命中前缀 (R-OTHER-IMPACT:caller_param 这种 long-form)
+        action = _RULE_ACTIONS.get(raw_key)
+        if not action and raw_key.startswith("R-OTHER-IMPACT:"):
+            action = _RULE_ACTIONS["R-OTHER-IMPACT"]
+        if not action and raw_key.startswith("R-OTHER:"):
+            action = "针对新增『其他』类违规, 沉淀一条新规则到 AGENTS.md 规范清单"
+        if not action:
+            continue
+        # 同类别去重 (避免重复推荐同一类规则)
+        cat = raw_key.split(":")[0]
+        if cat in seen_categories:
+            continue
+        seen_categories.add(cat)
+        follow_lines.append(f"- **{translate_rule_key(raw_key)}** ×{n}: {action}")
+        if len(follow_lines) >= 3:
+            break
+
+    if not follow_lines:
+        # 没匹配到已知规则, 给一句具体观察而不是套话
+        if hc_p >= 50:
+            follow_lines.append(
+                f"- 本周 high 占比 {hc_p}%, 建议本周 review 时优先关注 high 严重度的具体 MR 列表"
+            )
+        else:
+            follow_lines.append(
+                f"- 本周无 dominant 规则, 建议按 top_rules 的人工抽样 5 个 suggestion 看根因"
+            )
+
+    follow = "\n".join(follow_lines)
 
     return "\n\n".join([
         f"**概述**\n\n{overview}",

@@ -146,19 +146,26 @@ class TelemetryCollector:
             # ---- 环比 delta (从上周 artifact 计算, 给 renderer 显示趋势箭头) ----
             prev_t = (ctx.prev_data.get("telemetry") or {}) if ctx.prev_data else {}
             if prev_t:
-                def _delta(cur, p):
-                    return cur - p if (cur is not None and p is not None) else None
+                def _delta(cur, p, *, round_digits=None):
+                    if cur is None or p is None:
+                        return None
+                    if round_digits is None:
+                        return cur - p
+                    return round(round(cur, round_digits) - round(p, round_digits), round_digits)
                 prev_sev = prev_t.get("severity_breakdown") or {}
                 prev_hc = (prev_sev.get("high", 0) + prev_sev.get("critical", 0))
                 cur_hc = severity_breakdown.get("high", 0) + severity_breakdown.get("critical", 0)
-                # adoption_rate: prev 可能不存在该字段, 用 None 表示"无对比基准"
+                # adoption_rate: prev 可能不存在该字段, 用 None 表示"无对比基准";
+                # 两边都 round 到 1 位小数, 避免 14.7 - 4.8 = 9.899999999999999
+                # 之类的 IEEE 浮点尾巴泄漏到钉钉表.
                 prev_ar = prev_t.get("adoption_rate")
                 stats["deltas"] = {
                     "mr_count": _delta(mr_count, prev_t.get("mr_count")),
                     "suggestion_count": _delta(suggestion_count, prev_t.get("suggestion_count")),
                     "adoption_rate_pct": _delta(
-                        round(adoption_rate * 100, 1),
-                        round(prev_ar * 100, 1) if prev_ar is not None else None,
+                        adoption_rate * 100,
+                        (prev_ar or 0) * 100,
+                        round_digits=1,
                     ),
                     "high_critical": _delta(cur_hc, prev_hc if prev_sev else None),
                 }
@@ -204,7 +211,17 @@ class TelemetryCollector:
             "",
             "**跟进建议**",
             "",
-            "一句话：规范类问题可下沉 CI 拦截；正确性问题应优先人工确认修复。",
+            "给 1~3 条**针对性**下一步动作（不要再机械地说『可下沉 CI / 优先人工』这种万能套话）。",
+            "从下面数据挑本周 top 1~3 个高频类别，每个类别给出**一条具体动作**，如：",
+            "  · 「类型注解缺失 ×N → 启用 ruff `ANN` / mypy strict 加入 CI 一次性消存量」",
+            "  · 「裸 except Exception ×N → 用 ruff `BLE` + logging.exception 加 CI 阻断」",
+            "  · 「R-RES 资源句柄 ×N → 强制 `with` 上下文管理，扫一遍存量 open 调用」",
+            "规则前缀 → 建议动作映射（你可以参考，但要根据 top_rules 实际命名取最贴的那一条）：",
+            "  SSD-RULE-TYPEHINTS, SSD-RULE-DOCSTRING-REQUIRED, SSD-RULE-NO-LOG-EXC, SSD-RULE-NO-BARE-PRINT,",
+            "  SSD-RULE-NO-MUTABLE-DEFAULT, SSD-RULE-RESOURCE-CONTEXT-MANAGER, SSD-RULE-FORBIDDEN-COMMENT,",
+            "  SSD-RULE-FORBIDDEN-WILDCARD-IMPORT, R-LOOP, R-RES, R-ERR, R-SHELL, R-CI, R-OTHER-IMPACT:*",
+            "输出格式：每个动作前用 `- **`粗体中文问题类别名**` ×N`：具体动作`**；",
+            "若 top 类别没在映射里，也要**根据本周实际命名给一条具体动作**，不要退化成套话。",
             "",
             "要求：严格输出 JSON：{\"markdown\": \"...\"}, markdown 用中文；必须用上述 **概述**/**问题类型**/**跟进建议** 三小节；",
             "每个小节标题独占一行，标题与正文之间用空行分隔（JSON 中是 \\n\\n）；",

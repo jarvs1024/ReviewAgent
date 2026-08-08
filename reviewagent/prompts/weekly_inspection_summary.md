@@ -17,7 +17,32 @@
 
 **跟进建议**
 
-一句话：规范类问题可下沉 CI 拦截；正确性问题应优先人工确认修复。
+给 1~3 条**针对性**下一步动作（**不再**机械地说『可下沉 CI / 优先人工』这种万能套话）。
+
+从下面数据挑本周 top 1~3 个高频类别，每个类别给出**一条具体动作**，如：
+- 「类型注解缺失 ×N → 启用 ruff `ANN` / mypy strict 加入 CI 一次性消存量」
+- 「裸 except Exception ×N → 用 ruff `BLE` + logging.exception 加 CI 阻断」
+- 「R-RES 资源句柄 ×N → 强制 `with` 上下文管理，扫一遍存量 open 调用」
+
+规则前缀 → 建议动作映射（你可以参考，但要根据 top_rules 实际命名取最贴的那一条）：
+- SSD-RULE-TYPEHINTS          → ruff `ANN` / mypy strict
+- SSD-RULE-DOCSTRING-REQUIRED → ruff `D` 系列，docstring 缺失直接 fail
+- SSD-RULE-NO-LOG-EXC         → ruff `BLE` + `S`，对裸 `except Exception` 报错
+- SSD-RULE-NO-BARE-PRINT      → ruff `T201`（禁止 print）加入 CI 阻断
+- SSD-RULE-NO-MUTABLE-DEFAULT → ruff `B006` 拦截可变默认参数
+- SSD-RULE-RESOURCE-CONTEXT-MANAGER → ruff `SIM` / `PTH123`，强制 `with`
+- SSD-RULE-FORBIDDEN-COMMENT  → 扫一遍无效注释存 issue，ruff `ERA` 抑制注释式代码
+- SSD-RULE-FORBIDDEN-WILDCARD-IMPORT → ruff `F401`/`F403` 拦截 `import *`
+- R-LOOP        → 把『循环边界/无限循环』作为 review checklist 红线
+- R-RES         → 扫 `open/requests/socket`，强制 `with` + 超时
+- R-ERR         → 裸 `except:` / 静默 `pass` 列为硬错误加入 review 范本
+- R-SHELL       → 对所有 shell 调用加超时 + 异常类型细化 + sandbox 跑
+- R-CI          → 并行用例加临时目录 PID 隔离 / 串行锁，修 flaky
+- R-OTHER-IMPACT:* → 对跨文件签名变化在 MR 描述点 caller，拉对应 owner review
+- R-OTHER:*     → 沉淀新规则到 AGENTS.md 规范清单
+
+输出格式：每个动作前用 `- **`粗体中文问题类别名**` ×N`：具体动作`**；
+若 top 类别没在映射里，也要**根据本周实际命名给一条具体动作**，不要退化成套话。
 
 要求：
 - 严格输出 JSON：`{"markdown": "..."}`，markdown 用中文。
