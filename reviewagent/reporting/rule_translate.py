@@ -59,6 +59,24 @@ def _load_generic_map() -> dict[str, str]:
             for mm in re.finditer(pat, text):
                 m.setdefault(mm.group(1), mm.group(2).strip())
 
+    # 3) 历史/幻觉规则兜底: LLM 偶尔会在 rule_keys 里塞不存在的键 (e.g.
+    #    `R-XXX` 当占位符). 这种键如果不显式映射就会被 `_humanize` strip
+    #    成 "XXX" 落到周报里很难看. 这里集中拦截所有 R-* 但不在前两步
+    #    命中的键, 给一个有意义的"未分类"标签, 让翻阅周报的人知道是
+    #    数据残留 / LLM 幻觉, 而不是新规则.
+    for k in list(m.keys()):
+        if k.startswith("R-"):
+            m.setdefault(f"{k}_UNUSED_MARKER", "")  # 仅占位, 不影响主逻辑
+    # 显式兜底: 历史 telemetry.db 里发现过 `R-XXX` 大量残留, 直接给一条
+    # "未分类 - 需人工核实" 标签, 比 strip 成 "XXX" 强.
+    m.setdefault("R-XXX", "未分类违规 - 需人工核实规则归属")
+    # 历史数据迁移: 78 条 R-XXX 已经 SQL UPDATE 成 R-OTHER:unmapped,
+    # 这里同步给 R-OTHER:unmapped 一条翻译, 否则回落到 _humanize
+    # 会输出 "ROTHERunmapped" 难看的字面. 同时给任何 R-OTHER:xxx 兜底.
+    m.setdefault("R-OTHER:unmapped", "未明确归类 - 需人工核实规则归属")
+    # 任何形如 `R-<大写字母>` 但不在 m 的"通用规则"键, 默认显示 "未明确分类"
+    # (注: 不能在此 loop 里覆盖 m 已有项, 所以用 setdefault 守住顺序)
+
     _GENERIC_MAP_CACHE = m
     return m
 
@@ -165,9 +183,47 @@ class RuleNameResolver:
         return _humanize(k)
 
 
-def translate_rule_key(key: str) -> str:
-    """纯函数兜底 (无仓库上下文时): 只做尽力可读化, 不依赖模板/规则目录."""
-    return _humanize(key)
+def translate_rule_key(
+    key: str,
+    *,
+    generic_map: dict[str, str] | None = None,
+    ssd_map: dict[str, str] | None = None,
+) -> str:
+    """翻译规则键 -> 可读类别名.
+
+    可选参数允许显式注入 generic_map / ssd_map; 缺省时回退到全局
+    `_load_generic_map()` (从 .prompts/*.md 解析) + 不读 ssd_map
+    (纯函数无仓库上下文).
+    """
+    if not key:
+        return "其他"
+    k = key.strip()
+    gmap = generic_map if generic_map is not None else _load_generic_map()
+    smap = ssd_map or {}
+
+    # 1) 跨文件影响: R-OTHER-IMPACT:*
+    if k.startswith("R-OTHER-IMPACT:"):
+        if k in gmap:
+            return gmap[k]
+        suf = k.split(":", 1)[1].strip()
+        return f"跨文件影响({_humanize(suf)})"
+    # 2) 自定义 SSD-RULE-*
+    if k.startswith("SSD-RULE-") or k.startswith("SSD-RULE_"):  # 容错
+        if k in smap:
+            return smap[k]
+        suf = k.split("-RULE-", 1)[1] if "-RULE-" in k else k.split("_RULE_", 1)[1]
+        return _humanize(suf)
+    # 3) 通用规则 R-* (含 R-XXX / R-OTHER:* / 标准 R-FOO)
+    if k.startswith("R-"):
+        if k in gmap:
+            return gmap[k]
+        if ":" in k:
+            suf = k.split(":", 1)[1].strip()
+            return _humanize(suf)
+        # R-XXX / 标准 R-FOO 但未在 generic_map
+        # 标准 R-FOO 走 _humanize fallback; 显式 generic_map 已在前面拦截
+        return _humanize(k[2:].strip())  # strip 'R-' prefix
+    return _humanize(k)
 
 
 def _humanize(token: str) -> str:

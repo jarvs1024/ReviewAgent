@@ -78,11 +78,11 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 
 ### 跨文件影响类问题的兜底 (`R-OTHER-IMPACT`)
 
-跨文件影响问题**不要求命中 R-XXX 19 类规则** — 函数签名 / 常量 / schema / import 路径变更引起的
-caller 不同步、引用方失配、类型不匹配等问题，类别可能完全不在 19 类 R-XXX 表里。
+跨文件影响问题**不要求命中 R-* 表内规则** — 函数签名 / 常量 / schema / import 路径变更引起的
+caller 不同步、引用方失配、类型不匹配等问题，类别可能完全不在 R-* 表内。
 
 **强制规则**:
-- 跨文件影响类问题**必须产 suggestion**(只要 caller 在 diff 里能 Apply)，**不必先过 R-XXX 命中**
+- 跨文件影响类问题**必须产 suggestion**(只要 caller 在 diff 里能 Apply)，**不必先过 R-* 表内命中**
 - `label` 填 `cross-file impact`，`header` 含"caller 同步" / "引用方更新" / "类型契约" / "常量同步"之一
 - `rationale` 字段以 `R-OTHER-IMPACT:<简短描述>` 开头, 例:
   - `R-OTHER-IMPACT:caller_param` — caller 没传新参数
@@ -90,7 +90,7 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
   - `R-OTHER-IMPACT:import_path` — import 旧路径还有引用
   - `R-OTHER-IMPACT:fixture_break` — fixture 改了, 引用它的 test 失配
 - **每个 missing parameter 独立产一条 suggestion** — `probe()` 加了 3 个新参数 (timeout, retry, attempts) 而 caller 一个都没传, 必须发 3 条独立 suggestion, 不要合并为 1 条
-- 优先级: **P1** — 见下 `## 总检视顺序` 段 🟠 优先 1 节, 与 SSD 同级 (都是强信号) 但**先于 SSD 执行**; 不要被 R-XXX / R-OTHER 检查顺序压后
+- 优先级: **P1** — 见下 `## 总检视顺序` 段 🟠 优先 1 节, 与 SSD 同级 (都是强信号) 但**先于 SSD 执行**; 不要被 R-* / R-OTHER 检查顺序压后
 
 **R-OTHER:magic_number 覆盖范围 (含 inline 循环)**:
 - module-level 常量 (例: `MAX_BUFFER = 4096`) ✓
@@ -325,3 +325,18 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 - ✅ 允许：read（项目源码 / diff / AGENTS.md）
 - ❌ 禁止：write / edit / bash / webfetch
 - ❌ 禁止：执行任何会修改文件系统或访问网络的工具
+### ⛔ 严禁规则键字面占位符
+
+**绝对不要**在 `rule_keys` 列表 / `rationale` 字段写以下字面占位词 — 它们**不存在**，只是 `_general_rules_block.md` 行文占位：
+
+- ❌ `R-XXX` / `R-X` / `R-FOO` / `R-TODO` / `R-...` 等等一切"看着像规则但其实是占位"的字符串
+
+命中不上 `R-*` 表内规则时，统一改写为：
+
+| 情况 | 写法 |
+|---|---|
+| 兜底违规（不在 19 类 R-* 表内）| `R-OTHER:<具体短描述>` — 必须在前面 `_general_rules_block.md` §"兜底:未命中 R-* 规则" 段给出的清单里挑 |
+| 跨文件影响 | `R-OTHER-IMPACT:<具体短描述>` |
+| 没把握归哪一类 | 写到 `summary_md` 文本，不强行命名新 rule_key |
+
+历史 telemetry.db 里发现过 `R-XXX` 字面作为 `rule_key` 落到 suggestions 表 (LLM 幻觉)，会让周报"问题类型"段出现 `XXX ×N` 的诡异条目。**从本次起 `R-XXX` 及类似占位词严禁写出**。
