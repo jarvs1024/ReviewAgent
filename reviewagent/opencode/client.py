@@ -73,6 +73,9 @@ class OpencodeClient:
             if config.opencode_password
             else None
         )
+        # 复用连接池: 每次 run() 需 3 个 HTTP 请求 (POST /session + POST /message + DELETE /session),
+        # 复用 Client 可避免每次请求都建 TCP 连接
+        self._http = httpx.Client(auth=self._auth, timeout=30)
 
     @property
     def auth(self) -> tuple[str, str] | None:
@@ -82,10 +85,9 @@ class OpencodeClient:
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         url = f"{self.base_url}{path}"
         try:
-            with httpx.Client(auth=self._auth, timeout=30) as c:
-                r = c.request(method, url, **kwargs)
-                r.raise_for_status()
-                return r
+            r = self._http.request(method, url, **kwargs)
+            r.raise_for_status()
+            return r
         except httpx.HTTPStatusError as e:
             body = e.response.text[:500] if e.response else ""
             raise OpencodeError(f"opencode HTTP {e.response.status_code}: {body}") from e

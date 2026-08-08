@@ -13,8 +13,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import httpx
-
 from reviewagent.llm.base import BaseLLMProvider, LLMResult
 from reviewagent.opencode.client import OpencodeClient, OpencodeResult
 
@@ -64,9 +62,8 @@ class OpencodeProvider(BaseLLMProvider):
     def health_check(self) -> bool:
         """走 opencode GET /api/health; 网络或 auth 失败返回 False."""
         try:
-            with httpx.Client(auth=self._client.auth, timeout=5) as c:
-                r = c.get(f"{self._client.base_url}/api/health")
-                return r.status_code == 200
+            r = self._client._request("GET", "/api/health", timeout=5)
+            return r.status_code == 200
         except Exception:
             return False
 

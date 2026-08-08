@@ -129,6 +129,9 @@ class ImproveCommand(BaseCommand):
         )
 
         chunk_results: list[dict[str, Any]] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        last_model = ""
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
             for fp in files:
@@ -143,8 +146,12 @@ class ImproveCommand(BaseCommand):
             for fut in as_completed(futures):
                 fp = futures[fut]
                 try:
-                    result = fut.result()
-                    chunk_results.append(result)
+                    oc_result = fut.result()
+                    chunk_results.append(oc_result.data)
+                    total_prompt_tokens += oc_result.prompt_tokens
+                    total_completion_tokens += oc_result.completion_tokens
+                    if oc_result.model:
+                        last_model = oc_result.model
                 except Exception as e:
                     logger.error(
                         "improve.chunk_failed project={} mr={} file={} err={}",
@@ -152,6 +159,11 @@ class ImproveCommand(BaseCommand):
                     )
                     # 单个 chunk 失败不影响其他
                     chunk_results.append({"summary_md": "", "suggestions": []})
+
+        # 汇总 token 统计到 _last_oc_result (主线程安全写入)
+        self._last_oc_result = type(self)._make_token_summary(
+            total_prompt_tokens, total_completion_tokens, last_model
+        )
 
         return self._merge_chunks(chunk_results, skipped_files=skipped_files)
 
@@ -169,14 +181,13 @@ class ImproveCommand(BaseCommand):
             files=[],  # 不内联文件，prompt 里已包含 diff
             timeout=config.rq_worker_timeout,
         )
-        # 记录最后一个成功的结果 (token 统计)
-        self._last_oc_result = oc_result
         logger.info(
             "improve.chunk_done project={} mr={} file={} tokens_in={} tokens_out={}",
             self.project_id, self.mr_iid, file_path,
             oc_result.prompt_tokens, oc_result.completion_tokens,
         )
-        return oc_result.data
+        # 返回完整 oc_result (含 token 统计), 在 _merge_chunks 中汇总
+        return oc_result
 
     @staticmethod
     def _split_diff_by_file(diff_file: Path, files: list[str]) -> dict[str, str]:
@@ -607,6 +618,15 @@ class ImproveCommand(BaseCommand):
         }
 
     # ---------- helpers ----------
+    @staticmethod
+    def _make_token_summary(prompt_tokens: int, completion_tokens: int, model: str):
+        """创建汇总 token 统计的 LLMResult (仅用于 _last_oc_result 替代)."""
+        from reviewagent.llm.base import LLMResult
+        return LLMResult(
+            data={}, prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens, model=model,
+        )
+
     def _get_mr_head_sha(self) -> str | None:
         """获取当前 MR 的 head_sha (用于 record_suggestion 时记录发布 SHA)."""
         try:
@@ -822,7 +842,7 @@ class ImproveCommand(BaseCommand):
                 command="improve",
                 limit=1000,
             )
-            version = len(runs)
+            version = len(runs) or 1
         except Exception:
             version = 1
         return f"## 改进总览 V{version}\n\n_加载中…_"
@@ -1136,7 +1156,7 @@ class ImproveCommand(BaseCommand):
                 command="improve",
                 limit=1000,
             )
-            version = len(runs)  # 含本次正在跑的, 所以就是当前这次是第 N 次
+            version = len(runs) or 1  # 含本次正在跑的, 所以就是当前这次是第 N 次; 0 条时至少为 1
         except Exception as e:
             logger.warning("improve.summary_version_query failed (non-fatal): {}", e)
             version = 1

@@ -191,10 +191,6 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                     f"{_config.max_review_calls_per_mr}); 后续 push 不再触发自动检视. "
                     f"如需新一轮检视, 评论 `/improve` 手动触发."
                 )
-                try:
-                    mr.gitlab if hasattr(mr, "gitlab") else None
-                except Exception:
-                    pass
                 # 用直接的 gitlab client (mr 对象没暴露 .gitlab)
                 from reviewagent.gitlab.client import GitLabClient
                 _gl = GitLabClient()
@@ -204,7 +200,7 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                     with store._conn() as conn:
                         conn.execute(
                             "UPDATE mr_activity SET title = title || ' [no_more_review]' "
-                            "WHERE project_id=? AND mr_iid=?",
+                            "WHERE project_id=? AND mr_iid=? AND title NOT LIKE '%[no_more_review]%'",
                             (mr.project_id, mr.mr_iid),
                         )
                         conn.commit()

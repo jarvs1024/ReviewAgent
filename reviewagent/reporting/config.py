@@ -49,7 +49,7 @@ class WeeklyReportConfig:
     markdown_chunk_limit: int = 18000
     report_title: str = "SSD自动化代码检视周报"
     report_emoji: str = "📊"
-    cron_schedule: str = "Mon 10:00"  # systemd OnCalendar 格式, 用户可自定义
+    cron_schedule: str = "Mon 09:00"  # systemd OnCalendar 格式, 用户可自定义
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod

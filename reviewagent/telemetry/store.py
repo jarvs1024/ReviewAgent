@@ -723,9 +723,23 @@ class Store:
                 row = conn.execute(base_sql + " LIMIT 1", base_params).fetchone()
             else:
                 row = conn.execute(base_sql + rk_clauses + " LIMIT 1", base_params + rk_params).fetchone()
-        if head_sha:  # 保留参数以避免破坏调用方, 但不使用
-            pass
-            return row is not None
+        # head_sha 过滤: force-push 后老建议的 head_sha 与当前 diff 不一致,
+        # 此时 dedup 应放行, 让 bot 重新发现这些 bug.
+        # head_sha='' 时退回旧的 (file, line) 兜底行为.
+        if row is not None and head_sha:
+            # 查到同 file:line 的建议, 但需要检查 head_sha 是否一致
+            # 如果已有建议的 head_sha 与当前 head_sha 不同, 说明是 force-push 后的残留,
+            # 应该放行重新检视
+            with self._conn() as conn2:
+                sha_row = conn2.execute(
+                    "SELECT 1 FROM suggestions "
+                    "WHERE project_id=? AND mr_iid=? "
+                    "  AND file_path=? AND target_line BETWEEN ? AND ? "
+                    "  AND state='open' AND head_sha=? LIMIT 1",
+                    [project_id, mr_iid, file_path, lo, hi, head_sha],
+                ).fetchone()
+            return sha_row is not None
+        return row is not None
 
     def list_suggestion_headers(
         self, project_id: int, mr_iid: int

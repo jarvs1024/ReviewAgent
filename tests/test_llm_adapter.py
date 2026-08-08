@@ -129,15 +129,13 @@ class TestOpencodeProvider:
 
     def test_health_check_returns_bool(self):
         provider, _ = self._make(OpencodeResult(data={}))
-        with patch("httpx.Client") as MockClient:
-            cm = MagicMock()
-            cm.__enter__.return_value.get.return_value = MagicMock(status_code=200)
-            MockClient.return_value = cm
+        with patch.object(provider._client, "_request") as mock_req:
+            mock_req.return_value = MagicMock(status_code=200)
             assert provider.health_check() is True
 
     def test_health_check_false_on_exception(self):
         provider, _ = self._make(OpencodeResult(data={}))
-        with patch("httpx.Client", side_effect=RuntimeError("connection refused")):
+        with patch.object(provider._client, "_request", side_effect=RuntimeError("connection refused")):
             assert provider.health_check() is False
 
     def test_provider_name(self):
