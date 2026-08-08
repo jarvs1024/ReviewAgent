@@ -1281,11 +1281,13 @@ class ImproveCommand(BaseCommand):
                 "sum": open_n + applied_n + dismissed_n + resolved_n,
             })
         grand_total = total_open + total_applied + total_dismissed + total_resolved
+        # 采纳率 = applied / total (含 open), 与 reporting/collectors/telemetry.py / suggestion_metrics 公式一致
+        adoption_rate = round(total_applied / grand_total * 100, 1) if grand_total else 0.0
         new_count = len(inline_posted)
         head_short = (head_sha or "")[:7] if head_sha else ""
 
         lines: list[str] = []
-        lines.append("## 检视汇总")
+        lines.append(f"## 检视汇总（总建议数 {grand_total}，采纳率 {adoption_rate}%）")
         lines.append("")
         # 单表 5 列: 严重度 × {待处理/采纳/忽略/合计}
         lines.append("| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 🔒 已关闭（未分类） | 合计 |")
@@ -1298,7 +1300,7 @@ class ImproveCommand(BaseCommand):
             f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{total_resolved}** | **{grand_total}** |"
         )
         lines.append("")
-        # 底部: 时间和状态说明；“本次新增”固定放最后，便于快速确认本轮变化。
+        # 底部: 状态说明 + 时间戳 + HEAD; 时间戳塞在 “最后新增” 后边, 不单独成行
         try:
             ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S CST")
         except Exception:
@@ -1306,14 +1308,16 @@ class ImproveCommand(BaseCommand):
         meta_parts: list[str] = [f"⏱ {ts}"]
         if head_short:
             meta_parts.append(f"HEAD {head_short}")
-        lines.append(" · ".join(meta_parts))
-        lines.append("")
+        meta_suffix = " · " + " · ".join(meta_parts) if meta_parts else ""
         lines.append("> ✅ **已采纳**：建议代码已通过 GitLab 应用建议、手动修改或 `/adopt` 确认采纳。")
+        lines.append("")
         lines.append("> ❌ **已忽略**：用户通过 `/dismiss` 明确关闭了建议，并记录忽略理由（如有）。")
+        lines.append("")
         lines.append("> 🔒 **已关闭（未分类）**：用户在 GitLab 中直接解决了主题，但系统无法确认该建议是采纳还是忽略。")
-        if new_count > 0:
-            lines.append("")
-            lines.append(f"🆕 **本次新增 {new_count} 条**")
+        # 始终显示 "最后新增 N 条" (含 0), 时间 + HEAD 拼到后边, 不再单独成行
+        # Why: 运营/同事看汇总时一眼能确认 "本轮是新增还是刷新", 比单独一行时间更直观
+        lines.append("")
+        lines.append(f"🆕 **最后新增 {new_count} 条**{meta_suffix}")
         lines.append("")
         return "\n".join(lines)
 

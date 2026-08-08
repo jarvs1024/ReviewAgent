@@ -583,7 +583,7 @@ def test_overview_summary_format_with_full_data(tmp_telemetry):
     - header 固定 `## 检视汇总` (无 V{N})
     - 单表 5 列: 严重度 × {待处理/已采纳/已忽略/合计}
     - 末行 加粗"总计"
-    - 底部单行元信息: 本次新增 + CST 时间 + HEAD sha
+    - 底部单行元信息: 最后新增 + CST 时间 + HEAD sha
     """
     from reviewagent.commands.improve import ImproveCommand
     from reviewagent.telemetry.store import get_store
@@ -648,8 +648,8 @@ def test_overview_summary_format_with_full_data(tmp_telemetry):
     # 3. 加粗总计行: 1+0+0 / 0+1+0 / 0+0+1 / 3 total
     assert "| **总计** | **1** | **1** | **1** | **0** | **3** |" in out
 
-    # 4. 单行元信息: 本次新增 + CST 时间 + HEAD sha 短码
-    assert "🆕 **本次新增 2 条**" in out
+    # 4. 单行元信息: 最后新增 + CST 时间 + HEAD sha 短码
+    assert "🆕 **最后新增 2 条**" in out
     assert "CST" in out, f"时间应为 CST (本地时间), 避免与 UTC 混淆: {out!r}"
     assert "0123456" in out, f"应有 head_sha 短码 (前7位): {out!r}"
     assert "已采纳" in out and "已忽略" in out and "已关闭（未分类）" in out
@@ -673,8 +673,8 @@ def test_overview_summary_works_with_empty_state(tmp_telemetry):
     assert "| 🟡 MEDIUM | 0 | 0 | 0 | 0 |" in out
     assert "| 🟢 LOW | 0 | 0 | 0 | 0 |" in out
     assert "| **总计** | **0** | **0** | **0** | **0** |" in out
-    # 没 inline_posted 时不显示 "本次新增"
-    assert "🆕 本次新增" not in out
+    # 没 inline_posted 时显示 "最后新增 0 条"
+    assert "🆕 **最后新增 0 条**" in out
     # CST 时间与 head_sha 短码
     assert "CST" in out
     assert "abcdef0" in out
