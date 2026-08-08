@@ -37,14 +37,30 @@ def test_render_telemetry_uses_three_column_metric_table():
     # 表头 3 列 (|:-:|:-:|:-:| 整串作为单一表分隔)
     assert "|:-:|:-:|:-:|" in out, "header separator should define 3 center-aligned columns"
     # 5 行指标 (每行 3 cell)
-    # header (📋) + 5 metric rows (📥/📂/💡/📊/✅) = 6
-    rows = [line for line in out.splitlines() if
-            line.startswith("| 📥") or line.startswith("| 📂") or
-            line.startswith("| 💡") or line.startswith("| 📊") or line.startswith("| ✅")]
-    assert len(rows) == 5, f"expected 5 metric rows, got {len(rows)}: {rows}"
+    # 5 个指标行, 表头三列无 emoji
+    header = next(l for l in out.splitlines() if l.startswith("| 指标"))
+    assert header == "| 指标 | 当前值 | 较上周 |", header
+    # 任一 cell 不含 emoji 字符 (避免钉钉桌面端渲染成方块)
+    for ch in ("📋", "📈", "📉", "📥", "📂", "💡", "📊", "✅"):
+        assert ch not in out, f"emoji {ch!r} should be removed from metric table"
     # 累计采纳率行 pp 后缀
-    pp_row = [r for r in rows if r.startswith("| ✅")][0]
+    pp_row = [l for l in out.splitlines() if "累计采纳率" in l][0]
     assert "pp" in pp_row, "adoption_rate_pct delta should carry 'pp' suffix"
+    # 有 delta 时显示箭头
+    assert any("↑" in l for l in out.splitlines()), "have deltas → should show ↑/↓ arrow"
+
+
+def test_render_telemetry_shows_first_week_when_no_deltas():
+    """没有 deltas 时 (首周跑批), trend 列显示 "首周", 短文不会被钉钉截断."""
+    data = _sample_data()
+    data["deltas"] = {}   # 清空 deltas
+    out = _render_telemetry(data)
+    rows = [l for l in out.splitlines() if l.startswith("| ✓") or l.startswith("| ▸") or l.startswith("| ▣")]
+    assert len(rows) == 5
+    first_week_rows = [l for l in rows if "首周" in l]
+    assert len(first_week_rows) == 5, "全部 5 行 metrics 在 deltas 为空时都应该是 '首周'"
+    # 采纳率行也要是 "首周", 而不是 14.7% (↑None pp)
+    assert any("首周" in l and "14.7%" in l for l in rows)
 
 
 def test_deterministic_summary_problem_types_is_bullet():
