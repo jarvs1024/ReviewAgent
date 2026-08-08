@@ -104,12 +104,12 @@ echo "    started revagent-web (:3000)"
 
 for ((worker_index = 1; worker_index <= WORKER_COUNT; worker_index++)); do
     screen -dmS "revagent-worker${worker_index}" bash -c \
-        "set -a && source .env && set +a && exec .venv/bin/rq worker \"\${RQ_QUEUE_NAME}\" --url \"\${REDIS_URL}\" --worker-class \"\${RQ_WORKER_CLASS:-${DEFAULT_RQ_WORKER_CLASS}}\" </dev/null >> logs/worker-w${worker_index}.log 2>&1"
+        "set -a && source .env && set +a && PYTHONUNBUFFERED=1 exec .venv/bin/python -u -m rq.cli worker \"\${RQ_QUEUE_NAME}\" --url \"\${REDIS_URL}\" --worker-class \"\${RQ_WORKER_CLASS:-${DEFAULT_RQ_WORKER_CLASS}}\" </dev/null >> logs/worker-w${worker_index}.log 2>&1"
     echo "    started revagent-worker${worker_index} (${RQ_QUEUE_NAME})"
 done
 
 screen -dmS revagent-weekly bash -c \
-    "set -a && source .env && set +a && exec .venv/bin/rq worker \"\${RQ_WEEKLY_QUEUE_NAME}\" --url \"\${REDIS_URL}\" --worker-class \"\${RQ_WORKER_CLASS:-${DEFAULT_RQ_WORKER_CLASS}}\" </dev/null >> logs/worker-weekly.log 2>&1"
+    "set -a && source .env && set +a && PYTHONUNBUFFERED=1 exec .venv/bin/python -u -m rq.cli worker \"\${RQ_WEEKLY_QUEUE_NAME}\" --url \"\${REDIS_URL}\" --worker-class \"\${RQ_WORKER_CLASS:-${DEFAULT_RQ_WORKER_CLASS}}\" </dev/null >> logs/worker-weekly.log 2>&1"
 echo "    started revagent-weekly (${RQ_WEEKLY_QUEUE_NAME})"
 
 sleep 4
