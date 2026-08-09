@@ -49,7 +49,7 @@ class WeeklyReportConfig:
     markdown_chunk_limit: int = 18000
     report_title: str = "SSD自动化代码检视周报"
     report_emoji: str = "📊"
-    cron_schedule: str = "Mon 09:00"  # systemd OnCalendar 格式, 用户可自定义
+    cron_schedule: str = "Mon 10:30"  # systemd OnCalendar 格式, 周一 10:30 跑上周数据
     dashboard_url: str = "http://127.0.0.1:8080/code-review"  # 检视看板地址, 渲染到「本周检视概况」末尾
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -75,7 +75,7 @@ class WeeklyReportConfig:
             dingtalk_dry_run=_env_bool("REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN", True),
             dingtalk_retry_attempts=_env_int("REVIEWAGENT_WEEKLY_DINGTALK_RETRY", 3),
             markdown_chunk_limit=_env_int("REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT", 18000),
-            cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 09:00"),
+            cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 10:30"),
             report_title=_env_str("REVIEWAGENT_WEEKLY_REPORT_TITLE", "SSD自动化代码检视周报"),
             report_emoji=_env_str("REVIEWAGENT_WEEKLY_REPORT_EMOJI", "📊"),
             dashboard_url=_env_str("REVIEWAGENT_WEEKLY_DASHBOARD_URL", "http://127.0.0.1:8080/code-review"),

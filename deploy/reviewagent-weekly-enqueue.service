@@ -8,6 +8,6 @@ User=workflow
 WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/workflow/ReviewAgent/.env
-ExecStart=/home/workflow/ReviewAgent/.venv/bin/python /home/workflow/ReviewAgent/scripts/weekly_report.py --enqueue
+ExecStart=/home/workflow/ReviewAgent/.venv/bin/python /home/workflow/ReviewAgent/scripts/weekly_report.py --week-offset -1 --enqueue
 StandardOutput=journal
 StandardError=journal

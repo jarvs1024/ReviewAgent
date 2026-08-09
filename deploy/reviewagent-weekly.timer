@@ -2,7 +2,7 @@
 Description=ReviewAgent Weekly Report Timer
 
 [Timer]
-OnCalendar=Mon 10:00
+OnCalendar=Mon 10:30
 Persistent=true
 Unit=reviewagent-weekly-enqueue.service
 
