@@ -892,3 +892,214 @@ def test_dedup_at_line_misses_superseded_state(tmp_telemetry):
     assert exists is False, (
         f"superseded (force-push 后过时) 应放行, 允许 force-push 后重新检视: got {exists!r}"
     )
+
+# ---------- Z1+: head_sha 不一致但 state=applied 仍命中 ----------
+
+def test_dedup_at_line_processed_state_ignores_head_sha_change(tmp_telemetry):
+    """Z1+: 已处理状态 (applied/dismissed/resolved) 永远命中, 不受 head_sha 变化影响.
+
+    Why: 之前 head_sha 二次校验作用于全 state, 任何 push 都让 dedup 放行 →
+    已 applied 位置被 V2/V3/V8/V9 反复重发 (MR 245 0% 命中率根因).
+    """
+    from reviewagent.telemetry.store import get_store
+    old_sha = "aaaa0000" * 5
+    new_sha = "bbbb1111" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=300, note_id="z1-seed",
+        file_path="z1/foo.py", target_line=10, target_line_end=10,
+        existing_code="", improved_code="",
+        header="z1 test", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint="z1_fp", cohort_key="z1_ck",
+        severity_source="rule", head_sha=old_sha,
+    )
+    import sqlite3
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute("UPDATE suggestions SET state='applied' WHERE note_id='z1-seed'")
+    conn.commit()
+    conn.close()
+
+    # 新 push head_sha 不同 → 仍应命中 dedup
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=300,
+        file_path="z1/foo.py", target_line=10, severity="low",
+        head_sha=new_sha, line_tolerance=0, rule_keys="R-OTHER",
+    )
+    assert exists is True, (
+        f"已 applied 位置换 head_sha 后仍应命中 dedup: got {exists!r}"
+    )
+
+
+def test_dedup_at_line_open_state_force_push_allows_rediscovery(tmp_telemetry):
+    """Z1+: state='open' + head_sha 不一致 → 放行 (force-push 后残留应重新识别)."""
+    from reviewagent.telemetry.store import get_store
+    old_sha = "cccc2222" * 5
+    new_sha = "dddd3333" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=301, note_id="z1-open-seed",
+        file_path="z1/bar.py", target_line=20, target_line_end=20,
+        existing_code="", improved_code="",
+        header="z1 open test", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint="z1_open_fp", cohort_key="z1_open_ck",
+        severity_source="rule", head_sha=old_sha,
+    )
+
+    # state 仍是 open + 传新 head_sha → 应放行 (force-push 后残留)
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=301,
+        file_path="z1/bar.py", target_line=20, severity="low",
+        head_sha=new_sha, line_tolerance=0, rule_keys="R-CONST",
+    )
+    assert exists is False, (
+        f"open 状态 + head_sha 不匹配 → 应放行 (force-push 残留): got {exists!r}"
+    )
+
+
+# ---------- Z2+: rule_keys 不重叠但已处理状态仍命中 ----------
+
+def test_dedup_at_line_processed_state_ignores_rule_keys_mismatch(tmp_telemetry):
+    """Z2+: 已处理状态不管 rule_keys 是否重叠都命中.
+
+    之前 rule_keys 严格匹配, LLM 每次给的 rule_keys 略变 → 同位置漏 dedup.
+    """
+    from reviewagent.telemetry.store import get_store
+    head_sha = "eeee4444" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=302, note_id="z2-seed",
+        file_path="z2/baz.py", target_line=30, target_line_end=30,
+        existing_code="", improved_code="",
+        header="z2 test", label="code quality",
+        severity="low", rule_keys=["SSD-RULE-FOO"],
+        fingerprint="z2_fp", cohort_key="z2_ck",
+        severity_source="rule", head_sha=head_sha,
+    )
+    import sqlite3
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute("UPDATE suggestions SET state='dismissed' WHERE note_id='z2-seed'")
+    conn.commit()
+    conn.close()
+
+    # 新建议 rule_keys 跟旧的完全不重叠, 但 state=dismissed → 仍应命中
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=302,
+        file_path="z2/baz.py", target_line=30, severity="low",
+        head_sha=head_sha, line_tolerance=0,
+        rule_keys="R-BAR-COMPLETELY-DIFFERENT",
+    )
+    assert exists is True, (
+        f"已 dismissed 状态 + 不同 rule_keys → 仍应命中 dedup: got {exists!r}"
+    )
+
+
+def test_dedup_at_line_open_state_rule_keys_mismatch_allows(tmp_telemetry):
+    """Z2+: state='open' + rule_keys 不重叠 → 放行 (避免误杀不同类问题)."""
+    from reviewagent.telemetry.store import get_store
+    head_sha = "ffff5555" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=303, note_id="z2-open-seed",
+        file_path="z2/qux.py", target_line=40, target_line_end=40,
+        existing_code="", improved_code="",
+        header="z2 open test", label="code quality",
+        severity="low", rule_keys=["SSD-RULE-FOO"],
+        fingerprint="z2_open_fp", cohort_key="z2_open_ck",
+        severity_source="rule", head_sha=head_sha,
+    )
+
+    # state 仍 open + rule_keys 不重叠 → 放行 (LLM 识别了不同类问题)
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=303,
+        file_path="z2/qux.py", target_line=40, severity="low",
+        head_sha=head_sha, line_tolerance=0,
+        rule_keys="R-BAR-COMPLETELY-DIFFERENT",
+    )
+    assert exists is False, (
+        f"open 状态 + rule_keys 不重叠 → 应放行 (不同类问题): got {exists!r}"
+    )
+
+
+# ---------- Z3+: fingerprint dedup 加 head_sha 检查 ----------
+
+def test_fingerprint_dedup_processed_state_always_hits(tmp_telemetry):
+    """Z3+: fingerprint dedup 已处理状态永远命中, 不受 head_sha 变化影响."""
+    from reviewagent.commands.improve import _suggestion_fingerprint
+    from reviewagent.telemetry.store import get_store
+    old_sha = "1111aaaa" * 5
+    new_sha = "2222bbbb" * 5
+    s = get_store()
+    fp = _suggestion_fingerprint("z3/foo.py", 10, "header")
+    s.record_suggestion(
+        project_id=34, mr_iid=304, note_id="z3-seed",
+        file_path="z3/foo.py", target_line=10, target_line_end=10,
+        existing_code="", improved_code="",
+        header="header", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint=fp, cohort_key="z3_ck",
+        severity_source="rule", head_sha=old_sha,
+    )
+    import sqlite3
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute("UPDATE suggestions SET state='applied' WHERE note_id='z3-seed'")
+    conn.commit()
+    conn.close()
+
+    exists = s.suggestion_exists_by_fingerprint(
+        34, 304, fp, head_sha=new_sha,
+    )
+    assert exists is True, (
+        f"已 applied + fp 同 + head_sha 变 → 应命中: got {exists!r}"
+    )
+
+
+def test_fingerprint_dedup_open_state_force_push_allows(tmp_telemetry):
+    """Z3+: state='open' + head_sha 不一致 → 放行 (force-push 后应重新识别)."""
+    from reviewagent.commands.improve import _suggestion_fingerprint
+    from reviewagent.telemetry.store import get_store
+    old_sha = "3333cccc" * 5
+    new_sha = "4444dddd" * 5
+    s = get_store()
+    fp = _suggestion_fingerprint("z3/bar.py", 20, "header")
+    s.record_suggestion(
+        project_id=34, mr_iid=305, note_id="z3-open-seed",
+        file_path="z3/bar.py", target_line=20, target_line_end=20,
+        existing_code="", improved_code="",
+        header="header", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint=fp, cohort_key="z3_open_ck",
+        severity_source="rule", head_sha=old_sha,
+    )
+
+    exists = s.suggestion_exists_by_fingerprint(
+        34, 305, fp, head_sha=new_sha,
+    )
+    assert exists is False, (
+        f"open + fp 同 + head_sha 不匹配 → 应放行: got {exists!r}"
+    )
+
+
+def test_fingerprint_dedup_without_head_sha_backwards_compat(tmp_telemetry):
+    """Z3+: 不传 head_sha → 维持旧行为 (任意 state 命中 fp 即返回 True).
+
+    Why: 保留向后兼容, 老调用方 (test/script) 不传 head_sha 仍能正常工作.
+    """
+    from reviewagent.commands.improve import _suggestion_fingerprint
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    fp = _suggestion_fingerprint("z3/baz.py", 30, "header")
+    s.record_suggestion(
+        project_id=34, mr_iid=306, note_id="z3-compat-seed",
+        file_path="z3/baz.py", target_line=30, target_line_end=30,
+        existing_code="", improved_code="",
+        header="header", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint=fp, cohort_key="z3_compat_ck",
+        severity_source="rule", head_sha="aaaa5555" * 5,
+    )
+
+    # 不传 head_sha → 任何 state 都命中
+    exists = s.suggestion_exists_by_fingerprint(34, 306, fp)
+    assert exists is True, "不传 head_sha 时维持旧行为 (任意 state 命中)"

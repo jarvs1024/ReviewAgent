@@ -1572,8 +1572,12 @@ class ImproveCommand(BaseCommand):
                     _dedup_fingerprint = _suggestion_fingerprint(
                         file_path, decision["new_line"], normalised.get("header")
                     )
+                    # Z3+: fingerprint dedup 也传 head_sha, 跟 line dedup 语义保持一致.
+                    # 已处理状态 (applied/dismissed/resolved) 永远命中;
+                    # state='open' 必须 head_sha 一致才命中 (force-push 残留 → 放行).
                     if _dedup_db.suggestion_exists_by_fingerprint(
-                        self.project_id, self.mr_iid, _dedup_fingerprint
+                        self.project_id, self.mr_iid, _dedup_fingerprint,
+                        head_sha=_head_sha,
                     ):
                         logger.info(
                             "improve.skip_duplicate project={} mr={} file={} line={} fingerprint={}",

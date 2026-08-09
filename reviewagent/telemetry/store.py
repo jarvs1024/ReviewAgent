@@ -625,17 +625,34 @@ class Store:
             return sug_id
 
     def suggestion_exists_by_fingerprint(
-        self, project_id: int, mr_iid: int, fingerprint: str
+        self, project_id: int, mr_iid: int, fingerprint: str,
+        head_sha: str = "",
     ) -> bool:
-        """跨次去重: 同一 (project, mr, fingerprint) 已发布则返回 True."""
+        """跨次去重: 同一 (project, mr, fingerprint) 已发布则返回 True.
+
+        Z3+ 修复: 已处理状态 (applied/dismissed/resolved) 永远命中;
+        state='open' 必须 head_sha 一致 (force-push 后残留 → 放行重新识别).
+        跟 suggestion_exists_at_line 的处理逻辑保持一致, 防止 fingerprint
+        维度因 head_sha 变化而误命中 (用户改代码后同一 header 不应被压制).
+        """
         if not fingerprint:
             return False
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM suggestions "
-                "WHERE project_id=? AND mr_iid=? AND fingerprint=? LIMIT 1",
-                (project_id, mr_iid, fingerprint),
-            ).fetchone()
+            if head_sha:
+                row = conn.execute(
+                    "SELECT 1 FROM suggestions "
+                    "WHERE project_id=? AND mr_iid=? AND fingerprint=? AND ("
+                    "  state IN ('applied', 'dismissed', 'resolved')"
+                    "  OR (state='open' AND head_sha=?)"
+                    ") LIMIT 1",
+                    (project_id, mr_iid, fingerprint, head_sha),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT 1 FROM suggestions "
+                    "WHERE project_id=? AND mr_iid=? AND fingerprint=? LIMIT 1",
+                    (project_id, mr_iid, fingerprint),
+                ).fetchone()
             return row is not None
 
     def suggestion_exists_at_line(
@@ -649,101 +666,73 @@ class Store:
         line_tolerance: int = 0,
         rule_keys: str | None = None,  # 逗号分隔字符串, 命中任一即视为同规则 dedup
     ) -> bool:
-        """跨次去重 (heuristic): 同 (file, line[±tolerance][, head_sha]) 已发布则返回 True.
+        """跨次去重 (heuristic): 同 (file, line[±tolerance]) 已发布则返回 True.
 
-        Why: LLM 每次返回的 existing_code 范围不一致 (有时 1 行签名, 有时
-        整段函数体), 同一 bug 在不同次 improve 跑出来的 fingerprint 不一样,
-        导致纯 fingerprint dedup 命中率低. 用 (file, line) 做兜底:
-        同一行任意 severity 的重复建议都视为同一 bug, 直接跳过 — 用户已经
-        检视过这一行了, 不管严重度如何都不该重复推送 (避免 LLM 改判 severity
-        后绕开 dedup).
+        Z1+ + Z2+ 重构后的策略 (2026-08 dedup 审计发现命中率 0% 后修复):
 
-        head_sha 维度: MR 被 force-push / reset 到旧 commit 后, 老建议的
-        head_sha 跟当前 diff 的 head_sha 不一致, 此时 dedup 应该放行, 让
-        bot 重新发现这些 bug. 调用方传 head_sha='' 时退回旧的 (file, line)
-        兜底行为.
+        1. 已处理状态 (applied/dismissed/resolved) 永远命中 —
+           不管 head_sha 怎么变 / rule_keys 是否重叠, 用户处理过的位置
+           不再推送 (尊重用户的处理意图, 防止 V2/V3/V8/V9 反复重发).
 
-        line_tolerance 维度 (默认 2): LLM 跨次 improve 容易出现 ±1~3 行的
-        position 漂移 (行号指 def 行而非真实出错行 / 数错 @@ 偏移). 加 ±N
-        行容差后, 同一 head 下 (file, line±N) 已检视过则视为重复 — 比强制
-        LLM 给精确行号更可靠. 设为 0 = 严格相等.
+        2. state='open' 必须 head_sha 一致 —
+           force-push 后老 open 的 head_sha 跟当前 diff 不一致 → 视为残留,
+           放行重新检视 (避免 force-push 后老 bug 复发).
 
-        - 状态过滤: open / applied / dismissed / resolved 都视为"已存在".
-          resolved = 用户手动点 GitLab 「解决主题」(未走 /adopt /dismiss),
-          既然 thread 被用户主动关掉, 不应再推同位置建议骚扰.
-          superseded 由 head_sha 变化触发 (supersede_stale_open_suggestions),
-          不在 dedup 范围内 — force-push 后允许重新检视.
+        3. state='open' 的 rule_keys 维度 —
+           已有建议 rule_keys 为空 (兼容旧数据) → 命中;
+           或与新建议 rule_keys 任一重叠 → 命中.
+           不重叠 → 放行 (避免误杀完全不同的规则).
 
-        rule_keys 维度 (None = 兼容旧行为): 调用方传入新建议的 rule_keys
-        (逗号分隔字符串, 如 "SSD-RULE-NO-MUTABLE-DEFAULT,SSD-RULE-TYPEHINTS"),
-        若已有建议 rule_keys 与传入 rule_keys 有任一重叠 (LIKE 匹配), 才
-        视为同规则 dedup. **完全不同的规则即使在同 line ±tolerance 内也
-        不应误杀** (例: SSD-RULE-NO-MUTABLE-DEFAULT L10 与
-        SSD-RULE-NO-LOG-EXC L12 是两条独立建议, 不应 dedup).
+        Why 之前 0% 命中率:
+        - 老版本 head_sha 二次校验作用于 state IN (open, applied, ...) 全部,
+          任何 push 都让 dedup 放行 → 同位置反复重发.
+        - 老版本 rule_keys 维度严格要求重叠, LLM 每次给的 rule_keys 略变
+          → line dedup 也漏过.
+
+        Args:
+            severity: 保留参数仅为向后兼容, 当前实现不再按 severity 过滤.
+            line_tolerance: 默认 0, ±N 行容差.
+            rule_keys: 逗号分隔字符串, 用于 open 状态的 rule_keys 维度 dedup.
         """
-        del severity  # 静默未使用, 保持向后兼容的调用签名
+        del severity
         lo = target_line - max(0, line_tolerance)
         hi = target_line + max(0, line_tolerance)
-        # dedup 策略: 跨 head_sha 共享 (file, line) dedup, state IN (open, applied, dismissed, resolved).
-        # applied / dismissed / resolved 都算命中 — 用户已处理过的位置 (含手动关闭 thread) 不再推送.
-        # superseded 不在范围内 — 它由 head_sha 变化触发, force-push 后允许重新检视.
-        # Why: 之前只看 state=open 导致已 applied 的位置 V2/V3/V8/V9 反复重发
-        # (例: MR 245 L22 audit print→logger+docstring V2 applied, V6 又识别为
-        # docstring 重发; L9 caller V1 applied, V6/V9 又反复重发 补 import / 补顶层).
-        # 之前 resolved 放行是因为担心 force-push 后需重新检视, 但这个职责已由
-        # supersede 机制覆盖, resolved 放行只会让随手 close thread 的用户被重复骚扰.
         with self._conn() as conn:
-            # 基础 (file, line, state=open) 过滤
-            base_sql = (
+            # 第一查: 已处理状态 (applied/dismissed/resolved) 永远命中.
+            # 不看 head_sha / rule_keys — 用户处理过的位置不该被新 push 重置.
+            processed_row = conn.execute(
                 "SELECT 1 FROM suggestions "
                 "WHERE project_id=? AND mr_iid=? "
                 "  AND file_path=? AND target_line BETWEEN ? AND ? "
-                "  AND state IN ('open', 'applied', 'dismissed', 'resolved')"
+                "  AND state IN ('applied', 'dismissed', 'resolved') LIMIT 1",
+                [project_id, mr_iid, file_path, lo, hi],
+            ).fetchone()
+            if processed_row is not None:
+                return True
+            # 第二查: state='open' 必须 head_sha 一致 + rule_keys 维度.
+            # 没传 head_sha 时, 退回纯 (file, line, state=open) 兜底.
+            open_sql = (
+                "SELECT 1 FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? "
+                "  AND file_path=? AND target_line BETWEEN ? AND ? "
+                "  AND state='open'"
             )
-            base_params: list = [project_id, mr_iid, file_path, lo, hi]
-            # rule_keys 比对策略 (2 选 1):
-            #   A) 已有建议 rule_keys 为空/None (旧数据 / 未分类) → 视为 dedup 命中
-            #      (兼容旧 dedup 行为, 避免新规则绕过旧建议)
-            #   B) 已有建议 rule_keys 与新建议 rule_keys 任一重叠 → 视为 dedup 命中
-            #      (用 ',<rk>,' 包裹 LIKE 避免前缀误匹配, 如 SSD-RULE-NO-LOG
-            #      不能误命中 SSD-RULE-NO-LOG-EXC)
-            rk_clauses = (
-                " AND ("
-                "(COALESCE(rule_keys,'') = '')"          # 情况 A: 旧数据
-                " OR "
-                "(" + " OR ".join(
-                    "(',' || COALESCE(rule_keys,'') || ',') LIKE ?"
-                    for _ in (rule_keys.split(",") if rule_keys else [])
-                    if _.strip()
-                ) + ")"
-                ")"
-            )
-            rk_params = []
+            open_params: list = [project_id, mr_iid, file_path, lo, hi]
+            if head_sha:
+                open_sql += " AND head_sha=?"
+                open_params.append(head_sha)
+            # rule_keys 维度 (仅作用于 open 状态).
             if rule_keys:
                 rks = [rk.strip() for rk in rule_keys.split(",") if rk.strip()]
-                rk_params = [f"%,{rk},%" for rk in rks]
-            # 没有 rks 时, 第二个 OR 内空, SQL 变成 "... OR ()" → SQLite 不允许
-            # 退化处理: 没传 rule_keys 时直接走 (file, line) 兜底, 不加 rule_keys 子句
-            if not rk_params:
-                row = conn.execute(base_sql + " LIMIT 1", base_params).fetchone()
-            else:
-                row = conn.execute(base_sql + rk_clauses + " LIMIT 1", base_params + rk_params).fetchone()
-        # head_sha 过滤: force-push 后老建议的 head_sha 与当前 diff 不一致,
-        # 此时 dedup 应放行, 让 bot 重新发现这些 bug.
-        # head_sha='' 时退回旧的 (file, line) 兜底行为.
-        if row is not None and head_sha:
-            # 查到同 file:line 的建议, 但需要检查 head_sha 是否一致
-            # 如果已有建议的 head_sha 与当前 head_sha 不同, 说明是 force-push 后的残留,
-            # 应该放行重新检视
-            with self._conn() as conn2:
-                sha_row = conn2.execute(
-                    "SELECT 1 FROM suggestions "
-                    "WHERE project_id=? AND mr_iid=? "
-                    "  AND file_path=? AND target_line BETWEEN ? AND ? "
-                    "  AND state IN ('open', 'applied', 'dismissed', 'resolved') AND head_sha=? LIMIT 1",
-                    [project_id, mr_iid, file_path, lo, hi, head_sha],
-                ).fetchone()
-            return sha_row is not None
+                if rks:
+                    rk_clauses = " AND (COALESCE(rule_keys,'')='' OR " + " OR ".join(
+                        "(',' || COALESCE(rule_keys,'') || ',') LIKE ?"
+                        for _ in rks
+                    ) + ")"
+                    rk_params = [f"%,{rk},%" for rk in rks]
+                    open_sql += rk_clauses
+                    open_params.extend(rk_params)
+            row = conn.execute(open_sql + " LIMIT 1", open_params).fetchone()
         return row is not None
 
     def list_suggestion_headers(
