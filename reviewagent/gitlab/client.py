@@ -142,7 +142,8 @@ class GitLabClient:
         try:
             project = self._get_project(project_id)
             mr = project.mergerequests.get(mr_iid)
-            commits = mr.commits.list(get_all=True)
+            # python-gitlab 8.x: mr.commits() 直接返回 RESTObjectList, 可遍历 / 取 total
+            commits = mr.commits()
         except gitlab.exceptions.GitlabError as e:
             raise GitLabError(f"list_mr_commits failed: {e}") from e
         result = []
