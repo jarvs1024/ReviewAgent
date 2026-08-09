@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from reviewagent.commands._common import BaseCommand, BaseCommandError
+from reviewagent.commands._common import publish_overview
 import subprocess
 import hashlib as _hashlib
 from reviewagent.config import config
@@ -1249,192 +1250,6 @@ class ImproveCommand(BaseCommand):
             summary += f"\n\n> ⚠️ 另有 {skipped_other} 条因校验未通过未发布"
         return summary
 
-    def _build_overview_summary(
-        self,
-        inline_posted: list[dict[str, Any]],
-        inline_skipped: list[dict[str, Any]],
-        total_agent_suggestions: int,
-        head_sha: str = "",
-    ) -> str:
-        """生成 MR 顶部"检视汇总"固定表格 (无 V{N}, 每次检视刷新).
-
-        设计 (方案 A - 单表合并):
-        - Header 固定: `## 检视汇总` (pr_agent 风格, 不带版本号)
-        - 单表 5 列: 严重度 × {待处理 / 已采纳 / 已忽略 / 合计}
-        - 末行 加粗"总计"行
-        - 底部元信息: 时间 + HEAD sha + 状态说明 + 最后一行本次新增
-
-        数据来源:
-        - telemetry store.list_suggestions() 聚合 severity × state
-        - inline_posted 数量 = 本次新增
-
-        调用: _publish_persistent_overview 找/创/更新同一评论时使用
-        """
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # 在汇总前同步 GitLab 直接解决的 Discussion；代码落地仍优先判定为 applied。
-        if head_sha:
-            try:
-                from reviewagent.commands.suggestion_actions import auto_detect_applied
-                auto_detect_applied(
-                    project_id=self.project_id, mr_iid=self.mr_iid,
-                    head_sha=head_sha, actor_username="telemetry-sync",
-                )
-            except Exception as e:
-                logger.warning("improve.overview_sync_resolved failed (non-fatal): {}", e)
-
-        # 严重度 × 状态聚合 (open / applied / dismissed / resolved 分桶)
-        sev_buckets: dict[str, dict[str, int]] = {
-            "high": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
-            "medium": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
-            "low": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
-        }
-        try:
-            from reviewagent.telemetry.store import get_store
-            store = get_store()
-            all_sugs = store.list_suggestions(
-                project_id=self.project_id, mr_iid=self.mr_iid, limit=500,
-            )
-            for s in all_sugs:
-                sev = (s.get("severity") or "medium").lower()
-                state = (s.get("state") or "open").lower()
-                if sev not in sev_buckets:
-                    sev_buckets[sev] = {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0}
-                if state not in sev_buckets[sev]:
-                    sev_buckets[sev][state] = 0
-                sev_buckets[sev][state] += 1
-        except Exception as e:
-            logger.warning("improve.overview_query failed (non-fatal): {}", e)
-
-        # 行聚合 (合计 = open + applied + dismissed)
-        rows: list[dict[str, int | str]] = []
-        total_open = total_applied = total_dismissed = total_resolved = 0
-        for sev in ("high", "medium", "low"):
-            emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}[sev]
-            label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}[sev]
-            bucket = sev_buckets.get(sev, {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0})
-            open_n = bucket["open"]
-            applied_n = bucket["applied"]
-            dismissed_n = bucket["dismissed"]
-            resolved_n = bucket["resolved"]
-            total_open += open_n
-            total_applied += applied_n
-            total_dismissed += dismissed_n
-            total_resolved += resolved_n
-            rows.append({
-                "label": f"{emoji} {label}",
-                "open": open_n,
-                "applied": applied_n,
-                "dismissed": dismissed_n,
-                "resolved": resolved_n,
-                "sum": open_n + applied_n + dismissed_n + resolved_n,
-            })
-        grand_total = total_open + total_applied + total_dismissed + total_resolved
-        # 采纳率 = applied / total (含 open), 与 reporting/collectors/telemetry.py / suggestion_metrics 公式一致
-        adoption_rate = round(total_applied / grand_total * 100, 1) if grand_total else 0.0
-        new_count = len(inline_posted)
-        head_short = (head_sha or "")[:7] if head_sha else ""
-
-        lines: list[str] = []
-        lines.append(f"## 检视汇总（总建议数 {grand_total}，采纳率 {adoption_rate}%）")
-        lines.append("")
-        # 单表 5 列: 严重度 × {待处理/采纳/忽略/合计}
-        lines.append("| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 🔒 已关闭（未分类） | 合计 |")
-        lines.append("|:---:|:---:|:---:|:---:|:---:|:---:|")
-        for row in rows:
-            lines.append(
-                f"| {row['label']} | {row['open']} | {row['applied']} | {row['dismissed']} | {row['resolved']} | {row['sum']} |"
-            )
-        lines.append(
-            f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{total_resolved}** | **{grand_total}** |"
-        )
-        lines.append("")
-        # 底部: 状态说明 + 时间戳 + HEAD; 时间戳塞在 “最后新增” 后边, 不单独成行
-        try:
-            ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S CST")
-        except Exception:
-            ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        meta_parts: list[str] = [f"⏱ {ts}"]
-        if head_short:
-            meta_parts.append(f"HEAD {head_short}")
-        meta_suffix = " · " + " · ".join(meta_parts) if meta_parts else ""
-        lines.append("> ✅ **已采纳**：建议代码已通过 GitLab 应用建议、手动修改或 `/adopt` 确认采纳。")
-        lines.append("")
-        lines.append("> ❌ **已忽略**：用户通过 `/dismiss` 明确关闭了建议，并记录忽略理由（如有）。")
-        lines.append("")
-        lines.append("> 🔒 **已关闭（未分类）**：用户在 GitLab 中直接解决了主题，但系统无法确认该建议是采纳还是忽略。")
-        # 始终显示 "最后新增 N 条" (含 0), 时间 + HEAD 拼到后边, 不再单独成行
-        # Why: 运营/同事看汇总时一眼能确认 "本轮是新增还是刷新", 比单独一行时间更直观
-        lines.append("")
-        lines.append(f"🆕 **最后新增 {new_count} 条**{meta_suffix}")
-        lines.append("")
-        return "\n".join(lines)
-
-
-    def _publish_persistent_overview(
-        self,
-        body: str,
-        head_sha: str = "",
-        header: str = "## 检视汇总",
-    ) -> int | str | None:
-        """找/创/更新顶部检视汇总持久评论 (pr_agent 风格).
-
-        Why: 用户要求"检视汇总"固定 header, 每次检视刷新同一张表.
-        设计: header 自描述锚点, 不存 note_id 到 DB.
-        - list_mr_notes() 拉所有 note, 本地过滤以 header 开头的
-        - 找到 → update 现有评论 (one-shot, 不堆叠多个汇总评论)
-        - 没找到 → post 新评论 (作为锚点)
-
-        Args:
-            body: 完整 markdown 内容 (含 header)
-            head_sha: head commit sha 短码 (用于底部时间戳行), 实际不修改 body
-                (head_sha 已经由 _build_overview_summary 嵌入 body, 这里只是传递用)
-            header: 锚点 header, 默认 "## 检视汇总"
-
-        Returns: note_id (int|str) 或 None (失败 / 跳过).
-        """
-        try:
-            notes = self.gitlab.list_mr_notes(self.project_id, self.mr_iid)
-        except Exception as e:
-            logger.warning("improve.list_notes_failed (non-fatal): {}", e)
-            notes = []
-        for n in notes:
-            body_n = n.get("body") or ""
-            if body_n.startswith(header):
-                # 找到现有 → update
-                try:
-                    self.gitlab.update_mr_comment(
-                        self.project_id, self.mr_iid, n["id"], body,
-                    )
-                    logger.info(
-                        "improve.overview_updated project={} mr={} note_id={}",
-                        self.project_id, self.mr_iid, str(n["id"])[:12],
-                    )
-                    return n["id"]
-                except Exception as e:
-                    logger.warning(
-                        "improve.overview_update_failed (non-fatal) note_id={} err={}",
-                        str(n["id"])[:12], e,
-                    )
-                    return None
-        # 没找到 → 新发
-        try:
-            note_id = self.gitlab.post_mr_comment(
-                self.project_id, self.mr_iid, body,
-            )
-            logger.info(
-                "improve.overview_created project={} mr={} note_id={}",
-                self.project_id, self.mr_iid, str(note_id)[:12],
-            )
-            return note_id
-        except Exception as e:
-            logger.warning(
-                "improve.overview_create_failed (non-fatal) err={}",
-                e,
-            )
-            return None
-
     def _publish(self, agent_result: dict[str, Any]) -> dict[str, Any]:
         summary_md = (agent_result.get("summary_md") or "").strip()
         suggestions = agent_result.get("suggestions") or []
@@ -1462,10 +1277,13 @@ class ImproveCommand(BaseCommand):
         # Why 先于 placeholder 创建: GitLab UI 按 created_at 升序展示, 检视汇总要排在
         #      改进总览 V{N} 之上. 失败非致命, 循环结束后还会再调一次.
         try:
-            _overview_body = self._build_overview_summary(
-                [], [], len(suggestions), head_sha=_publish_head_sha,
+            publish_overview(
+                project_id=self.project_id, mr_iid=self.mr_iid,
+                inline_posted_count=len(suggestions),
+                head_sha=_publish_head_sha,
+                gitlab=self.gitlab,
+                run_late_detect=True,
             )
-            self._publish_persistent_overview(_overview_body, head_sha=_publish_head_sha)
         except Exception as _e:
             logger.warning("improve.overview_initial_failed (non-fatal): {}", _e)
 
@@ -1666,11 +1484,13 @@ class ImproveCommand(BaseCommand):
                     # 让 reviewer 在 GitLab UI 上看到汇总表随检视实时生长.
                     # 失败非致命 (网络抖动 / 限速), 循环后还会再刷一次最终版.
                     try:
-                        _body = self._build_overview_summary(
-                            inline_posted, inline_skipped, len(suggestions),
+                        publish_overview(
+                            project_id=self.project_id, mr_iid=self.mr_iid,
+                            inline_posted_count=len(inline_posted),
                             head_sha=_publish_head_sha,
+                            gitlab=self.gitlab,
+                            run_late_detect=False,
                         )
-                        self._publish_persistent_overview(_body, head_sha=_publish_head_sha)
                     except Exception as _e:
                         logger.warning(
                             "improve.overview_refresh_after_post failed (non-fatal): {}",
@@ -1754,11 +1574,13 @@ class ImproveCommand(BaseCommand):
                         decision["reason"],
                     )
                     try:
-                        _body = self._build_overview_summary(
-                            inline_posted, inline_skipped, len(suggestions),
+                        publish_overview(
+                            project_id=self.project_id, mr_iid=self.mr_iid,
+                            inline_posted_count=len(inline_posted),
                             head_sha=_publish_head_sha,
+                            gitlab=self.gitlab,
+                            run_late_detect=False,
                         )
-                        self._publish_persistent_overview(_body, head_sha=_publish_head_sha)
                     except Exception as _e:
                         logger.warning(
                             "improve.overview_refresh_after_general failed (non-fatal): {}",
@@ -1773,11 +1595,13 @@ class ImproveCommand(BaseCommand):
         # 3. 顶部"检视汇总"最终刷新 (含 skipped 计数 + 完整 inline_posted).
         #    循环里每条 inline 已实时刷过, 此处再做一次以确保最终状态完整.
         try:
-            _body = self._build_overview_summary(
-                inline_posted, inline_skipped, len(suggestions),
+            publish_overview(
+                project_id=self.project_id, mr_iid=self.mr_iid,
+                inline_posted_count=len(inline_posted),
                 head_sha=_publish_head_sha,
+                gitlab=self.gitlab,
+                run_late_detect=True,
             )
-            self._publish_persistent_overview(_body, head_sha=_publish_head_sha)
         except Exception as _e:
             logger.warning("improve.overview_final_failed (non-fatal): {}", _e)
 

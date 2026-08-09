@@ -358,5 +358,207 @@ class BaseCommand:
                     )
 
 
+
+
+# ---------- 检视汇总 (顶部 MR 持久评论) 共享刷新 ----------
+#
+# Why: 之前 improve.py 把"生成 + 找/创/更新"同一评论的逻辑写成方法,
+#      /adopt /dismiss / UI Apply 不走 improve pipeline, 顶部汇总就停留在
+#      上一次 improve run 的快照, 用户看到的是 stale 数据 (MR 247 实测偏差).
+# 修复: 把这段抽成模块级 helper, improve.py 与 suggestion_actions.py 都调,
+#      每次状态变化后立即刷新 (秒级 vs 之前要等下一次 push).
+
+_OVERVIEW_HEADER_DEFAULT = "## 检视汇总"
+
+
+def build_overview_body(
+    *,
+    project_id: int,
+    mr_iid: int,
+    inline_posted_count: int = 0,
+    head_sha: str = "",
+) -> str:
+    """生成 MR 顶部"检视汇总"固定表格 markdown.
+
+    设计 (方案 A - 单表合并):
+    - Header 固定: `## 检视汇总` (pr_agent 风格, 不带版本号)
+    - 单表 5 列: 严重度 × {待处理 / 已采纳 / 已忽略 / 已关闭 / 合计}
+    - 末行 加粗"总计"行
+    - 底部: 状态说明 + "🆕 最后新增 N 条" + 时间戳 / HEAD
+
+    Args:
+        project_id: GitLab project id
+        mr_iid: MR iid
+        inline_posted_count: 本轮新增的 suggestion 数 (用于"最后新增 N 条"行)
+        head_sha: MR head_sha 短码 (用于底部 HEAD 行); 空则不显示 HEAD
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    # 严重度 × 状态聚合
+    sev_buckets: dict[str, dict[str, int]] = {
+        "high": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
+        "medium": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
+        "low": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
+    }
+    try:
+        from reviewagent.telemetry.store import get_store
+        store = get_store()
+        all_sugs = store.list_suggestions(
+            project_id=project_id, mr_iid=mr_iid, limit=500,
+        )
+        for s in all_sugs:
+            sev = (s.get("severity") or "medium").lower()
+            state = (s.get("state") or "open").lower()
+            if sev not in sev_buckets:
+                sev_buckets[sev] = {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0}
+            if state not in sev_buckets[sev]:
+                sev_buckets[sev][state] = 0
+            sev_buckets[sev][state] += 1
+    except Exception as e:
+        logger.warning("build_overview_body.query failed (non-fatal): {}", e)
+
+    rows: list[dict[str, int | str]] = []
+    total_open = total_applied = total_dismissed = total_resolved = 0
+    for sev in ("high", "medium", "low"):
+        emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}[sev]
+        label = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}[sev]
+        bucket = sev_buckets.get(
+            sev, {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
+        )
+        open_n = bucket["open"]
+        applied_n = bucket["applied"]
+        dismissed_n = bucket["dismissed"]
+        resolved_n = bucket["resolved"]
+        total_open += open_n
+        total_applied += applied_n
+        total_dismissed += dismissed_n
+        total_resolved += resolved_n
+        rows.append({
+            "label": f"{emoji} {label}",
+            "open": open_n, "applied": applied_n,
+            "dismissed": dismissed_n, "resolved": resolved_n,
+            "sum": open_n + applied_n + dismissed_n + resolved_n,
+        })
+    grand_total = total_open + total_applied + total_dismissed + total_resolved
+    adoption_rate = round(total_applied / grand_total * 100, 1) if grand_total else 0.0
+    head_short = (head_sha or "")[:7] if head_sha else ""
+
+    lines: list[str] = []
+    lines.append(f"## 检视汇总（总建议数 {grand_total}，采纳率 {adoption_rate}%）")
+    lines.append("")
+    lines.append("| 严重度 | ⏳ 待处理 | ✅ 已采纳 | ❌ 已忽略 | 🔒 已关闭（未分类） | 合计 |")
+    lines.append("|:---:|:---:|:---:|:---:|:---:|:---:|")
+    for row in rows:
+        lines.append(
+            f"| {row['label']} | {row['open']} | {row['applied']} | {row['dismissed']} | {row['resolved']} | {row['sum']} |"
+        )
+    lines.append(
+        f"| **总计** | **{total_open}** | **{total_applied}** | **{total_dismissed}** | **{total_resolved}** | **{grand_total}** |"
+    )
+    lines.append("")
+    try:
+        ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S CST")
+    except Exception:
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    meta_parts: list[str] = [f"⏱ {ts}"]
+    if head_short:
+        meta_parts.append(f"HEAD {head_short}")
+    meta_suffix = " · " + " · ".join(meta_parts) if meta_parts else ""
+    lines.append("> ✅ **已采纳**：建议代码已通过 GitLab 应用建议、手动修改或 `/adopt` 确认采纳。")
+    lines.append("")
+    lines.append("> ❌ **已忽略**：用户通过 `/dismiss` 明确关闭了建议，并记录忽略理由（如有）。")
+    lines.append("")
+    lines.append("> 🔒 **已关闭（未分类）**：用户在 GitLab 中直接解决了主题，但系统无法确认该建议是采纳还是忽略。")
+    lines.append("")
+    lines.append(f"🆕 **最后新增 {inline_posted_count} 条**{meta_suffix}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def publish_overview(
+    *,
+    project_id: int,
+    mr_iid: int,
+    inline_posted_count: int = 0,
+    head_sha: str = "",
+    run_late_detect: bool = True,
+    gitlab: GitLabClient | None = None,
+    header: str = _OVERVIEW_HEADER_DEFAULT,
+) -> int | str | None:
+    """Build + publish (find/create/update) the persistent MR overview comment.
+
+    一站式入口: 调用一次就完成 build + find/create/update. idempotent.
+
+    Args:
+        project_id: GitLab project id
+        mr_iid: MR iid
+        inline_posted_count: 本轮新增的 suggestion 数
+        head_sha: MR head_sha (空字符串则不显示 HEAD 行)
+        run_late_detect: 是否先跑一次 late_detect (把"已关闭(未分类)"翻"已采纳").
+            improve.py 主流程传 True (build_overview 之前调一次保证数据最新);
+            /adopt /dismiss / ui_apply 路径传 False (避免无谓网络开销, 它们的
+            状态变化不会触发 late_detect 的命中).
+        gitlab: GitLabClient 实例 (None 则新建)
+        header: 锚点 header, 默认 "## 检视汇总"
+
+    Returns: note_id (int|str) 或 None (失败 / 跳过).
+    """
+    if gitlab is None:
+        gitlab = GitLabClient()
+
+    # 1. 可选: late detect (把误分类的 resolved+gitlab_resolve 翻回 applied)
+    if run_late_detect and head_sha:
+        try:
+            from reviewagent.commands.suggestion_actions import auto_detect_applied
+            auto_detect_applied(
+                project_id=project_id, mr_iid=mr_iid,
+                head_sha=head_sha, actor_username="telemetry-sync",
+            )
+        except Exception as e:
+            logger.warning("publish_overview.late_detect failed (non-fatal): {}", e)
+
+    # 2. Build markdown
+    body = build_overview_body(
+        project_id=project_id, mr_iid=mr_iid,
+        inline_posted_count=inline_posted_count, head_sha=head_sha,
+    )
+
+    # 3. Find existing comment by header prefix → update; else post new
+    try:
+        notes = gitlab.list_mr_notes(project_id, mr_iid)
+    except Exception as e:
+        logger.warning("publish_overview.list_notes_failed (non-fatal): {}", e)
+        notes = []
+
+    for n in notes:
+        body_n = n.get("body") or ""
+        if body_n.startswith(header):
+            try:
+                gitlab.update_mr_comment(project_id, mr_iid, n["id"], body)
+                logger.info(
+                    "publish_overview.updated project={} mr={} note_id={}",
+                    project_id, mr_iid, str(n["id"])[:12],
+                )
+                return n["id"]
+            except Exception as e:
+                logger.warning(
+                    "publish_overview.update_failed (non-fatal) note_id={} err={}",
+                    str(n["id"])[:12], e,
+                )
+                return None
+
+    try:
+        note_id = gitlab.post_mr_comment(project_id, mr_iid, body)
+        logger.info(
+            "publish_overview.created project={} mr={} note_id={}",
+            project_id, mr_iid, str(note_id)[:12],
+        )
+        return note_id
+    except Exception as e:
+        logger.warning("publish_overview.create_failed (non-fatal): {}", e)
+        return None
+
+
 # Compatibility alias used by describe.py (legacy code path).
 CommandError = BaseCommandError

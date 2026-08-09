@@ -577,7 +577,7 @@ def test_dedup_falls_back_to_rationale_rule_keys_when_raw_empty(tmp_telemetry):
 
 
 def test_overview_summary_format_with_full_data(tmp_telemetry):
-    """_build_overview_summary 应生成固定 header + 单表 + 元信息行 (方案 A).
+    """build_overview_body 应生成固定 header + 单表 + 元信息行 (方案 A).
 
     验证:
     - header 固定 `## 检视汇总` (无 V{N})
@@ -626,8 +626,10 @@ def test_overview_summary_format_with_full_data(tmp_telemetry):
         {"note_id": "new-1", "raw": {"severity": "high"}, "normalised": {"severity": "high"}, "kind": "inline"},
         {"note_id": "new-2", "raw": {"severity": "medium"}, "normalised": {"severity": "medium"}, "kind": "inline"},
     ]
-    out = cmd._build_overview_summary(
-        inline_posted, inline_skipped=[], total_agent_suggestions=5,
+    from reviewagent.commands._common import build_overview_body
+    out = build_overview_body(
+        project_id=cmd.project_id, mr_iid=cmd.mr_iid,
+        inline_posted_count=2,  # 2 inline_posted above
         head_sha=head_sha,
     )
 
@@ -662,8 +664,10 @@ def test_overview_summary_works_with_empty_state(tmp_telemetry):
     cmd = ImproveCommand.__new__(ImproveCommand)
     cmd.project_id = 34
     cmd.mr_iid = 999  # 没数据
-    out = cmd._build_overview_summary(
-        inline_posted=[], inline_skipped=[], total_agent_suggestions=0,
+    from reviewagent.commands._common import build_overview_body
+    out = build_overview_body(
+        project_id=cmd.project_id, mr_iid=cmd.mr_iid,
+        inline_posted_count=0,
         head_sha="abcdef00",
     )
 

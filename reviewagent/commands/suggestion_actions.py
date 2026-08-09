@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from reviewagent.gitlab.client import GitLabError, GitLabClient
+from reviewagent.commands._common import publish_overview
 from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
 
@@ -431,6 +432,19 @@ def process_dismiss(
         validation_status="ok",
     )
 
+    # 4.5. 立即刷新 MR 顶部"检视汇总" (与下一次 improve run 之间无延迟)
+    # Why: 之前只在 improve.py 末尾刷一次, /dismiss 不走 improve pipeline,
+    #      汇总停留在上一刻, 用户看到 stale 数据 (MR 247 实测偏差).
+    try:
+        publish_overview(
+            project_id=project_id, mr_iid=mr_iid,
+            inline_posted_count=0,
+            run_late_detect=False,
+            gitlab=gl,
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("/dismiss.overview_refresh failed (non-fatal): {}", _e)
+
     logger.info(
         "/dismiss resolved project={} mr={} discussion={} reason={!r}",
         project_id, mr_iid, suggestion_note_id, reason[:50] if reason else "",
@@ -756,6 +770,20 @@ def process_adopt(
     reimprove_job = _maybe_enqueue_reimprove(
         project_id=project_id, mr_iid=mr_iid, actor_username=actor_username,
     )
+
+    # 立即刷新 MR 顶部"检视汇总" — /adopt 完成后用户能秒级看到状态变化.
+    # Why: 同 process_dismiss, 不等下一次 improve run 才更新.
+    # 失败非致命 (后续 re-improve 也会再刷一次).
+    try:
+        publish_overview(
+            project_id=project_id, mr_iid=mr_iid,
+            inline_posted_count=0,
+            run_late_detect=False,
+            gitlab=gl,
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("/adopt.overview_refresh failed (non-fatal): {}", _e)
+
     if reimprove_job:
         return {"action": "adopted", "reason": reason, "validation": "ok", "reimprove_job": reimprove_job}
     return {"action": "adopted", "reason": reason, "validation": "ok"}
@@ -860,6 +888,16 @@ def mark_suggestion_applied_by_diff(
         "system_applied project={} mr={} file={} line={} suggestion={} via_note={}",
         project_id, mr_iid, file_path, target_line, sug.get("id"), source_note_id,
     )
+    # 立即刷新 MR 顶部"检视汇总" — UI Apply 后秒级反映到汇总表.
+    # Why: 同 process_dismiss / process_adopt. 不等 push webhook 触发的下一轮检视.
+    try:
+        publish_overview(
+            project_id=project_id, mr_iid=mr_iid,
+            inline_posted_count=0,
+            run_late_detect=False,
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("system_applied.overview_refresh failed (non-fatal): {}", _e)
     return sug.get("id")
 
 
