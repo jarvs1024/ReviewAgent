@@ -37,30 +37,35 @@ def test_render_telemetry_uses_three_column_metric_table():
     # 表头 3 列 (|:-:|:-:|:-:| 整串作为单一表分隔)
     assert "|:-:|:-:|:-:|" in out, "header separator should define 3 center-aligned columns"
     # 5 行指标 (每行 3 cell)
-    # 5 个指标行, 表头三列无 emoji
-    header = next(l for l in out.splitlines() if l.startswith("| 指标"))
-    assert header == "| 指标 | 当前值 | 较上周 |", header
-    # 任一 cell 不含 emoji 字符 (避免钉钉桌面端渲染成方块)
-    for ch in ("📋", "📈", "📉", "📥", "📂", "💡", "📊", "✅"):
-        assert ch not in out, f"emoji {ch!r} should be removed from metric table"
+    # 表头 3 列含 emoji (钉钉桌面端 macOS 能正常渲染)
+    header = next(l for l in out.splitlines() if l.startswith("|"))
+    assert header == "| 📋 指标 | 📈 当前数值 | 📉 较上周 |", header
+    # 每行 emoji 前缀锚定维度
+    rows = [l for l in out.splitlines() if l.startswith("| 📥") or l.startswith("| 📂")
+            or l.startswith("| 💡") or l.startswith("| 📊") or l.startswith("| ✅")]
+    assert len(rows) == 5, f"expected 5 metric rows, got {len(rows)}: {rows}"
     # 累计采纳率行 pp 后缀
-    pp_row = [l for l in out.splitlines() if "累计采纳率" in l][0]
+    pp_row = [r for r in rows if r.startswith("| ✅")][0]
     assert "pp" in pp_row, "adoption_rate_pct delta should carry 'pp' suffix"
     # 有 delta 时显示箭头
     assert any("↑" in l for l in out.splitlines()), "have deltas → should show ↑/↓ arrow"
 
 
-def test_render_telemetry_shows_first_week_when_no_deltas():
-    """没有 deltas 时 (首周跑批), trend 列显示 "首周", 短文不会被钉钉截断."""
+def test_render_telemetry_shows_single_dash_when_no_deltas():
+    """无 deltas 时 (首周跑批), trend 列显示单字 "—", 累计两行尤其要简洁."""
     data = _sample_data()
     data["deltas"] = {}   # 清空 deltas
     out = _render_telemetry(data)
-    rows = [l for l in out.splitlines() if l.startswith("| ✓") or l.startswith("| ▸") or l.startswith("| ▣")]
+    rows = [l for l in out.splitlines() if l.startswith("| 📥") or l.startswith("| 📂")
+            or l.startswith("| 💡") or l.startswith("| 📊") or l.startswith("| ✅")]
     assert len(rows) == 5
-    first_week_rows = [l for l in rows if "首周" in l]
-    assert len(first_week_rows) == 5, "全部 5 行 metrics 在 deltas 为空时都应该是 '首周'"
-    # 采纳率行也要是 "首周", 而不是 14.7% (↑None pp)
-    assert any("首周" in l and "14.7%" in l for l in rows)
+    # 5 行 trend 列应该都是 "—"
+    dash_rows = [l for l in rows if l.endswith("— |") or "| — |" in l]
+    assert len(dash_rows) == 5, f"全部 5 行 metrics 在 deltas 为空时 trend 列都应该是 '—', got: {rows}"
+    # 不能出现 "首周" 这种旧文案
+    assert "首周" not in out, "「首周」长文案应已被替换为单字 —"
+    # 也不能出现 "(新项目无对比)" 这种会被钉钉截断的长文案
+    assert "(新项目无对比)" not in out
 
 
 def test_deterministic_summary_problem_types_is_bullet():

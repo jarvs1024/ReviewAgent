@@ -298,41 +298,36 @@ def _render_telemetry(d: dict[str, Any]) -> str:
             value = f"{value} (→)"
         return (label, value)
 
-    # ---- 渲染指标表 (3 列紧凑, 钉钉 markdown table 列宽自适应 cell 内容) ----
-    # 设计取舍:
-    # 1. **不嵌 emoji**: 钉钉桌面端对 emoji 渲染不一致 (容易显示成方块 / 感叹号)
-    #    且占双字符宽度, 把列挤窄导致内容截断 (见 W32 截图).
-    # 2. **表头 ≤ 4 字, cell ≤ 8 字**: 给钉钉 grid layout 留足 padding,
-    #    三列按最长 cell 自动撑开, 文本不再被截.
-    # 3. **aria 标记 `**粗**`**: 让 cell 标题视觉更醒目 (粗 + 前缀符), 不靠 emoji.
+    # ---- 渲染指标表 (3 列 + emoji, 上周无对比显示 "—") ----
+    # 钉钉桌面端在 macOS / Windows 都能正常渲染标准 emoji,
+    # 给每个 cell 配 emoji 不仅撑宽视觉, 也快速锚定"周/累计/采纳率"维度.
+    # 累计两行 (累计 MR 数 / 累计建议数) 在首次推送时无 prev_data,
+    # 较上周列显示单字 "—", 简短不截断, 跟"↑42"风格对比统一.
     def _fmt_trend(delta) -> str:
         if delta is None:
-            return "首周"   # 新项目无对比; 短文避免被截
+            return "—"          # 新项目无对比 — 单字 dash, 不写"首周"
         if delta == 0:
             return "→ 持平"
         arrow = "↑" if delta > 0 else "↓"
         return f"{arrow}{abs(delta)}"
 
-    # 短前缀视觉符 (钉钉端稳, 等价 emoji 但零渲染风险)
-    _PFX = {"mr": "▸", "mr_total": "▣", "sug": "▸", "sug_total": "▣", "adopt": "✓"}
-
     rows = [
-        (f"{_PFX['mr']} 本周 MR 数",         str(mr_count),          _fmt_trend(deltas.get("mr_count"))),
-        (f"{_PFX['mr_total']} 累计 MR 数",   str(mr_total),          _fmt_trend(deltas.get("mr_total"))),
-        (f"{_PFX['sug']} 本周建议数",        str(suggestion_count),  _fmt_trend(deltas.get("suggestion_count"))),
-        (f"{_PFX['sug_total']} 累计建议数",  str(suggestion_total),  _fmt_trend(deltas.get("suggestion_total"))),
-        (f"{_PFX['adopt']} 累计采纳率",      f"{adoption_rate}%",    _fmt_trend(deltas.get("adoption_rate_pct"))),
+        ("📥 本周 MR 数",        str(mr_count),          _fmt_trend(deltas.get("mr_count"))),
+        ("📂 累计 MR 数",        str(mr_total),          _fmt_trend(deltas.get("mr_total"))),
+        ("💡 本周建议数",        str(suggestion_count),  _fmt_trend(deltas.get("suggestion_count"))),
+        ("📊 累计建议数",        str(suggestion_total),  _fmt_trend(deltas.get("suggestion_total"))),
+        ("✅ 累计采纳率",        f"{adoption_rate}%",    _fmt_trend(deltas.get("adoption_rate_pct"))),
     ]
     # adoption_rate_pct 的 delta 是 pp 单位; 箭头后补 pp 让语义清楚
     if deltas.get("adoption_rate_pct") not in (None, 0):
         d = deltas["adoption_rate_pct"]
         rows[-1] = (
-            f"{_PFX['adopt']} 累计采纳率",
+            "✅ 累计采纳率",
             f"{adoption_rate}%",
             f"{'↑' if d > 0 else '↓'}{abs(round(float(d), 1))} pp",
         )
 
-    lines.append("| 指标 | 当前值 | 较上周 |")
+    lines.append("| 📋 指标 | 📈 当前数值 | 📉 较上周 |")
     lines.append("|:-:|:-:|:-:|")
     for label, value, trend in rows:
         lines.append(f"| {label} | {value} | {trend} |")
