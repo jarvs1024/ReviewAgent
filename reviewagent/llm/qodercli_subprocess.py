@@ -198,24 +198,56 @@ def _unwrap_markdown_wrapper(text: str) -> str:
     """嗅探 text 是否是字面 `{"markdown": "..."}` 包装, 是则剥出 markdown.
 
     LLM 通过 qodercli 时, result 字段是字符串. 偶尔 LLM 把内层的 JSON
-    也当字符串输出, 出现 `{"markdown": "**概述**\\n\\n..."}` 这种嵌套.
+    也当字符串输出, 出现 `{"markdown": "**概述**\n\n..."}` 这种嵌套.
     直接 fallback 会把整个字面 JSON 当 markdown, 钉钉群里看到一坨裸 JSON.
     这里再嗅探一次, 找到就剥开.
+
+    两层:
+      1) 严格 JSON parse (正常 LLM 输出)
+      2) fallback 正则: LLM 在 markdown value 里嵌入未转义的 `"` (例如
+         代码 span 里写 "world" 时漏掉反斜杠) 导致严格 JSON 失败,
+         用正则定位 wrapper, 反转义 \\n \\t \" \\\\ 等.
+
+    与 reporting/renderer.py:_maybe_unwrap_llm_markdown 行为对齐 — 两层
+    防御, 任意一处成功就剥开, 失败回退原样返回.
     """
     if not text:
         return text
     head = text.lstrip()
     if not head.startswith("{"):
         return text
+
+    # ---- 第 1 层: 严格 JSON parse ----
     try:
         obj = json.loads(head, strict=False)
-    except json.JSONDecodeError:
+        if isinstance(obj, dict):
+            md = obj.get("markdown")
+            if isinstance(md, str):
+                return md
         return text
-    if isinstance(obj, dict):
-        md = obj.get("markdown")
-        if isinstance(md, str):
-            return md
-    return text
+    except json.JSONDecodeError:
+        pass
+
+    # ---- 第 2 层: 正则定位 value, 反转义 ----
+    m = re.search(r'\{\s*"markdown"\s*:\s*"', head)
+    if not m:
+        return text
+    val_start = m.end()
+    last_brace = head.rfind("}")
+    if last_brace <= val_start:
+        return text
+    last_quote = head.rfind('"', val_start, last_brace)
+    if last_quote <= val_start:
+        return text
+    raw = head[val_start:last_quote]
+    return re.sub(
+        r"\\(.)",
+        lambda mo: {
+            '"': '"', "\\": "\\", "/": "/",
+            "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+        }.get(mo.group(1), mo.group(1)),
+        raw,
+    )
 
 
 def _build_cmd(

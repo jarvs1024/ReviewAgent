@@ -243,29 +243,64 @@ def _fmt_delta(delta, suffix: str = "", digits: int = 1) -> str:
 
 
 def _maybe_unwrap_llm_markdown(text: str | None) -> str:
-    """LLM markdown 字符串嗅探兜底.
+    """LLM markdown 字符串嗅探兜底 — 两层解析.
 
     部分 agent (weekly_change_summary / weekly_quality_scan) 即使走
     tolerant_markdown 模式, 偶尔会把 `{"markdown": "..."}` 字面字符串
     透传到 `data["markdown"]`. 这里再剥一次, 防止钉钉群里出现一坨裸 JSON.
 
     非字符串或解析失败时原样返回.
+
+    两层:
+      1) 严格 JSON parse (正常 LLM 输出, 转义都正确)
+      2) fallback 正则: LLM 偶尔在 markdown 字符串里嵌入未转义的 `"`
+         (e.g. 写到代码 span 里 `"world"` 这种 markdown 时漏掉转义),
+         整个 JSON 解析失败, 但 wrapper 形状仍是 `{"markdown": "..."}`.
+         用正则定位 value 起止, 反转义 \\n \\t \" \\\\ 等.
     """
     if not text or not isinstance(text, str):
         return text or ""
     head = text.lstrip()
     if not head.startswith("{"):
         return text
+
+    # ---- 第 1 层: 严格 JSON parse ----
     import json as _json
     try:
         obj = _json.loads(head, strict=False)
-    except _json.JSONDecodeError:
+        if isinstance(obj, dict):
+            md = obj.get("markdown")
+            if isinstance(md, str):
+                return md
         return text
-    if isinstance(obj, dict):
-        md = obj.get("markdown")
-        if isinstance(md, str):
-            return md
-    return text
+    except _json.JSONDecodeError:
+        pass
+
+    # ---- 第 2 层: 正则定位 value, 反转义 ----
+    # 找 `{"markdown": "` 起点
+    _START_RE = re.compile(r'\{\s*"markdown"\s*:\s*"')
+    m = _START_RE.search(head)
+    if not m:
+        return text
+    val_start = m.end()
+    # 找 wrapper 末尾 (最后一个 `}`)
+    last_brace = head.rfind("}")
+    if last_brace <= val_start:
+        return text
+    # 在 val_start..last_brace 之间找最后一个 `"` — 即 markdown value 的闭合 quote
+    last_quote = head.rfind('"', val_start, last_brace)
+    if last_quote <= val_start:
+        return text
+    raw = head[val_start:last_quote]
+    # JSON string escape 反转义 (\\X -> X)
+    return re.sub(
+        r"\\(.)",
+        lambda mo: {
+            '"': '"', "\\": "\\", "/": "/",
+            "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+        }.get(mo.group(1), mo.group(1)),
+        raw,
+    )
 
 
 def _render_telemetry(d: dict[str, Any], *, dashboard_url: str = "") -> str:
