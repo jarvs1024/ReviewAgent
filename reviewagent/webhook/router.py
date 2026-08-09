@@ -384,6 +384,32 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
             # 不需要让 push_commands 再跑一次
             return {"status": "ignored", "reason": "no_open_suggestion_at_line"}
 
+    # GitLab 系统 note "marked this discussion as resolved" / "resolved all threads":
+    # 用户在 UI 直接点 ✓ 解决主题 (或批量解决) 时 GitLab 发这条 system note (非 DiffNote).
+    # 之前依赖 push 触发 auto_detect_applied 来发现 resolved 状态,
+    # 但"只点 ✓ 不改代码"的纯 UI 操作不会触发 push, 留下孤儿.
+    # 这里对所有 state=open 的 suggestion 调 GitLab is_discussion_resolved 扫一遍,
+    # resolved=true 的就标 state=resolved + resolution_source='gitlab_resolve'.
+    if note.is_system:
+        body_lower = (note.note_body or "").lower()
+        if "marked this discussion as resolved" in body_lower or "resolved all threads" in body_lower:
+            from reviewagent.commands.suggestion_actions import sync_resolved_from_gitlab
+            sync_result = sync_resolved_from_gitlab(
+                project_id=note.project_id,
+                mr_iid=note.mr_iid,
+                actor_username=note.actor_username or "gitlab-resolve",
+            )
+            logger.info(
+                "webhook.sync_resolved project={} mr={} scanned={} updated={}",
+                note.project_id, note.mr_iid,
+                sync_result.get("scanned"), sync_result.get("updated"),
+            )
+            return {
+                "status": "synced",
+                "via": "gitlab_resolve_webhook",
+                **sync_result,
+            }
+
     # /adopt /dismiss 走专门路径 (不是 MR 命令链, 而是针对 inline suggestion 的回复)
     from reviewagent.commands.suggestion_actions import extract_action
     action_info = extract_action(note.note_body)

@@ -901,6 +901,91 @@ def mark_suggestion_applied_by_diff(
     return sug.get("id")
 
 
+# ---------- Sync GitLab resolved → DB resolved (webhook 触发) ----------
+def sync_resolved_from_gitlab(
+    *,
+    project_id: int,
+    mr_iid: int,
+    actor_username: str = "gitlab-resolve",
+) -> dict[str, Any]:
+    """把 GitLab 已 resolved 但 DB 仍 open 的 suggestion 标 resolved.
+
+    Trigger: webhook 收到 GitLab 系统 note
+      - "marked this discussion as resolved" (单条 ✓)
+      - "resolved all threads" (批量 ✓)
+    用户在 UI 直接点解决主题 (没改代码), 没 push webhook 触发, DB 永远停在 open.
+
+    Why: 之前依赖 push 触发 reconcile, 但"只点 ✓ 不改代码"的纯 UI 操作
+    不会触发 push, 留下孤儿 (MR 247 e50f4c0d4d4e 实测).
+
+    与 auto_detect_applied 的区别:
+    - auto_detect_applied: 跑在 push webhook, 同时检测 code 落地 + discussion 状态,
+      命中时直接翻 applied; 不命中才标 resolved.
+    - 本函数: 跑在 resolve webhook, 只对 state=open 的 suggestion 做一次"是否被
+      GitLab UI resolve"的扫, 命中就标 resolved (永远不进 applied — 没有 code 落地).
+
+    Returns: {"scanned": int, "updated": int, "note_ids": list[str]}
+    """
+    gl = GitLabClient()
+    store = get_store()
+
+    open_sugs = store.list_open_suggestions(project_id=project_id, mr_iid=mr_iid)
+    result: dict[str, Any] = {
+        "scanned": len(open_sugs),
+        "updated": 0,
+        "note_ids": [],
+    }
+
+    for sug in open_sugs:
+        note_id = sug.get("note_id") or ""
+        if not note_id:
+            continue
+        try:
+            resolved = gl.is_discussion_resolved(project_id, mr_iid, note_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "sync_resolved.is_discussion_resolved failed note={} err={}",
+                note_id[:8], e,
+            )
+            continue
+        if resolved is True:
+            store.update_suggestion_state(
+                note_id, "resolved", actor_username=actor_username,
+                adoption_source="gitlab_resolve",
+            )
+            store.record_suggestion_action(
+                project_id=project_id, mr_iid=mr_iid,
+                suggestion_note_id=note_id,
+                file_path=sug.get("file_path"),
+                target_line=sug.get("target_line"),
+                action="resolved",
+                actor_username=actor_username,
+                reason="GitLab UI 直接解决主题 (无 push 触发)",
+                validation_status="gitlab-resolve",
+                adoption_source="gitlab_resolve",
+            )
+            result["updated"] += 1
+            result["note_ids"].append(note_id)
+            logger.info(
+                "sync_resolved project={} mr={} note={} file={} line={}",
+                project_id, mr_iid, note_id[:8],
+                sug.get("file_path"), sug.get("target_line"),
+            )
+
+    if result["updated"]:
+        # 立即刷新 MR 顶部"检视汇总"
+        try:
+            publish_overview(
+                project_id=project_id, mr_iid=mr_iid,
+                inline_posted_count=0,
+                run_late_detect=False,
+            )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("sync_resolved.overview_refresh failed (non-fatal): {}", _e)
+
+    return result
+
+
 # ---------- Auto-detect UI-applied suggestions ----------
 
 def auto_detect_applied(
