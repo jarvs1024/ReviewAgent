@@ -725,3 +725,105 @@ def test_build_summary_placeholder_contains_version():
     assert m, f"未匹配 V{{N}}: {out!r}"
     assert "加载中" in out, f"placeholder 应有'加载中'提示: {out!r}"
     assert out.startswith("## 改进总览")
+
+
+# ---------- 4c 收缩检查: with/try 包装应被识别为结构重组 ----------
+
+def test_validate_suggestion_with_wrap_is_refactor_not_shrink():
+    """`f = open() / f.write / f.close` → `with open as f: / f.write` 是 with-wrap,
+    improved 行数 < existing (因为 close 被 with __exit__ 取代),
+    但 improved 引入了 `with ...:` 块起始 → 应走 post, 不应降级 general."""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 0
+    cmd.mr_iid = 0
+
+    target_file = "src.py"
+    file_lines = [
+        "import os\n",                        # line 1
+        "def process():\n",                    # line 2
+        "    p = '/tmp/data'\n",               # line 3
+        "    f = open(p, 'w')\n",              # line 4  ← 目标行
+        "    f.write('hello')\n",              # line 5
+        "    f.close()\n",                     # line 6
+        "    return True\n",                   # line 7
+    ]
+    existing = "    f = open(p, 'w')\n    f.write('hello')\n    f.close()\n"
+    # improved = with-wrap, 比 existing 少一行 (f.close 被 with __exit__ 取代)
+    improved = "    with open(p, 'w') as f:\n        f.write('hello')\n"
+    line_map = {target_file: set(range(1, 8))}
+    file_sources = {target_file: [l.rstrip("\n") for l in file_lines]}
+
+    result = cmd._validate_suggestion(
+        file_path=target_file,
+        start_line=4,
+        improved_code=improved,
+        existing_code=existing,
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    assert result["action"] == "post", (
+        f"with-wrap 应当走 post (结构重组), got action={result['action']!r} reason={result.get('reason')!r}"
+    )
+
+
+def test_validate_suggestion_try_wrap_is_refactor_not_shrink():
+    """try/except 包裹也是结构重组 — improved 引入 `try:` 块起始 → post."""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 0
+    cmd.mr_iid = 0
+
+    target_file = "src.py"
+    file_lines = [
+        "def compute():\n",                   # line 1
+        "    x = do_a()\n",                    # line 2
+        "    x.do_b()\n",                      # line 3
+        "    return x\n",                      # line 4
+    ]
+    existing = "    x = do_a()\n    x.do_b()\n    return x\n"
+    # improved = try/except, 多了 try 行, 总行数仍可能 < existing
+    improved = "    try:\n        x = do_a()\n        return x\n    except Exception:\n        return None\n"
+    line_map = {target_file: set(range(1, 5))}
+    file_sources = {target_file: [l.rstrip("\n") for l in file_lines]}
+
+    result = cmd._validate_suggestion(
+        file_path=target_file,
+        start_line=2,
+        improved_code=improved,
+        existing_code=existing,
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    # improved 是 5 行, existing 是 3 行 → improved > existing → 4a multi-line,
+    # 不是 4c, 所以这条实际走 4a. 但保留这个 case 验证后续 with 类包装走的还是 post.
+    assert result["action"] == "post", (
+        f"try-wrap 应当走 post, got action={result['action']!r} reason={result.get('reason')!r}"
+    )
+
+
+def test_validate_suggestion_pure_delete_no_new_block_still_general():
+    """部分删除 (improved 无新块起始, 只是替换内容) → 仍降级 general, 防 agent 误删."""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 0
+    cmd.mr_iid = 0
+
+    target_file = "src.py"
+    file_lines = ["# header\n"] + [f"x = {i}\n" for i in range(1, 20)] + ["y = 99\n"]
+    existing = "".join(file_lines[9:15])  # 6 行
+    improved = "x = 999\n"                # 1 行, 无块起始
+    line_map = {target_file: set(range(10, 16))}
+    file_sources = {target_file: [l.rstrip("\n") for l in file_lines]}
+
+    result = cmd._validate_suggestion(
+        file_path=target_file,
+        start_line=10,
+        improved_code=improved,
+        existing_code=existing,
+        line_map=line_map,
+        file_sources=file_sources,
+    )
+    assert result["action"] == "general", (
+        f"无块起始的部分删除应降级 general, got action={result['action']!r}"
+    )

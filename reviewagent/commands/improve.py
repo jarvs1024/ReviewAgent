@@ -1889,22 +1889,50 @@ class ImproveCommand(BaseCommand):
             return {"action": "post", "new_line": start_line, "reason": "multi_line_replacement",
                     "normalised_code": normalised_code}
 
-        # 4b. 对齐检查
+        # 4b. 结构重组旁路 (放在 4c 对齐检查之前, 防 with/try 包装被误 drop)
+        #     with-wrap / try-wrap 时 improved 第一行 ≠ target_line (with 与 return 不同),
+        #     但 improved 引入了新的「块起始行」 (with/try/if/class/def), 是结构重组,
+        #     不应走 4c 的「首行对齐」检查, 直接放行到 4d publish.
+        #     例: `f = open() / f.write / f.close` → `with open as f: / f.write`
+        #         improved=[with..., f.write] < existing=[f=open, f.write, f.close]
+        #         improved[0]=`with ...` ≠ target_line=`f = open(...)`, 但有 `with` 块起始.
+        _BLOCK_OPEN_RE = re.compile(r'^\s*(?:with\s|try\s*:|if\s|for\s|while\s|async\s|class\s|def\s)')
+        is_structural_refactor = False
+        if len(improved_lines) < len(existing_lines) and improved_lines:
+            norm_existing_set = {ln.strip() for ln in existing_lines if ln.strip()}
+            new_block_openers = [
+                ln.strip() for ln in improved_lines
+                if ln.strip() and _BLOCK_OPEN_RE.match(ln.strip())
+                and ln.strip() not in norm_existing_set
+            ]
+            if new_block_openers:
+                is_structural_refactor = True
+                logger.info(
+                    "improve.structural_refactor project={} mr={} file={} "
+                    "line={} existing={} improved={} new_block_openers={}",
+                    self.project_id, self.mr_iid, file_path,
+                    start_line, len(existing_lines), len(improved_lines), len(new_block_openers),
+                )
+
+        # 4c. 对齐检查
         # N→N 等行数替换: existing_code 已在文件中定位 (actual_line 非 None),
         #   agent 有意改写代码 (e.g. print→logger.info), 第一行不需要匹配.
         # 1→1 且 existing_code 未找到: 仍需校验第一行对齐, 防止模型乱发.
         # 例外: improved 为空 (删除整段) → 不需要对齐第一行
+        # 例外: 结构重组 (4b 旁路命中) → with/try 包装首行 ≠ target_line, 跳过对齐
         is_same_line_count = bool(existing_lines) and len(improved_lines) == len(existing_lines)
         if not improved_lines:
             pass  # 删除场景, 不需要对齐
+        elif is_structural_refactor:
+            pass  # 结构重组旁路: 跳过对齐检查, 直接放行
         elif not (is_same_line_count and actual_line is not None):
             if not _code_first_line_matches(target_line, imp_first):
                 return {"action": "drop", "new_line": start_line,
                         "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
 
-        # 4c. 收缩检查: M < N 时一律降级为普通评论（无 Apply 按钮）
-        #     收缩建议移除代码的风险太高 — agent 经常把不该删的行包进 existing_code
-        #     导致 Apply 后丢失关键逻辑。降级后用户仍能看到建议文本，但不能一键应用。
+        # 4d. 收缩检查: M < N 时区分「真删行」与「结构重组」
+        #     结构重组 (上面 4b 已识别, 已放行) → publish
+        #     真删 (improved ⊂ existing, 没新内容) → general (无 Apply), 防 agent 误删
         # 例外: M == 0 且 existing 非空 → 整段删除 (duplicated_definition / dead_code),
         #     允许多行删除 suggestion 走到 publish 阶段.
         if len(improved_lines) == 0 and existing_lines:
@@ -1914,7 +1942,8 @@ class ImproveCommand(BaseCommand):
                 self.project_id, self.mr_iid, file_path,
                 start_line, len(existing_lines),
             )
-        elif len(improved_lines) < len(existing_lines):
+        elif len(improved_lines) < len(existing_lines) and not is_structural_refactor:
+            # 走到这里说明: M < N 且 没引入新块起始行 → 真删, 降级 general
             logger.info(
                 "improve.shrink_to_general project={} mr={} file={} "
                 "line={} existing={} improved={}",
