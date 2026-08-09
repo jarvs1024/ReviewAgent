@@ -30,7 +30,7 @@
 | `state` | str | GitLab MR state (`opened` / `closed` / `merged`) |
 | `created_at` / `updated_at` / `merged_at` | datetime \| None | ISO 时间, `_parse_dt` 兼容 GitLab `2024-01-15 10:30:00 UTC` 与 `2024-01-15T10:30:00.000Z` 两种格式 |
 | `description_generated` | bool | describe 命令是否已落库 (一次性标题守卫) |
-| `last_review_at` | datetime \| None | 最近一次检视时间 |
+| `last_review_at` | datetime \| None | 最近一次检视时间 (dataclass 字段, 由 `store.mark_description_generated` 回填, `from_gitlab` 不设) |
 
 `from_gitlab(mr: dict)` 工厂方法从 GitLab API 返回的 MR dict 构造; `author` 字段为空 username 回退为 `unknown`。
 
@@ -66,6 +66,68 @@
 - `emit_run_started` 在命令入口
 - `emit_run_finished` 在 `_mark_finished` 统一收口 (避免 finally 与正常路径重复触发)
 - `status="skipped"` 走 MR 状态守卫 / 子类 `_should_skip` / diff 为空 / diff 过大 4 个跳过分支
+
+## Store API (`store.py`)
+
+`Store` 类 (单例, `get_store()`) 是 telemetry 的 DAO 层。所有 REST 端点 (`/api/v1/telemetry/*`) 都走这里。下面的方法是公开接口, 主流程 / 测试 / 维护脚本都直接调用。
+
+写方法在出错时回滚 (`BEGIN/COMMIT/ROLLBACK`); 读方法只用 `_conn()` 自动提交上下文。`web_url` 字段由 `_enrich_web_url` 在 `get_mr` / `list_mrs` / `/mrs*` 端点上按需注入 (调 GitLab API, 项目级缓存)。
+
+### MR 元信息 (`mr_activity`)
+
+| 方法 | 用途 |
+|---|---|
+| `upsert_mr(mr: MRRecord)` | INSERT 或 UPDATE `mr_activity`; 已有 `author_sticky` 用 `COALESCE` 保留不被覆盖 |
+| `mark_description_generated(project_id, mr_iid)` | `description_generated=1` + touch `last_review_at` / `last_activity_at` |
+| `touch_mr_activity(project_id, mr_iid, *, at=None)` | 强制 touch `last_activity_at` (`at=None` = now, 也可传 ISO) |
+| `backfill_last_activity_at() -> int` | 全表重算 `last_activity_at` (修复 / 维护 / 测试用) |
+| `get_mr(project_id, mr_iid) -> dict \| None` | 读单条 MR, 顺手 enrich `web_url` |
+| `list_mrs(*, project_id, since, until, state, limit=100) -> list[dict]` | MR 列表 (created_at DESC), enrich `web_url` |
+| `mr_overview(*, project_id, since, until) -> dict` | `{total, opened, closed, merged, window_count}` |
+| `rule_key_counts(*, project_id, since, until, top_n=5) -> list[(rule_key, count)]` | 拆分 `suggestions.rule_keys` CSV 后按 key 聚合, 取 top-N |
+
+### Run (`review_runs`)
+
+| 方法 | 用途 |
+|---|---|
+| `insert_run(run: ReviewRun) -> int` | INSERT, 返回 `run_id` |
+| `finish_run(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, duration_ms=0)` | UPDATE 收尾; 自动写 `finished_at` / `total_tokens = prompt + completion`; 同步 touch `mr_activity.last_activity_at` |
+| `list_runs(*, project_id, mr_iid, since, until, command, status, limit=100, offset=0) -> list[dict]` | 多条件过滤 (started_at DESC), 给周报 / dashboard |
+
+### Suggestion (`suggestions`)
+
+| 方法 | 用途 |
+|---|---|
+| `record_suggestion(*, project_id, mr_iid, note_id, file_path, target_line, target_line_end=None, existing_code=None, improved_code=None, header=None, severity=None, head_sha, rule_keys=None, one_sentence_summary=None, importance=None, label=None, fingerprint=None, cohort_key=None, severity_source=None) -> int` | INSERT 一条 inline suggestion, 同步 touch `last_activity_at`。`posted_at` 与 `created_at` 同时写 `_utcnow()` (当前实现等价) |
+| `suggestion_exists_by_fingerprint(project_id, mr_iid, fingerprint) -> bool` | 跨次精确指纹 dedup (主键命中即返回 True) |
+| `suggestion_exists_at_line(project_id, mr_iid, file_path, target_line, severity="", head_sha="", line_tolerance=0, rule_keys=None) -> bool` | 跨次 heuristic dedup (`file, line±tolerance, state=open[, rule_keys 重叠]` + `head_sha` 兜底), 详见下方"关键行为" |
+| `list_suggestion_headers(project_id, mr_iid) -> list[dict]` | 轻量列表 (file / line / header / severity / fp_short 前 8 位), 给 agent prompt 注入避免重复提 |
+| `get_suggestion_by_note_id(note_id) -> dict \| None` | 按 GitLab note_id 查 (id DESC LIMIT 1) |
+| `find_open_suggestion_by_line(*, project_id, mr_iid, file_path, target_line, window=3) -> dict \| None` | UI Apply 兜底匹配 (state=open, line±window, 按行号距离 + id 排序) |
+| `list_open_suggestions(*, project_id, mr_iid) -> list[dict]` | 全量 open suggestion (note_id / file_path / target_line / existing_code / improved_code / head_sha), 给 `auto_detect_applied` 跑 reconcile |
+| `update_suggestion_state(note_id, state, *, actor_username=None, dismissed_reason=None, adoption_source=None)` | 状态机: `applied` / `dismissed` / `resolved` / `superseded`; 自动写 `applied_at` / `dismissed_at` / `dismissed_by` / `dismissed_reason` / `resolved_at` / `resolved_by` / `resolution_source` / `updated_at` |
+| `supersede_stale_open_suggestions(*, project_id, mr_iid, current_head_sha) -> list[str]` | head_sha 不一致的全标 superseded, 返回被 supersede 的 `note_id` 列表; `current_head_sha=""` (空字符串) 时返回 `[]` 不操作 |
+| `update_suggestion_note_id(suggestion_id, new_note_id)` | webhook /adopt 兜底命中后回写真实 GitLab note_id |
+| `list_suggestions(*, project_id, mr_iid, state, since, until, limit=100, offset=0) -> list[dict]` | 多条件分页 (created_at DESC, id DESC) |
+| `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比) |
+| `suggestion_metrics(*, project_id, since, until) -> dict` | 周报 / 仪表盘维度: `state_counts` / `severity_counts` / `action_counts` / `adoption_rate` (0~1 小数) / `adoption_pct` |
+
+### Action (`suggestion_actions`)
+
+| 方法 | 用途 |
+|---|---|
+| `record_suggestion_action(*, project_id, mr_iid, suggestion_note_id, file_path=None, target_line=None, action, actor_username=None, reason=None, validation_status=None, adoption_source=None, head_sha_posted=None, head_sha_current=None) -> int` | INSERT /adopt /dismiss 事件; 同步 touch `last_activity_at` |
+| `list_suggestion_actions(*, project_id, mr_iid, action, since, until, limit=100, offset=0) -> list[dict]` | 多条件过滤 (id DESC) |
+| `list_dismissals(*, project_id, mr_iid, since, until, rule_key=None, limit=200) -> list[dict]` | 关联 `suggestions` 取 `dismissed_reason`; `rule_key` 过滤走 `file_path == rule_key OR reason == rule_key` (兼容前端传 file 名当 key) |
+| `dismissals_by_rule(*, project_id, since) -> list[dict]` | 按 `suggestions.rule_keys` 聚合, 含 `(no_rule_key)` 兜底 + 每条 rule 的 `reasons[]` 分布 |
+| `distinct_rule_keys(*, project_id, mr_iid) -> list[str]` | 全量去重 rule key 列表 (按 created_at DESC 扫, 去重后排序) |
+
+### 调试 / 聚合
+
+| 方法 | 用途 |
+|---|---|
+| `save_agent_output_fail(text, agent)` | 写 `agent_failures` 表前 500 字符 (调试用, 无 API 端点) |
+| `summary(*, since, until) -> dict` | 周报 / 仪表盘聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens}}` / `by_status` / `by_day` / `top_mrs` (前 10) |
 
 ## Schema
 
@@ -107,7 +169,7 @@
 
 索引: `idx_runs_project_mr` on `(project_id, mr_iid)`, `idx_runs_started` on `started_at`
 
-注: `rule_keys_cited` / `suggestion_count` 是通过 ALTER TABLE 在线迁移加的列 (旧库自动加)。
+注: `triggered_by` (防御性补老库) / `rule_keys_cited` / `suggestion_count` 是通过 ALTER TABLE 在线迁移加的列 (旧库自动加)。
 
 ### `suggestions` — improve 发布的 inline suggestion
 
@@ -283,11 +345,11 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 
 完整测试 (`pytest tests/`):
 
-- `tests/test_improve_alignment.py` — 21 个对齐 / 缩进 / 多行替换测试
-- `tests/test_suggestion_actions.py` — 12 个 /adopt /dismiss 测试
-- `tests/test_telemetry_endpoints.py` — 3 个新端点集成测试 (record_suggestion 扩展字段、dismissed_reason、by-rule 聚合)
-- `tests/test_last_activity_at.py` — `last_activity_at` MAX 语义测试
-- `tests/test_supersede_stale_suggestions.py` — head_sha 变化 supersede 测试
+- `tests/test_improve_alignment.py` — 42 个对齐 / 缩进 / 多行替换测试
+- `tests/test_suggestion_actions.py` — 16 个 /adopt /dismiss 测试
+- `tests/test_telemetry_endpoints.py` — 5 个端点集成测试 (record_suggestion 扩展字段、dismissed_reason、by-rule 聚合、adoption_source 写入与 label)
+- `tests/test_last_activity_at.py` — 6 个 `last_activity_at` MAX 语义 / 回填测试
+- `tests/test_supersede_stale_suggestions.py` — 6 个 head_sha 变化 supersede 测试
 
 e2e 流程 (基于 `codex/telemetry-e2e-20260730-224254` MR !134):
 
