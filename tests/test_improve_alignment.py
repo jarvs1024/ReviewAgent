@@ -782,6 +782,28 @@ def test_build_summary_v2_line_number_missing_falls_back():
     assert "`L" not in out, f"不应渲染 `L` 残骸: {out!r}"
 
 
+def test_help_text_footer_warns_against_resolve_thread():
+    """HELP_TEXT_FOOTER 必须提醒用 MR 评论 + 命令标记, 不能直接点「解决主题」.
+
+    Why: 用户直接点 GitLab 「解决主题」按钮 → thread 被归为「已关闭(未分类)」,
+    /adopt /dismiss 检测不到 → telemetry 缺失处理数据.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    footer = ImproveCommand.HELP_TEXT_FOOTER
+    # 1. 必须保留 /adopt /dismiss 命令提示
+    assert "/adopt" in footer
+    assert "/dismiss" in footer
+    # 2. 必须警告「解决主题」会导致「已关闭(未分类)」
+    assert "解决主题" in footer
+    assert "已关闭（未分类）" in footer or "已关闭(未分类)" in footer
+    # 3. 必须说"无法采集" — 让用户明白后果
+    assert "无法采集" in footer or "无法记录" in footer or "无法识别" in footer
+    # 4. 不再保留旧文案
+    assert "理由会被记录，用于改进后续建议" not in footer, (
+        f"旧文案 '理由会被记录...' 必须被替换: {footer!r}"
+    )
+
+
 def test_build_summary_placeholder_contains_version():
     """placeholder 必须包含 V{N}, 即使还没拿到 inline_posted 数据"""
     from reviewagent.commands.improve import ImproveCommand

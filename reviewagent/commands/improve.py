@@ -56,13 +56,15 @@ class ImproveCommand(BaseCommand):
     DEFAULT_AGENT = "improve"
 
     # 每条 suggestion 末尾追加 /adopt /dismiss 帮助文本 (与 pr-agent 一致)
+    # 末段提醒用户用 MR 评论 + 命令来标记处理, 避免直接点「解决主题」被归类为「已关闭(未分类)」造成数据丢失.
     HELP_TEXT_FOOTER = (
         "\n\n✅ 接受建议\n"
         "   • 直接用：点上方「应用建议」按钮\n"
         "   • 自己改：请先提交修改，再回复 `/adopt [理由]`\n"
         "\n❌ 关闭建议\n"
         "   • 回复 `/dismiss [理由]`\n"
-        "\n理由会被记录，用于改进后续建议。"
+        "\n💡 请用 MR 评论回复 `/adopt` 或 `/dismiss` 来标记处理结果;"
+        "直接点击 GitLab 「解决主题」会被归为「已关闭（未分类）」，系统无法采集处理方式."
     )
     # ---------- 并行分块调用 ----------
     def _call_agent(self, ws) -> dict[str, Any]:
