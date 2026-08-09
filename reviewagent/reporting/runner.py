@@ -168,6 +168,7 @@ def run_weekly_job(
         sections=sections,
         report_title=cfg.report_title,
         report_emoji=cfg.report_emoji,
+        dashboard_url=cfg.dashboard_url,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -76,3 +76,33 @@ def test_deterministic_summary_problem_types_is_bullet():
     assert len(bullets) >= 1, "problem_types 段必须是 bullet 列表"
     # 至少含一条 `×N`，N 是数字
     assert any("×" in b and any(ch.isdigit() for ch in b) for b in bullets)
+
+
+def test_render_telemetry_appends_dashboard_link_when_url_given():
+    """dashboard_url 非空时, 在指标表后追加 `📈 检视看板: [url](url)` 一行."""
+    out = _render_telemetry(_sample_data(), dashboard_url="http://127.0.0.1:8080/code-review")
+    lines = out.splitlines()
+    # 在最末行 (表格之后, 空行 + 链接行)
+    link_line = next((l for l in lines if l.startswith("📈")), None)
+    assert link_line is not None, f"应有「📈 检视看板」行, got:\n{out}"
+    # markdown 链接格式: [url](url)
+    assert "[http://127.0.0.1:8080/code-review](http://127.0.0.1:8080/code-review)" in link_line
+    # 链接行必须出现在指标表最后一行 (✅ 行) 之后
+    last_metric_idx = max(
+        i for i, l in enumerate(lines)
+        if l.startswith(("| 📥", "| 📂", "| 💡", "| 📊", "| ✅"))
+    )
+    link_idx = lines.index(link_line)
+    assert link_idx > last_metric_idx, (
+        f"检视看板链接必须在指标表之后. last_metric_idx={last_metric_idx}, link_idx={link_idx}"
+    )
+
+
+def test_render_telemetry_omits_dashboard_link_when_url_empty():
+    """dashboard_url 为空时, 不渲染「检视看板」行, 行为向前兼容."""
+    out_default = _render_telemetry(_sample_data())
+    out_empty = _render_telemetry(_sample_data(), dashboard_url="")
+    # 「📈」emoji 也会出现在表头「📈 当前数值」里, 不能用纯 emoji 检测.
+    # 改用「检视看板」锚文字精确判定: 仅 dashboard 链接行有它.
+    assert "检视看板" not in out_default
+    assert "检视看板" not in out_empty

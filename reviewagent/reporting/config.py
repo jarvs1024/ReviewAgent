@@ -50,6 +50,7 @@ class WeeklyReportConfig:
     report_title: str = "SSD自动化代码检视周报"
     report_emoji: str = "📊"
     cron_schedule: str = "Mon 09:00"  # systemd OnCalendar 格式, 用户可自定义
+    dashboard_url: str = "http://127.0.0.1:8080/code-review"  # 检视看板地址, 渲染到「本周检视概况」末尾
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -77,6 +78,7 @@ class WeeklyReportConfig:
             cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 09:00"),
             report_title=_env_str("REVIEWAGENT_WEEKLY_REPORT_TITLE", "SSD自动化代码检视周报"),
             report_emoji=_env_str("REVIEWAGENT_WEEKLY_REPORT_EMOJI", "📊"),
+            dashboard_url=_env_str("REVIEWAGENT_WEEKLY_DASHBOARD_URL", "http://127.0.0.1:8080/code-review"),
         )
 
 

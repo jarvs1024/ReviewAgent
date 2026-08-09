@@ -201,14 +201,21 @@ def _build_change_summary(mr_list: list[dict], author_count: int) -> str:
     return "\n".join(parts).strip()
 
 
-def render_section(name: str, sr: SectionResult) -> str:
-    """单个 section -> markdown 块 (不含顶层 ## 标题)."""
+def render_section(name: str, sr: SectionResult, *, dashboard_url: str = "") -> str:
+    """单个 section -> markdown 块 (不含顶层 ## 标题).
+
+    Args:
+        name: section 名 (telemetry / merged_mrs / repo_scan)
+        sr: 该 section 的采集结果
+        dashboard_url: 检视看板 URL, 当前仅 telemetry 段 (「本周检视概况」) 末尾拼接.
+                        空字符串时不渲染.
+    """
     if sr.status == "failed":
         err = sr.error or "未知错误"
         return f"> ⚠️ 数据采集失败: `{err}`\n"
 
     if name == "telemetry":
-        return _render_telemetry(sr.data or {})
+        return _render_telemetry(sr.data or {}, dashboard_url=dashboard_url)
     if name == "merged_mrs":
         return _render_merged_mrs(sr.data or {})
     if name == "repo_scan":
@@ -261,12 +268,14 @@ def _maybe_unwrap_llm_markdown(text: str | None) -> str:
     return text
 
 
-def _render_telemetry(d: dict[str, Any]) -> str:
+def _render_telemetry(d: dict[str, Any], *, dashboard_url: str = "") -> str:
     """检视概况: 叙事性检视汇总(LLM 润色) 在上, 核心指标表在下.
 
     - 汇总段优先用 opencode 生成的 llm_summary_markdown; 为空(LLM 失败/未配置)
       回退到确定性 _build_inspection_summary.
     - 指标表仅保留 5 行核心指标, 不再堆 severity 分布 / 触发最多规则 两行裸数据.
+    - `dashboard_url` 非空时, 在指标表之后追加「📈 检视看板: [url](url)」一行,
+      指向 cfg.REVIEWAGENT_WEEKLY_DASHBOARD_URL 配置的检视看板地址.
     """
     mr_count = d.get("mr_count", 0)
     mr_total = d.get("mr_total", 0)
@@ -331,6 +340,11 @@ def _render_telemetry(d: dict[str, Any]) -> str:
     lines.append("|:-:|:-:|:-:|")
     for label, value, trend in rows:
         lines.append(f"| {label} | {value} | {trend} |")
+
+    if dashboard_url:
+        # 末尾独立一行: emoji + 锚文字 + markdown 链接, 钉钉桌面端会渲染成可点链接.
+        lines.append("")
+        lines.append(f"📈 **检视看板**: [{dashboard_url}]({dashboard_url})")
 
     return "\n".join(lines) + "\n"
 
@@ -633,7 +647,7 @@ def render_markdown(artifact: WeeklyArtifact) -> str:
             parts.append(f"\n⚠️ 数据缺失: {section.error or '未知原因'}\n")
             continue
 
-        body = render_section(name, section)
+        body = render_section(name, section, dashboard_url=artifact.dashboard_url or "")
         parts.append("\n" + body + "\n")
 
     if failures:

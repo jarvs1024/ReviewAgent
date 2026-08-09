@@ -27,7 +27,7 @@ from reviewagent.logging_setup import logger
 from .collectors.base import SectionResult
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def iso_week_label(dt: datetime) -> str:
@@ -48,6 +48,7 @@ class WeeklyArtifact:
     generated_at: datetime | None = None
     report_title: str = "ReviewAgent 项目代码检视周报"
     report_emoji: str = "📊"
+    dashboard_url: str = ""  # 检视看板地址, 周报「本周检视概况」末尾链接
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +61,7 @@ class WeeklyArtifact:
             "timezone": self.timezone,
             "report_title": self.report_title,
             "report_emoji": self.report_emoji,
+            "dashboard_url": self.dashboard_url,
             "sections": {n: sr.to_dict() for n, sr in self.sections.items()},
         }
 
@@ -77,6 +79,7 @@ class WeeklyArtifact:
             generated_at=datetime.fromisoformat(data["generated_at"]) if data.get("generated_at") else None,
             report_title=data.get("report_title", "ReviewAgent 项目代码检视周报"),
             report_emoji=data.get("report_emoji", "📊"),
+            dashboard_url=data.get("dashboard_url", ""),
             sections={
                 n: SectionResult(
                     status=sr.get("status", "ok"),
@@ -99,6 +102,7 @@ def build_artifact(
     sections: Mapping[str, SectionResult],
     report_title: str = "ReviewAgent 项目代码检视周报",
     report_emoji: str = "📊",
+    dashboard_url: str = "",
 ) -> WeeklyArtifact:
     return WeeklyArtifact(
         project_id=project_id,
@@ -110,6 +114,7 @@ def build_artifact(
         generated_at=datetime.now().astimezone(),
         report_title=report_title,
         report_emoji=report_emoji,
+        dashboard_url=dashboard_url,
     )
 
 
