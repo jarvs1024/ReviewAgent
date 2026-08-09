@@ -131,7 +131,8 @@ def test_resolved_discussion_without_code_change_is_unclassified(tmp_telemetry):
     gl = MagicMock()
     gl.is_discussion_resolved.return_value = True
     unchanged_file = "def foo():\n    pass\n    return 1\nprint('after')\n"
-    gl.get_file_at_sha.side_effect = [unchanged_file, unchanged_file]
+    # 主循环 get 2 次 (current_content + posted_content) + late_detect 再 2 次
+    gl.get_file_at_sha.side_effect = [unchanged_file, unchanged_file, unchanged_file, unchanged_file]
 
     with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
          patch("reviewagent.commands.suggestion_actions.get_store", return_value=s):

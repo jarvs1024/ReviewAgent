@@ -92,6 +92,133 @@ def extract_action(body: str) -> tuple[str, str] | None:
 
 
 
+def _late_detect_single(
+    *,
+    sug: dict[str, Any],
+    head_sha: str,
+    project_id: int,
+    mr_iid: int,
+    actor_username: str,
+) -> str:
+    """对单条 state='resolved' + resolution_source='gitlab_resolve' 的 suggestion
+    重跑一次 exact_match / region_changed / token_fallback, 命中就翻 applied.
+
+    Returns:
+        "applied"  — 已翻 applied
+        "unchanged" — 代码未落地, 保持 resolved
+        "error"    — 文件读取 / 比较失败
+
+    Why 独立 helper:
+        跟主循环共用 _exact_improved_code_near_target / _target_region_changed /
+        _token_adoption_match 三层判定, 但不需要重写 gitlab.resolve_discussion
+        (已经 resolved 了, GitLab 那边的 thread 已经是 ✓ 状态).
+    """
+    gl = GitLabClient()
+    store = get_store()
+    note_id = sug.get("note_id") or ""
+    file_path = sug.get("file_path") or ""
+    target_line = int(sug.get("target_line") or 0)
+    target_line_end = int(sug.get("target_line_end") or target_line)
+    existing_code = sug.get("existing_code") or ""
+    if not (note_id and file_path and target_line):
+        return "unchanged"
+
+    current_content = gl.get_file_at_sha(project_id, file_path, head_sha)
+    if current_content is None:
+        logger.info(
+            "auto_detect_applied late_detect skip (no file) project={} mr={} note={} file={}",
+            project_id, mr_iid, note_id[:8], file_path,
+        )
+        return "error"
+
+    posted_content = gl.get_file_at_sha(
+        project_id, file_path, sug.get("head_sha") or head_sha,
+    )
+
+    sug_improved = (sug.get("improved_code") or "").strip()
+
+    # 第 1 层: exact_match (建议代码完整出现在目标行附近)
+    exact_match = _exact_improved_code_near_target(
+        current_content,
+        sug_improved,
+        line=target_line,
+        line_end=target_line_end,
+    )
+
+    # 第 2 层: target_region_changed (目标行被改)
+    changed = exact_match
+    if not changed:
+        try:
+            changed = _target_region_changed(
+                posted_content if posted_content is not None else existing_code,
+                current_content,
+                line=target_line,
+                line_end=target_line_end,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "auto_detect_applied late_detect compare failed note={} file={} err={}",
+                note_id[:8], file_path, e,
+            )
+            return "error"
+
+    # 第 3 层: token_fallback (用户改格式 / 等效写法)
+    if not changed and sug_improved:
+        try:
+            changed = _token_adoption_match(
+                posted_content if posted_content is not None else existing_code,
+                current_content,
+                line=target_line,
+                line_end=target_line_end,
+                improved_code=sug_improved,
+                existing_code=existing_code or None,
+            )
+            if changed:
+                logger.info(
+                    "auto_detect_applied late_detect token_fallback note={} file={} line={}",
+                    note_id[:8], file_path, target_line,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "auto_detect_applied late_detect token_fallback failed note={} file={} err={}",
+                note_id[:8], file_path, e,
+            )
+
+    if not changed:
+        return "unchanged"
+
+    # 命中 → 翻 applied + 记 action (state 二次校验: 用户可能中途 /adopt)
+    current = store.get_suggestion_by_note_id(note_id)
+    if current is None or current.get("state") != "resolved":
+        cur_state = (current or {}).get("state") or "missing"
+        logger.info(
+            "auto_detect_applied late_detect skip (state changed) project={} mr={} note={} state={}",
+            project_id, mr_iid, note_id[:8], cur_state,
+        )
+        return "unchanged"
+
+    store.update_suggestion_state(
+        note_id, "applied", actor_username=actor_username,
+        adoption_source="late_detect",
+    )
+    store.record_suggestion_action(
+        project_id=project_id, mr_iid=mr_iid,
+        suggestion_note_id=note_id, file_path=file_path,
+        target_line=target_line, action="adopted",
+        actor_username=actor_username,
+        reason="late_detect: resolved 状态后代码落地, 翻 applied",
+        validation_status="late-detect-apply",
+        adoption_source="late_detect",
+        head_sha_posted=sug.get("head_sha"),
+        head_sha_current=head_sha,
+    )
+    logger.info(
+        "auto_detect_applied late_detect flip_to_applied project={} mr={} note={} file={} line={}",
+        project_id, mr_iid, note_id[:8], file_path, target_line,
+    )
+    return "applied"
+
+
 def _target_region_changed(
     posted_content: str,
     current_content: str,
@@ -772,6 +899,8 @@ def auto_detect_applied(
         "errors": 0,
         "resolved": 0,
         "applied_note_ids": [],
+        "late_apply": 0,           # resolved → applied 翻转数
+        "late_apply_note_ids": [], # 翻转的 note_id 列表
     }
     for sug in open_sugs:
         note_id = sug.get("note_id") or ""
@@ -977,7 +1106,38 @@ def auto_detect_applied(
             project_id, mr_iid, note_id[:8], file_path, target_line,
         )
 
-    if result["applied"]:
+    # ---------- Late detect: 把 state='resolved' 且 resolution_source='gitlab_resolve'
+    # 的误分类 suggestions 翻回 applied.
+    #
+    # 背景: 用户可能先在 GitLab UI 点「解决主题」关掉 discussion (这时 bot 还不知道
+    # 是否采纳), 然后才 push commit 让代码落地. 当时 auto_detect 跑那一遍
+    # exact_match 没命中 (因为 head_sha 还停在 push 前) → bot 把它标 resolved.
+    # 后续 push 触发再跑时, 这条 suggestion 已不在 list_open_suggestions 里, 永远
+    # 不会被重检, 数据就一直停在"已关闭 (未分类)"但实际代码已采纳的状态.
+    #
+    # 修复: 在 open 扫完后, 再扫一遍 resolution_source='gitlab_resolve' 的 resolved
+    # suggestions, 用同一套 exact_match / region_changed / token_fallback 重新判定.
+    # 命中就翻 applied + 记一条 action=adopted, adoption_source='late_detect',
+    # validation_status='late-detect-apply', 保留前一条 resolved action 作历史.
+    #
+    # Why 只扫 'gitlab_resolve': /adopt 流程走的是 adoption_source='adopt_command',
+    # /dismiss 状态是 dismissed 也不会落进 resolved, 这两类都不应被覆盖回 applied.
+    late_sugs = store.list_resolved_suggestions(project_id=project_id, mr_iid=mr_iid)
+    for sug in late_sugs:
+        late_result = _late_detect_single(
+            sug=sug,
+            head_sha=head_sha,
+            project_id=project_id,
+            mr_iid=mr_iid,
+            actor_username=actor_username,
+        )
+        if late_result == "applied":
+            result["late_apply"] += 1
+            result["late_apply_note_ids"].append(sug.get("note_id"))
+        elif late_result == "error":
+            result["errors"] += 1
+
+    if result["applied"] or result["late_apply"]:
         logger.info(
             "auto_detect_applied summary project={} mr={} {}",
             project_id, mr_iid, result,

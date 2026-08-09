@@ -105,6 +105,7 @@
 | `get_suggestion_by_note_id(note_id) -> dict \| None` | 按 GitLab note_id 查 (id DESC LIMIT 1) |
 | `find_open_suggestion_by_line(*, project_id, mr_iid, file_path, target_line, window=3) -> dict \| None` | UI Apply 兜底匹配 (state=open, line±window, 按行号距离 + id 排序) |
 | `list_open_suggestions(*, project_id, mr_iid) -> list[dict]` | 全量 open suggestion (note_id / file_path / target_line / existing_code / improved_code / head_sha), 给 `auto_detect_applied` 跑 reconcile |
+| `list_resolved_suggestions(*, project_id, mr_iid) -> list[dict]` | 全量 `state='resolved'` 且 `resolution_source='gitlab_resolve'` 的 suggestion (字段同上), 给 `auto_detect_applied` 的 late_detect 跑 reconcile。**只扫 gitlab_resolve 这一类**——/adopt 走 `adoption_source='adopt_command'` 不进 / /dismiss 状态是 dismissed 也不进, 避免覆盖 |
 | `update_suggestion_state(note_id, state, *, actor_username=None, dismissed_reason=None, adoption_source=None)` | 状态机: `applied` / `dismissed` / `resolved` / `superseded`; 自动写 `applied_at` / `dismissed_at` / `dismissed_by` / `dismissed_reason` / `resolved_at` / `resolved_by` / `resolution_source` / `updated_at` |
 | `supersede_stale_open_suggestions(*, project_id, mr_iid, current_head_sha) -> list[str]` | head_sha 不一致的全标 superseded, 返回被 supersede 的 `note_id` 列表; `current_head_sha=""` (空字符串) 时返回 `[]` 不操作 |
 | `update_suggestion_note_id(suggestion_id, new_note_id)` | webhook /adopt 兜底命中后回写真实 GitLab note_id |
@@ -294,6 +295,22 @@ Why: dashboard "MR 最后活动时间" 区别于 `last_review_at` (后者只在�
 
 `fingerprint` 是单条 suggestion 的精确指纹 (主键 dedup); `cohort_key` 是同类 bug 的聚合键 (兜底 dedup)。
 
+### Head SHA 变化 → late_detect 翻 applied
+
+`auto_detect_applied` 在 open 扫完后, 还会扫一遍 `state='resolved' + resolution_source='gitlab_resolve'` 的 suggestions, 跑同一套 exact_match / region_changed / token_fallback. 命中就翻 `applied` + 记一条 action=adopted, `adoption_source='late_detect'`, `validation_status='late-detect-apply'`. 原 resolved action 保留作历史.
+
+Why (race condition):
+    用户先在 GitLab UI 点「解决主题」关掉 discussion, 然后才 push commit 让代码落地. 当时 auto_detect 跑那一遍 exact_match 没命中 (head_sha 还停在 push 前) → 标 resolved. 后续 push 触发再跑时, 这条 suggestion 已不在 `list_open_suggestions()` 里, 永远不会被重检, 数据就一直停在"已关闭 (未分类)"但实际代码已采纳的状态.
+
+Why 只扫 `gitlab_resolve`:
+    - `/adopt` 流程虽然也会 resolve discussion, 但走的是 `adoption_source='adopt_command'`, 不应被覆盖回 applied (会丢失 /adopt 的语义).
+    - `/dismiss` 状态是 dismissed 也不会进 resolved 集合.
+    - 真正需要 late_detect 重扫的是 bot 因"代码没匹配上 + 讨论已关"误分类的那批, `resolution_source` 全是 `'gitlab_resolve'`.
+
+历史数据修复:
+    `python3 scripts/reconcile_late_detect.py --project-id <pid> --mr-iid <iid>`  
+    `python3 scripts/reconcile_late_detect.py --all` (扫所有 MR)
+
 ### Head SHA 变化 → 标 superseded
 
 `supersede_stale_open_suggestions(project_id, mr_iid, current_head_sha)`:
@@ -350,6 +367,9 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 - `tests/test_telemetry_endpoints.py` — 5 个端点集成测试 (record_suggestion 扩展字段、dismissed_reason、by-rule 聚合、adoption_source 写入与 label)
 - `tests/test_last_activity_at.py` — 6 个 `last_activity_at` MAX 语义 / 回填测试
 - `tests/test_supersede_stale_suggestions.py` — 6 个 head_sha 变化 supersede 测试
+- `tests/test_auto_detect_applied.py` — auto_detect_applied 主流程
+- `tests/test_auto_detect_race.py` — mid-scan dismiss race
+- `tests/test_auto_detect_late_apply.py` — 7 个 late_detect 把 `state='resolved' + resolution_source='gitlab_resolve'` 翻回 applied (含 race 修复、region_changed、token_fallback)
 
 e2e 流程 (基于 `codex/telemetry-e2e-20260730-224254` MR !134):
 

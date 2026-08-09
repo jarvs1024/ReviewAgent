@@ -822,6 +822,42 @@ class Store:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def list_resolved_suggestions(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+    ) -> list[dict]:
+        """列出该 MR 全部 state=resolved 且 resolution_source='gitlab_resolve'
+        的 suggestions (给 auto_detect_applied 的 late_detect 用).
+
+        Why 只看 gitlab_resolve:
+            - /adopt 流程虽然也会 resolve discussion, 但走的是 adoption_source='adopt_command'
+              (或 'ui_apply'), 不应被覆盖回 applied (会丢失 /adopt 的语义).
+            - /dismiss 流程走的 adoption_source='gitlab_resolve' 实际不会出现 (走
+              gitlab_resolve 字段的是 bot 自己分类的"未分类") — /dismiss 状态是 dismissed,
+              不会进 resolved 集合.
+            - 真正需要 late_detect 重扫的是 bot 因"代码没匹配上 + 讨论已关"误分类的
+              那批, 这批的 resolution_source 全是 'gitlab_resolve'.
+
+        Returns: list of dict with note_id, file_path, target_line,
+        target_line_end, existing_code, improved_code, head_sha.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT note_id, file_path, target_line, target_line_end,
+                       existing_code, improved_code, head_sha
+                FROM suggestions
+                WHERE project_id=? AND mr_iid=?
+                  AND state='resolved'
+                  AND resolution_source='gitlab_resolve'
+                ORDER BY id
+                """,
+                (project_id, mr_iid),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def update_suggestion_state(
         self,
         note_id: str,
