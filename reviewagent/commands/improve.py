@@ -25,7 +25,29 @@ from typing import Any
 
 from reviewagent.commands._common import BaseCommand, BaseCommandError
 import subprocess
+import hashlib as _hashlib
 from reviewagent.config import config
+
+
+def _suggestion_fingerprint(file_path: str, line: int, header: str | None) -> str:
+    """Stable fingerprint for suggestion dedup.
+
+    基于 (file:line:header_normalized) 三元组 — 同位置同类问题永远同 fp,
+    与 existing_code 行数变化无关 (之前用 sha256(existing_code) 会被 LLM
+    给的 1~N 行范围差绕过). lower-case header normalize 让大小写不敏感.
+
+    Args:
+        file_path: suggestion 文件路径.
+        line: new_line (建议应用的行).
+        header: suggestion header (raw, 含大小写/空格都会被 normalize).
+
+    Returns:
+        24 字符 hex fingerprint. 与 _suggestion_dedup_key 保持一致.
+    """
+    hdr_norm = (header or "").strip().lower()
+    return _hashlib.sha256(
+        f"{file_path}:{line}:{hdr_norm}".encode("utf-8")
+    ).hexdigest()[:24]
 from reviewagent.git.diff_lines import (
     find_nearest_valid_line,
     format_line_map_for_prompt,
@@ -1545,10 +1567,11 @@ class ImproveCommand(BaseCommand):
                         inline_skipped.append({"suggestion": raw, "reason": "duplicate_at_line"})
                         continue
                     import hashlib as _dedup_hl
-                    _dedup_existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
-                    _dedup_fingerprint = _dedup_hl.sha256(
-                        _dedup_existing.strip().encode("utf-8")
-                    ).hexdigest()[:24]
+                    # Fingerprint (file:line:header_normalized) — 同位置同类问题永远同 fp.
+                    # helper 在模块顶部定义, record_suggestion 处复用.
+                    _dedup_fingerprint = _suggestion_fingerprint(
+                        file_path, decision["new_line"], normalised.get("header")
+                    )
                     if _dedup_db.suggestion_exists_by_fingerprint(
                         self.project_id, self.mr_iid, _dedup_fingerprint
                     ):
@@ -1668,9 +1691,10 @@ class ImproveCommand(BaseCommand):
                         if "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT" not in rule_keys:
                             if "wildcard" in _header.lower() or "wildcard" in _rationale.lower() or "from " in _rationale and "import *" in _rationale:
                                 rule_keys = list(rule_keys) + ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
-                        fingerprint = _hl.sha256(
-                            (existing or "").strip().encode("utf-8")
-                        ).hexdigest()[:24]
+                        # 与 dedup_check 同一 helper — 保证两边 fp 一致.
+                        fingerprint = _suggestion_fingerprint(
+                            file_path, decision["new_line"], normalised.get("header")
+                        )
                         cohort_key = _hl.sha256(
                             f"{file_path}:{decision['new_line']}:{','.join(rule_keys)}".encode("utf-8")
                         ).hexdigest()[:24]

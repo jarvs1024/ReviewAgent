@@ -678,3 +678,178 @@ def test_overview_summary_works_with_empty_state(tmp_telemetry):
     # CST 时间与 head_sha 短码
     assert "CST" in out
     assert "abcdef0" in out
+
+
+# ---------- A: fingerprint 算法 (file:line:header_normalized) ----------
+
+def test_fingerprint_stable_for_same_position_and_header(tmp_telemetry):
+    """A: 同 file:line:header 永远同 fp, 即使 existing_code 行数不同.
+
+    之前 fingerprint = sha256(existing_code), 同一位置 existing_code 边界
+    略变 (LLM 给 1 行 vs 整段) → fp 不同 → dedup 漏.
+    修复后: (file:line:header_normalized) 三元组永远稳定.
+    """
+    from reviewagent.commands.improve import _suggestion_fingerprint
+
+    # 1. 同一 (file, line, header) → fp 应一致
+    fp_a = _suggestion_fingerprint("foo.py", 10, "docstring")
+    fp_b = _suggestion_fingerprint("foo.py", 10, "docstring")
+    assert fp_a == fp_b
+    # 2. 不同 header → fp 不同 (说明同位置不同类问题仍可独立 dedup)
+    fp_c = _suggestion_fingerprint("foo.py", 10, "\u7c7b\u578b\u63d0\u793a")
+    assert fp_a != fp_c
+    # 3. 不同 line → fp 不同
+    fp_d = _suggestion_fingerprint("foo.py", 11, "docstring")
+    assert fp_a != fp_d
+    # 4. 同一三元组大小写不敏感 (header normalize lower)
+    fp_upper = _suggestion_fingerprint("foo.py", 10, "DOCSTRING")
+    fp_lower = _suggestion_fingerprint("foo.py", 10, "docstring")
+    assert fp_upper == fp_lower, "header \u5927\u5c0f\u5199\u5dee\u5f02\u4e0d\u5e94\u5f71\u54cd fingerprint"
+    # 5. header 前后空格不敏感
+    fp_ws = _suggestion_fingerprint("foo.py", 10, "  docstring  ")
+    assert fp_ws == fp_a, "header \u524d\u540e\u7a7a\u683c\u4e0d\u5e94\u5f71\u54cd fingerprint"
+    # 6. fp 长度固定 24
+    assert len(fp_a) == 24
+
+
+def test_fingerprint_reused_via_record_and_dedup_check(tmp_telemetry):
+    """A: dedup_check 与 record_suggestion 用同一 helper 算 fp.
+
+    Why: improve.py 两处 (dedup_check, record_suggestion) 都调 _suggestion_fingerprint,
+    保证同一位置同类问题第二轮 improve 时被 dedup 拦下. 此测试模拟 V1 record + V2 dedup
+    两个调用, 验证 fp 一致.
+    """
+    from reviewagent.commands.improve import _suggestion_fingerprint
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    fp = _suggestion_fingerprint("foo.py", 10, "docstring")
+    # V1: record (用 helper 算的 fp)
+    s.record_suggestion(
+        project_id=34, mr_iid=200, note_id="fp-test",
+        file_path="foo.py", target_line=10, target_line_end=10,
+        existing_code="def f():",
+        improved_code="def f(): docstring",
+        header="docstring", label="code quality",
+        severity="low",
+        rule_keys=["SSD-RULE-DOCSTRING-REQUIRED"],
+        fingerprint=fp, cohort_key="ck",
+        severity_source="rule",
+        head_sha="feedface" * 5,
+    )
+    # V2: 调 dedup_check 应命中 (同 (file, line, header))
+    assert s.suggestion_exists_by_fingerprint(34, 200, fp), (
+        f"record + dedup_check 同 helper 还不命中: fp={fp}"
+    )
+    # 不同 header → fp 不同 → 不命中 (同位置不同类问题仍可独立 dedup)
+    fp_diff = _suggestion_fingerprint("foo.py", 10, "typehints")
+    assert not s.suggestion_exists_by_fingerprint(34, 200, fp_diff), (
+        f"不同 header 不应被误命中: fp_diff={fp_diff}"
+    )
+def test_dedup_at_line_hits_applied_state(tmp_telemetry):
+    """B: 已 applied 的位置再次识别同规则 → dedup 命中 (跳过).
+
+    场景: V1 L22 已 applied print→logger+docstring, V6 LLM 又识别 docstring.
+    修复前: state='open' 过滤 → V1 那条已 applied 不在 open 集合 → 放行 → 重复发.
+    修复后: state IN ('open', 'applied', 'dismissed') → 命中 → 跳过.
+    """
+    from reviewagent.telemetry.store import get_store
+    head_sha = "deadbeef" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=201, note_id="applied-seed",
+        file_path="audit/foo.py", target_line=22, target_line_end=22,
+        existing_code="def f():", improved_code="def f():\n    logger.info()",
+        header="print\u2192logger + docstring", label="code quality",
+        severity="medium", rule_keys=["R-LOG"],
+        fingerprint="seed_fp", cohort_key="seed_ck",
+        severity_source="rule", head_sha=head_sha,
+    )
+    # 标记为 applied (模拟用户已采纳)
+    conn_path = tmp_telemetry
+    import sqlite3
+    conn = sqlite3.connect(conn_path)
+    conn.execute(
+        "UPDATE suggestions SET state='applied' WHERE note_id='applied-seed'"
+    )
+    conn.commit()
+    conn.close()
+
+    # 模拟 V6 LLM 又识别 L22 同位置 docstring, 传同 head_sha
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=201,
+        file_path="audit/foo.py", target_line=22, severity="medium",
+        head_sha=head_sha, line_tolerance=2,
+        rule_keys="R-LOG",
+    )
+    assert exists is True, (
+        f"\u5df2 applied \u7684\u4f4d\u7f6e\u518d\u6b21\u8bc6\u522b\u5e94\u88ab dedup \u547d\u4e2d, \u800c\u4e0d\u662f\u6f0f\u53d1: {exists!r}"
+    )
+
+
+def test_dedup_at_line_hits_dismissed_state(tmp_telemetry):
+    """B: 已 dismissed 的位置再次识别 → dedup 命中 (用户已拒绝, 不应骚扰)."""
+    from reviewagent.telemetry.store import get_store
+    head_sha = "abcdef00" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=202, note_id="dismissed-seed",
+        file_path="bar.py", target_line=5, target_line_end=5,
+        existing_code="x = 1", improved_code="x = 2",
+        header="magic number", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint="d_fp", cohort_key="d_ck",
+        severity_source="rule", head_sha=head_sha,
+    )
+    import sqlite3
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute(
+        "UPDATE suggestions SET state='dismissed' WHERE note_id='dismissed-seed'"
+    )
+    conn.commit()
+    conn.close()
+
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=202,
+        file_path="bar.py", target_line=5, severity="low",
+        head_sha=head_sha, line_tolerance=2,
+        rule_keys="R-CONST",
+    )
+    assert exists is True, "\u5df2 dismissed \u7684\u4f4d\u7f6e\u518d\u6b21\u8bc6\u522b\u5e94\u88ab dedup \u547d\u4e2d"
+
+
+def test_dedup_at_line_misses_resolved_state(tmp_telemetry):
+    """B: state=resolved (用户手动点 GitLab 「解决主题」, 等价未分类) → 放行.
+
+    Why: resolved 表示用户没走 /adopt /dismiss, 系统不知用户怎么处理, 应允许
+    force-push 后重新检视这一位置.
+    """
+    from reviewagent.telemetry.store import get_store
+    head_sha = "12345678" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=203, note_id="resolved-seed",
+        file_path="baz.py", target_line=30, target_line_end=30,
+        existing_code="", improved_code="",
+        header="\u88f8 open", label="potential bug",
+        severity="high", rule_keys=["SSD-RULE-RESOURCE-CONTEXT-MANAGER"],
+        fingerprint="r_fp", cohort_key="r_ck",
+        severity_source="rule", head_sha=head_sha,
+    )
+    import sqlite3
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute(
+        "UPDATE suggestions SET state='resolved' WHERE note_id='resolved-seed'"
+    )
+    conn.commit()
+    conn.close()
+
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=203,
+        file_path="baz.py", target_line=30, severity="high",
+        head_sha=head_sha, line_tolerance=2,
+        rule_keys="SSD-RULE-RESOURCE-CONTEXT-MANAGER",
+    )
+    assert exists is False, (
+        f"resolved \u72b6\u6001\u5e94\u653e\u884c\u91cd\u65b0\u68c0\u89c8 (\u7b49\u4ef7\u300c\u672a\u5206\u7c7b\u300d): got {exists!r}"
+    )
