@@ -818,11 +818,13 @@ def test_dedup_at_line_hits_dismissed_state(tmp_telemetry):
     assert exists is True, "\u5df2 dismissed \u7684\u4f4d\u7f6e\u518d\u6b21\u8bc6\u522b\u5e94\u88ab dedup \u547d\u4e2d"
 
 
-def test_dedup_at_line_misses_resolved_state(tmp_telemetry):
-    """B: state=resolved (用户手动点 GitLab 「解决主题」, 等价未分类) → 放行.
+def test_dedup_at_line_hits_resolved_state(tmp_telemetry):
+    """B+: state=resolved (用户手动点 GitLab 「解决主题」) → dedup 命中.
 
-    Why: resolved 表示用户没走 /adopt /dismiss, 系统不知用户怎么处理, 应允许
-    force-push 后重新检视这一位置.
+    Why: 用户主动 close thread 后, 不应再被同位置建议骚扰.
+    之前 resolved 放行 (担心 force-push 后需重新检视), 但这个职责已由
+    supersede_stale_open_suggestions (force-push 时 head_sha 变化把 open
+    标 superseded) 独立覆盖, resolved 放行只会让随手 close 的用户被重复推.
     """
     from reviewagent.telemetry.store import get_store
     head_sha = "12345678" * 5
@@ -831,7 +833,7 @@ def test_dedup_at_line_misses_resolved_state(tmp_telemetry):
         project_id=34, mr_iid=203, note_id="resolved-seed",
         file_path="baz.py", target_line=30, target_line_end=30,
         existing_code="", improved_code="",
-        header="\u88f8 open", label="potential bug",
+        header="bare open", label="potential bug",
         severity="high", rule_keys=["SSD-RULE-RESOURCE-CONTEXT-MANAGER"],
         fingerprint="r_fp", cohort_key="r_ck",
         severity_source="rule", head_sha=head_sha,
@@ -850,6 +852,43 @@ def test_dedup_at_line_misses_resolved_state(tmp_telemetry):
         head_sha=head_sha, line_tolerance=2,
         rule_keys="SSD-RULE-RESOURCE-CONTEXT-MANAGER",
     )
+    assert exists is True, (
+        f"resolved (用户主动 close thread) 应被 dedup 命中, 避免重复骚扰: got {exists!r}"
+    )
+
+
+def test_dedup_at_line_misses_superseded_state(tmp_telemetry):
+    """B+: state=superseded (force-push 后由 supersede_stale_open_suggestions 设置) → 放行.
+
+    Why: superseded = 该 suggestion 因 head_sha 变化已过时, force-push 后允许
+    LLM 重新识别该位置. 这是 force-push 重新检视的预期行为, 不能误 dedup.
+    """
+    from reviewagent.telemetry.store import get_store
+    head_sha = "87654321" * 5
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=204, note_id="superseded-seed",
+        file_path="qux.py", target_line=42, target_line_end=42,
+        existing_code="", improved_code="",
+        header="x", label="code quality",
+        severity="low", rule_keys=["R-CONST"],
+        fingerprint="s_fp", cohort_key="s_ck",
+        severity_source="rule", head_sha=head_sha,
+    )
+    import sqlite3
+    conn = sqlite3.connect(tmp_telemetry)
+    conn.execute(
+        "UPDATE suggestions SET state='superseded' WHERE note_id='superseded-seed'"
+    )
+    conn.commit()
+    conn.close()
+
+    exists = s.suggestion_exists_at_line(
+        project_id=34, mr_iid=204,
+        file_path="qux.py", target_line=42, severity="low",
+        head_sha=head_sha, line_tolerance=2,
+        rule_keys="R-CONST",
+    )
     assert exists is False, (
-        f"resolved \u72b6\u6001\u5e94\u653e\u884c\u91cd\u65b0\u68c0\u89c8 (\u7b49\u4ef7\u300c\u672a\u5206\u7c7b\u300d): got {exists!r}"
+        f"superseded (force-push 后过时) 应放行, 允许 force-push 后重新检视: got {exists!r}"
     )

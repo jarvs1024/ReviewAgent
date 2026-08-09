@@ -668,9 +668,11 @@ class Store:
         行容差后, 同一 head 下 (file, line±N) 已检视过则视为重复 — 比强制
         LLM 给精确行号更可靠. 设为 0 = 严格相等.
 
-        - 状态过滤: open / applied / dismissed 都视为"已存在". resolved 放行,
-          因为 resolved = 用户手动点 GitLab 「解决主题」(未走 /adopt /dismiss,
-          等价「未分类」), 视为未处理过, force-push 后允许重新检视.
+        - 状态过滤: open / applied / dismissed / resolved 都视为"已存在".
+          resolved = 用户手动点 GitLab 「解决主题」(未走 /adopt /dismiss),
+          既然 thread 被用户主动关掉, 不应再推同位置建议骚扰.
+          superseded 由 head_sha 变化触发 (supersede_stale_open_suggestions),
+          不在 dedup 范围内 — force-push 后允许重新检视.
 
         rule_keys 维度 (None = 兼容旧行为): 调用方传入新建议的 rule_keys
         (逗号分隔字符串, 如 "SSD-RULE-NO-MUTABLE-DEFAULT,SSD-RULE-TYPEHINTS"),
@@ -682,20 +684,21 @@ class Store:
         del severity  # 静默未使用, 保持向后兼容的调用签名
         lo = target_line - max(0, line_tolerance)
         hi = target_line + max(0, line_tolerance)
-        # dedup 策略: 跨 head_sha 共享 (file, line) dedup, state IN (open, applied, dismissed).
-        # applied / dismissed 也算命中 — 用户已处理过的位置不再推送骚扰.
-        # resolved 不算 — 它等价「未分类」(用户点 GitLab 「解决主题」绕过 /adopt),
-        # force-push 后允许重新检视.
+        # dedup 策略: 跨 head_sha 共享 (file, line) dedup, state IN (open, applied, dismissed, resolved).
+        # applied / dismissed / resolved 都算命中 — 用户已处理过的位置 (含手动关闭 thread) 不再推送.
+        # superseded 不在范围内 — 它由 head_sha 变化触发, force-push 后允许重新检视.
         # Why: 之前只看 state=open 导致已 applied 的位置 V2/V3/V8/V9 反复重发
         # (例: MR 245 L22 audit print→logger+docstring V2 applied, V6 又识别为
         # docstring 重发; L9 caller V1 applied, V6/V9 又反复重发 补 import / 补顶层).
+        # 之前 resolved 放行是因为担心 force-push 后需重新检视, 但这个职责已由
+        # supersede 机制覆盖, resolved 放行只会让随手 close thread 的用户被重复骚扰.
         with self._conn() as conn:
             # 基础 (file, line, state=open) 过滤
             base_sql = (
                 "SELECT 1 FROM suggestions "
                 "WHERE project_id=? AND mr_iid=? "
                 "  AND file_path=? AND target_line BETWEEN ? AND ? "
-                "  AND state IN ('open', 'applied', 'dismissed')"
+                "  AND state IN ('open', 'applied', 'dismissed', 'resolved')"
             )
             base_params: list = [project_id, mr_iid, file_path, lo, hi]
             # rule_keys 比对策略 (2 选 1):
@@ -737,7 +740,7 @@ class Store:
                     "SELECT 1 FROM suggestions "
                     "WHERE project_id=? AND mr_iid=? "
                     "  AND file_path=? AND target_line BETWEEN ? AND ? "
-                    "  AND state IN ('open', 'applied', 'dismissed') AND head_sha=? LIMIT 1",
+                    "  AND state IN ('open', 'applied', 'dismissed', 'resolved') AND head_sha=? LIMIT 1",
                     [project_id, mr_iid, file_path, lo, hi, head_sha],
                 ).fetchone()
             return sha_row is not None
