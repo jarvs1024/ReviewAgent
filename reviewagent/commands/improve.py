@@ -74,6 +74,70 @@ _RULE_REF_REGEX = re.compile(
 
 
 
+def _handle_cohort_reoccurrence(
+    *,
+    store,
+    project_id: int,
+    mr_iid: int,
+    cohort_key: str,
+    new_note_id: str,
+    file_path: str,
+    target_line: int,
+    target_line_end: int,
+    existing: str,
+    head_sha: str,
+    gitlab,
+) -> None:
+    """Batch3: 同一 cohort 上一代被 applied/dismissed 但问题又复现, supersede 旧记录.
+
+    判定: 同 cohort_key 最新一条 (排除 new_note_id 自身) 处于 applied/dismissed,
+    且当前 head_sha 下的文件里 existing_code 仍然出现 (说明问题没真修),
+    则 supersede 旧记录, generation+1.
+    否则不动 — 让正常的 dedup 走.
+
+    Why: MR 249 误分类根因之一是 V1 applied + V2 open 同时存在, 汇总双计.
+    supersede 后 V1 不再被 list_latest_by_cohort 取到, V2 才是唯一代表.
+    """
+    if not cohort_key:
+        return
+    prior = store.get_latest_in_cohort_excluding(
+        project_id=project_id, mr_iid=mr_iid,
+        cohort_key=cohort_key, exclude_note_id=new_note_id,
+    )
+    if not prior:
+        return
+    if prior.get("state") not in ("applied", "dismissed"):
+        return
+    # 校验问题是否真的还在: 当前 head_sha 的文件里 existing 仍存在
+    if not existing:
+        return
+    try:
+        current_content = gitlab.get_file_at_sha(
+            project_id, file_path, head_sha,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    if current_content is None:
+        return
+    if existing.strip() not in current_content:
+        # 问题已不存在, 不 supersede — 走正常 dedup 路径会跳过
+        return
+    # supersede 旧记录, bump generation
+    new_gen = int(prior.get("cohort_generation") or 1) + 1
+    store.supersede_suggestion(
+        old_note_id=prior["note_id"],
+        new_note_id=new_note_id,
+        generation=new_gen,
+    )
+    logger.info(
+        "improve.cohort_reoccurrence project={} mr={} cohort={} "
+        "old_note={} state={} -> superseded by new_note={} generation={}",
+        project_id, mr_iid, cohort_key,
+        prior["note_id"][:8], prior.get("state"),
+        new_note_id[:8], new_gen,
+    )
+
+
 class ImproveCommand(BaseCommand):
     COMMAND_NAME = "improve"
     DEFAULT_AGENT = "improve"
@@ -1541,6 +1605,27 @@ class ImproveCommand(BaseCommand):
                             fingerprint=fingerprint,
                             cohort_key=cohort_key,
                         )
+                        # Batch3: 同 cohort 上一代是 applied/dismissed 且当前问题
+                        # 仍然存在 → supersede 旧记录, 把新一条标 generation+1.
+                        try:
+                            _handle_cohort_reoccurrence(
+                                store=get_store(),
+                                project_id=self.project_id, mr_iid=self.mr_iid,
+                                cohort_key=cohort_key,
+                                new_note_id=note_id,
+                                file_path=file_path,
+                                target_line=decision["new_line"],
+                                target_line_end=(
+                                    decision["new_line"] + n_lines - 1
+                                ) if n_lines > 1 else decision["new_line"],
+                                existing=existing,
+                                head_sha=head_sha,
+                                gitlab=self.gitlab,
+                            )
+                        except Exception as _e:  # noqa: BLE001
+                            logger.warning(
+                                "improve.cohort_reoccurrence failed (non-fatal): {}", _e,
+                            )
                     except Exception as e:
                         logger.warning("improve.record_suggestion failed: {}", e)
                 else:

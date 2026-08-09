@@ -116,6 +116,59 @@ def _late_detect_single(
     """
     gl = GitLabClient()
     store = get_store()
+
+
+def _find_latest_apply_commit(
+    apply_commits,
+    *,
+    head_sha: str,
+) -> str:
+    """Batch4: 在 MR commit 列表里找最接近 head_sha 的 'Apply ...' commit.
+
+    GitLab 用户点 Apply suggestion 后产生的 commit title 形如:
+        "Apply 1 suggestion(s) to 1 file(s)"
+    返回短 SHA (前 8 位) 写进 applied_commit_sha 便于审计.
+
+    容错: apply_commits 不是 list 或元素不是 dict (测试 mock) → 返回空串.
+    """
+    if not apply_commits or not isinstance(apply_commits, list) or not head_sha:
+        return ""
+    head_short = head_sha[:8]
+    target = ""
+    for c in apply_commits:
+        if not isinstance(c, dict):
+            continue
+        sid = (c.get("short_id") or "").strip()
+        title = (c.get("title") or "").strip()
+        if not sid or not title:
+            continue
+        if not title.startswith("Apply "):
+            continue
+        if head_short and head_short in (c.get("id") or ""):
+            return sid
+        if not target:
+            target = sid
+    return target
+
+
+def _late_detect_single(
+    *,
+    sug: dict[str, Any],
+    head_sha: str,
+    project_id: int,
+    mr_iid: int,
+    actor_username: str,
+) -> str:
+    """对单条 state='resolved' + resolution_source='gitlab_resolve' 的 suggestion
+    重跑一次 exact_match / region_changed / token_fallback, 命中就翻 applied.
+
+    Returns:
+        "applied"  — 已翻 applied
+        "unchanged" — 代码未落地, 保持 resolved
+        "error"    — 文件读取 / 比较失败
+    """
+    gl = GitLabClient()
+    store = get_store()
     note_id = sug.get("note_id") or ""
     file_path = sug.get("file_path") or ""
     target_line = int(sug.get("target_line") or 0)
@@ -138,7 +191,7 @@ def _late_detect_single(
 
     sug_improved = (sug.get("improved_code") or "").strip()
 
-    # 第 1 层: exact_match (建议代码完整出现在目标行附近)
+    # 第 1 层: exact_match (建议代码完整出现在目标行附近) — 强证据, 直接采纳.
     exact_match = _exact_improved_code_near_target(
         current_content,
         sug_improved,
@@ -146,27 +199,15 @@ def _late_detect_single(
         line_end=target_line_end,
     )
 
-    # 第 2 层: target_region_changed (目标行被改)
-    changed = exact_match
-    if not changed:
+    # 第 2 层: 严格 token 匹配 (用户改了格式/空白/等效写法, 但核心 token 落地).
+    # 与旧版关键区别: 不再把 _target_region_changed 单独作为采纳证据 — 那个判定
+    # 太多假阳性 (同文件其它 suggestion 触发 region 改 / 行号漂移都会命中).
+    # 新判定需要: 足够数量的新 token 命中 + 旧 token 残余 < 30%.
+    token_hit = False
+    token_details: dict[str, Any] = {}
+    if not exact_match and sug_improved:
         try:
-            changed = _target_region_changed(
-                posted_content if posted_content is not None else existing_code,
-                current_content,
-                line=target_line,
-                line_end=target_line_end,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "auto_detect_applied late_detect compare failed note={} file={} err={}",
-                note_id[:8], file_path, e,
-            )
-            return "error"
-
-    # 第 3 层: token_fallback (用户改格式 / 等效写法)
-    if not changed and sug_improved:
-        try:
-            changed = _token_adoption_match(
+            token_hit, token_details = _strict_token_adoption_match(
                 posted_content if posted_content is not None else existing_code,
                 current_content,
                 line=target_line,
@@ -174,18 +215,31 @@ def _late_detect_single(
                 improved_code=sug_improved,
                 existing_code=existing_code or None,
             )
-            if changed:
-                logger.info(
-                    "auto_detect_applied late_detect token_fallback note={} file={} line={}",
-                    note_id[:8], file_path, target_line,
-                )
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                "auto_detect_applied late_detect token_fallback failed note={} file={} err={}",
+                "auto_detect_applied late_detect strict_token failed note={} file={} err={}",
                 note_id[:8], file_path, e,
             )
+            return "error"
+    changed = exact_match or token_hit
 
     if not changed:
+        # region_changed 单独不再算采纳 — 仅用于审计/日志.
+        try:
+            region_changed = _target_region_changed(
+                posted_content if posted_content is not None else existing_code,
+                current_content,
+                line=target_line,
+                line_end=target_line_end,
+            )
+        except Exception:  # noqa: BLE001
+            region_changed = False
+        if region_changed:
+            logger.info(
+                "auto_detect_applied late_detect region_only note={} file={} line={} "
+                "(region_changed 但 exact/token 都不命中 → 保持 resolved)",
+                note_id[:8], file_path, target_line,
+            )
         return "unchanged"
 
     # 命中 → 翻 applied + 记 action (state 二次校验: 用户可能中途 /adopt)
@@ -375,6 +429,84 @@ def _token_adoption_match(
     window_tokens = _extract_identifiers(window)
     hit = len(new_tokens & window_tokens)
     return hit / len(new_tokens) >= threshold
+
+
+def _strict_token_adoption_match(
+    posted_content: str,
+    current_content: str,
+    *,
+    line: int,
+    line_end: int,
+    improved_code: str,
+    existing_code: str | None = None,
+    context_lines: int = 5,
+    new_token_ratio: float = 0.8,
+    coverage_floor: int = 2,
+) -> tuple[bool, dict[str, Any]]:
+    """严格版 token 采纳判定 — Batch1 收紧采纳口径使用.
+
+    与 _token_adoption_match 的区别:
+      - new_token_ratio 默认 0.8 (旧版 0.5) — 避免单 token 凑比率假阳性.
+      - 必须满足 coverage_floor (新 token 命中下限), 单 token 命中不算采纳.
+      - 旧 token 必须在窗口里基本消失 (允许 < 30% 公共残留).
+      - 返回 (hit, details) 让 caller 写审计字段.
+
+    Returns:
+        (True, details)  (False, details)
+    """
+    if not improved_code or not current_content:
+        return False, {"reason": "empty_input"}
+    improved_tokens = _extract_identifiers(improved_code)
+    if not improved_tokens:
+        return False, {"reason": "no_improved_tokens"}
+    if existing_code:
+        existing_tokens = _extract_identifiers(existing_code)
+    else:
+        existing_tokens = set()
+    new_tokens = improved_tokens - existing_tokens
+    old_tokens = existing_tokens - improved_tokens
+    if not new_tokens:
+        return False, {"reason": "no_new_tokens"}
+    current_lines = current_content.splitlines()
+    if line_end < line:
+        line_end = line
+    lo = max(0, line - 1 - context_lines)
+    hi = min(len(current_lines), line_end + context_lines)
+    if lo >= hi:
+        return False, {"reason": "empty_window"}
+    window = "\n".join(current_lines[lo:hi])
+    window_tokens = _extract_identifiers(window)
+    if old_tokens:
+        old_remaining = old_tokens & window_tokens
+        old_total = len(old_tokens)
+        old_remaining_ratio = len(old_remaining) / old_total
+    else:
+        old_total = 0
+        old_remaining_ratio = 0.0
+    new_hits = new_tokens & window_tokens
+    new_hit_count = len(new_hits)
+    new_total = len(new_tokens)
+    new_ratio = new_hit_count / new_total if new_total else 0.0
+    details = {
+        "new_token_total": new_total,
+        "new_token_hits": new_hit_count,
+        "new_token_ratio": round(new_ratio, 3),
+        "old_token_total": old_total,
+        "old_token_remaining_ratio": round(old_remaining_ratio, 3),
+    }
+    if new_hit_count < coverage_floor:
+        details["reason"] = "below_coverage_floor"
+        return False, details
+    if new_ratio < new_token_ratio:
+        details["reason"] = "below_new_token_ratio"
+        return False, details
+    if old_tokens and old_remaining_ratio > 0.3:
+        details["reason"] = "old_tokens_remain"
+        return False, details
+    details["reason"] = "ok"
+    return True, details
+
+
 
 
 # ---------- handlers ----------
@@ -929,6 +1061,14 @@ def sync_resolved_from_gitlab(
     gl = GitLabClient()
     store = get_store()
 
+    # Batch4: 一次性拉取 MR 全部 commit, 用于把 suggestion 关联到 Apply suggestion commit.
+    # 不在循环内每条拉一次 (N+1 问题). miss 时直接 pass — 旧逻辑不受影响.
+    _apply_commits: list[dict[str, Any]] = []
+    try:
+        _apply_commits = gl.list_mr_commits(project_id, mr_iid)
+    except Exception as e:  # noqa: BLE001
+        logger.info("auto_detect_applied.list_mr_commits failed (non-fatal): {}", e)
+
     open_sugs = store.list_open_suggestions(project_id=project_id, mr_iid=mr_iid)
     result: dict[str, Any] = {
         "scanned": len(open_sugs),
@@ -1014,6 +1154,14 @@ def auto_detect_applied(
     gl = GitLabClient()
     store = get_store()
 
+    # Batch4: 一次性拉取 MR 全部 commit, 用于把 suggestion 关联到 Apply suggestion commit.
+    # 不在循环内每条拉一次 (N+1 问题). miss 时直接 pass — 旧逻辑不受影响.
+    _apply_commits: list[dict[str, Any]] = []
+    try:
+        _apply_commits = gl.list_mr_commits(project_id, mr_iid)
+    except Exception as e:  # noqa: BLE001
+        logger.info("auto_detect_applied.list_mr_commits failed (non-fatal): {}", e)
+
     open_sugs = store.list_open_suggestions(project_id=project_id, mr_iid=mr_iid)
     result: dict[str, Any] = {
         "scanned": len(open_sugs),
@@ -1074,55 +1222,51 @@ def auto_detect_applied(
         else:
             changed = exact_match
 
-        # resolved discussion 可兼容等价改写：比对目标行是否被改
-        try:
-            if not changed and posted_content is not None:
-                # 用 posted 时代整个文件 + 当前整个文件, _target_region_changed 能正确工作
-                changed = _target_region_changed(
-                    posted_content,
+        # resolved discussion: Batch1 收紧采纳口径.
+        # 旧逻辑: exact_match=False 时, region_changed 单独即可算采纳 (太多假阳性).
+        # 新逻辑: 必须 exact_match 或严格 token 匹配; region_changed 仅审计.
+        token_hit = False
+        if not changed and sug_improved:
+            try:
+                token_hit, _token_details = _strict_token_adoption_match(
+                    posted_content if posted_content is not None else existing_code,
                     current_content,
                     line=target_line,
                     line_end=target_line_end,
+                    improved_code=sug_improved,
+                    existing_code=existing_code or None,
                 )
-            elif not changed:
-                # 拿不到 posted 时代文件, fallback 用 existing_code (有局限)
-                changed = _target_region_changed(
-                    existing_code,
-                    current_content,
-                    line=target_line,
-                    line_end=target_line_end,
+                if token_hit:
+                    logger.info(
+                        "auto_detect_applied strict_token note={} file={} line={}",
+                        note_id[:8], file_path, target_line,
+                    )
+            except Exception as e:  # noqa: BLE001
+                result["errors"] += 1
+                logger.warning(
+                    "auto_detect_applied strict_token failed note={} file={} err={}",
+                    note_id[:8], file_path, e,
                 )
-        except Exception as e:  # noqa: BLE001
-            result["errors"] += 1
-            logger.warning(
-                "auto_detect_applied compare failed note={} file={} err={}",
-                note_id[:8], file_path, e,
-            )
-            continue
+                continue
+            changed = token_hit
 
-        # Fallback: 严格 strip 比对失败时, 用 token 重叠判定.
-        # 适用: 用户改了格式/空白/或用等效写法但引入的关键标识符仍在目标行附近.
-        if not changed:
-            if sug_improved:
-                try:
-                    changed = _token_adoption_match(
-                        posted_content if posted_content is not None else existing_code,
-                        current_content,
-                        line=target_line,
-                        line_end=target_line_end,
-                        improved_code=sug_improved,
-                        existing_code=existing_code or None,
-                    )
-                    if changed:
-                        logger.info(
-                            "auto_detect_applied token_fallback note={} file={} line={}",
-                            note_id[:8], file_path, target_line,
-                        )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "auto_detect_applied token_fallback failed note={} err={}",
-                        note_id[:8], e,
-                    )
+        if not changed and resolved is True:
+            # 审计: region_changed 单独不足以采纳, 但要记录到日志便于排查
+            try:
+                region_changed = _target_region_changed(
+                    posted_content if posted_content is not None else existing_code,
+                    current_content,
+                    line=target_line,
+                    line_end=target_line_end,
+                )
+            except Exception:  # noqa: BLE001
+                region_changed = False
+            if region_changed:
+                logger.info(
+                    "auto_detect_applied region_only note={} file={} line={} "
+                    "(region_changed 但 exact/token 都不命中 → 保持当前状态)",
+                    note_id[:8], file_path, target_line,
+                )
 
         # delete_range 特殊判定: improved_code 为空 + existing_code 非空 →
         # 这条建议是"删除一段代码", 必须验证 target 行在 current 文件中**消失**
@@ -1204,9 +1348,16 @@ def auto_detect_applied(
             logger.warning("auto_detect_applied resolve failed: {}", e)
 
         adoption_source = "ui_apply" if resolved is True else "manual_change"
+        # Batch1/4: 写证据等级 + Apply commit 短 SHA (审计用)
+        adoption_evidence = "exact_match" if exact_match else "strict_token"
+        applied_commit_sha = _find_latest_apply_commit(
+            _apply_commits, head_sha=head_sha,
+        )
         store.update_suggestion_state(
             note_id, "applied", actor_username=actor_username,
             adoption_source=adoption_source,
+            adoption_evidence=adoption_evidence,
+            applied_commit_sha=applied_commit_sha or None,
         )
         store.record_suggestion_action(
             project_id=project_id,
@@ -1225,8 +1376,10 @@ def auto_detect_applied(
         result["applied"] += 1
         result["applied_note_ids"].append(note_id)
         logger.info(
-            "auto_detect_applied project={} mr={} note={} file={} line={}",
+            "auto_detect_applied project={} mr={} note={} file={} line={} "
+            "evidence={} commit={}",
             project_id, mr_iid, note_id[:8], file_path, target_line,
+            adoption_evidence, applied_commit_sha or "-",
         )
 
     # ---------- Late detect: 把 state='resolved' 且 resolution_source='gitlab_resolve'

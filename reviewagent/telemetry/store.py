@@ -184,6 +184,15 @@ class Store:
                 "resolved_at": "ALTER TABLE suggestions ADD COLUMN resolved_at TIMESTAMP",
                 "resolved_by": "ALTER TABLE suggestions ADD COLUMN resolved_by TEXT",
                 "resolution_source": "ALTER TABLE suggestions ADD COLUMN resolution_source TEXT",
+                # Batch2/3: 同一问题跨多轮重复发布时, 用 cohort_generation 区分代际
+                "cohort_generation": "ALTER TABLE suggestions ADD COLUMN cohort_generation INTEGER DEFAULT 1",
+                # Batch2/3: 新 suggestion 取代旧 suggestion 时记录被取代的 note_id
+                "supersedes_note_id": "ALTER TABLE suggestions ADD COLUMN supersedes_note_id TEXT",
+                "superseded_at": "ALTER TABLE suggestions ADD COLUMN superseded_at TIMESTAMP",
+                # Batch2: 采纳证据等级 (audit 字段, 写进 adoption_evidence)
+                "adoption_evidence": "ALTER TABLE suggestions ADD COLUMN adoption_evidence TEXT",
+                # Batch4: 关联到的 commit sha (Apply suggestion 时记录)
+                "applied_commit_sha": "ALTER TABLE suggestions ADD COLUMN applied_commit_sha TEXT",
             }
             for column, sql in migrations.items():
                 if column not in columns:
@@ -866,8 +875,14 @@ class Store:
         actor_username: str | None = None,
         dismissed_reason: str | None = None,
         adoption_source: str | None = None,
+        adoption_evidence: str | None = None,
+        applied_commit_sha: str | None = None,
     ) -> None:
-        """标记 suggestion 为 applied / dismissed / resolved / superseded."""
+        """标记 suggestion 为 applied / dismissed / resolved / superseded.
+
+        Batch1/4: 增加 adoption_evidence (采纳证据等级) + applied_commit_sha
+        (关联 commit) 写库, 便于审计.
+        """
         with self._conn() as conn:
             conn.execute(
                 """
@@ -876,6 +891,10 @@ class Store:
                     applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END,
                     adoption_source = CASE WHEN ? = 'applied' AND ? IS NOT NULL
                                            THEN ? ELSE adoption_source END,
+                    adoption_evidence = CASE WHEN ? = 'applied' AND ? IS NOT NULL
+                                             THEN ? ELSE adoption_evidence END,
+                    applied_commit_sha = CASE WHEN ? = 'applied' AND ? IS NOT NULL
+                                              THEN ? ELSE applied_commit_sha END,
                     dismissed_at = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_at END,
                     dismissed_by = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_by END,
                     dismissed_reason = CASE WHEN ? = 'dismissed' AND ? IS NOT NULL
@@ -889,6 +908,8 @@ class Store:
                 (state, _fmt_dt(_utcnow()),
                  state, _fmt_dt(_utcnow()),
                  state, adoption_source, adoption_source,
+                 state, adoption_evidence, adoption_evidence,
+                 state, applied_commit_sha, applied_commit_sha,
                  state, _fmt_dt(_utcnow()),
                  state, actor_username,
                  state, dismissed_reason, dismissed_reason,
@@ -1006,6 +1027,124 @@ class Store:
             "open": states.get("open", 0),
             "adoption_rate": round(adopted / processed * 100, 1) if processed else 0.0,
         }
+
+    def get_latest_in_cohort_excluding(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+        cohort_key: str,
+        exclude_note_id: str,
+    ) -> dict | None:
+        """获取该 cohort 下, 排除 exclude_note_id 后的最新一条 suggestion.
+
+        Batch3: 用来判断同问题是否在历史记录里被 applied/dismissed, 决定是否要
+        supersede 旧记录并 bump generation.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM suggestions
+                WHERE project_id=? AND mr_iid=?
+                  AND cohort_key=?
+                  AND note_id != ?
+                  AND COALESCE(state, 'open') != 'superseded'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (project_id, mr_iid, cohort_key, exclude_note_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def supersede_suggestion(
+        self,
+        old_note_id: str,
+        new_note_id: str,
+        generation: int,
+    ) -> None:
+        """标记旧 suggestion 为 superseded (由新 suggestion 取代).
+
+        Batch3: 同一 cohort (同一问题) 跨多轮发布时, 把上一代标 superseded,
+        并写 supersedes_note_id 反向链, 便于审计.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE suggestions
+                SET state = 'superseded', superseded_at = ?,
+                    supersedes_note_id = ?
+                WHERE note_id = ?
+                """,
+                (_fmt_dt(_utcnow()), new_note_id, old_note_id),
+            )
+            # 新 suggestion 的 cohort_generation 已经在 record_suggestion 写,
+            # 这里只更新 generation (新 suggestion 已是新 id).
+            conn.execute(
+                "UPDATE suggestions SET cohort_generation = ? WHERE note_id = ?",
+                (generation, new_note_id),
+            )
+
+    def list_latest_by_cohort(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+    ) -> list[dict]:
+        """每个 cohort_key (fallback 到 note_id) 只返回最新一条, 排除 superseded.
+
+        Batch2: 用于 build_overview_body 汇总 — 同问题被 V1/V2/V3 重复发布时,
+        不再各自算一个状态, 只取最新一条参与统计.
+        """
+        sql = """
+        WITH ranked AS (
+            SELECT s.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY project_id, mr_iid,
+                                    COALESCE(NULLIF(cohort_key, ''), note_id)
+                       ORDER BY id DESC
+                   ) AS row_number
+            FROM suggestions s
+            WHERE s.project_id = ? AND s.mr_iid = ?
+              AND COALESCE(s.state, 'open') != 'superseded'
+        )
+        SELECT * FROM ranked WHERE row_number = 1
+        """
+        with self._conn() as conn:
+            rows = conn.execute(sql, (project_id, mr_iid)).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_superseded_in_mr(self, *, project_id: int, mr_iid: int) -> int:
+        """统计该 MR 已被显式 superseded 的 suggestions (用 supersede_suggestion)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? AND state='superseded'",
+                (project_id, mr_iid),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def count_hidden_by_cohort(self, *, project_id: int, mr_iid: int) -> int:
+        """统计被 cohort 归并隐藏的旧记录数 (用于 build_overview_body 末注).
+
+        "隐藏" = 在 list_latest_by_cohort 里 row_number > 1, 也就是同 cohort_key (或
+        note_id fallback) 的非最新记录. 这些不算 applied, 也不出现在汇总里, 但
+        仍保留原始状态用于审计.
+        """
+        sql = """
+        WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY project_id, mr_iid,
+                             COALESCE(NULLIF(cohort_key, ''), note_id)
+                ORDER BY id DESC
+            ) AS row_number
+            FROM suggestions
+            WHERE project_id = ? AND mr_iid = ?
+              AND COALESCE(state, 'open') != 'superseded'
+        )
+        SELECT COUNT(*) AS n FROM ranked WHERE row_number > 1
+        """
+        with self._conn() as conn:
+            row = conn.execute(sql, (project_id, mr_iid)).fetchone()
+        return int(row["n"]) if row else 0
 
     def suggestion_metrics(self, *, project_id: int | None = None,
                            since: str | None = None, until: str | None = None) -> dict:

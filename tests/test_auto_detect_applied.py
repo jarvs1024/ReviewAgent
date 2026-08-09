@@ -48,7 +48,7 @@ def _seed_suggestion(s, *, project_id=34, mr_iid=200, head_sha="abc123",
 
 
 def test_changed_target_lines_get_marked_applied(tmp_telemetry):
-    """If user changed the target line via GitLab UI, state -> applied."""
+    """exact_match=True 走主循环直接 applied (无论 resolved 还是 open)."""
     from reviewagent.commands.suggestion_actions import auto_detect_applied
     from reviewagent.telemetry.store import get_store
 
@@ -66,11 +66,11 @@ def test_changed_target_lines_get_marked_applied(tmp_telemetry):
     current = (
         "def foo():\n"
         "    pass\n"
-        "    return 2\n"  # was "    return 1" (user applied)
+        "    return 2\n"  # user applied
         "print('after')\n"
     )
-    # auto_detect_applied 调 2 次 get_file_at_sha: posted 时代 + current 时代
-    gl.get_file_at_sha.side_effect = [posted, current]
+    # 主循环: 1) current_content (head_sha) 2) posted_content (posted sha)
+    gl.get_file_at_sha.side_effect = [current, posted]
 
     with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
          patch("reviewagent.commands.suggestion_actions.get_store", return_value=s):
@@ -86,6 +86,50 @@ def test_changed_target_lines_get_marked_applied(tmp_telemetry):
     sug = s.get_suggestion_by_note_id("note-1")
     assert sug["state"] == "applied"
     gl.resolve_discussion.assert_called_once()
+
+
+def test_region_changed_only_stays_resolved(tmp_telemetry):
+    """Batch1: region_changed 单独不再算采纳 — MR 249 误分类修复.
+
+    场景: open suggestion + 讨论已 resolved + target 行有改但非 improved 内容
+    → 标 resolved (UI 解决), late_detect 不再翻 applied.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    _seed_suggestion(s)
+
+    gl = MagicMock()
+    gl.is_discussion_resolved.return_value = True
+    posted = (
+        "def foo():\n"
+        "    pass\n"
+        "    return 1\n"
+        "print('after')\n"
+    )
+    current = (
+        "def foo():\n"
+        "    pass\n"
+        "    return 99\n"  # target 行被改, 但不是 improved 内容
+        "print('after')\n"
+    )
+    # open 2 次 + late 2 次
+    gl.get_file_at_sha.side_effect = [current, posted, current, posted]
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=s):
+        result = auto_detect_applied(
+            project_id=34, mr_iid=200, head_sha="newhead",
+            actor_username="root",
+        )
+
+    assert result["applied"] == 0
+    assert result["late_apply"] == 0
+    sug = s.get_suggestion_by_note_id("note-1")
+    # 讨论已 resolved, 主循环不命中 → state=resolved
+    # late_detect 也不命中 → 保持 resolved
+    assert sug["state"] == "resolved", f"期望 resolved, got {sug['state']}"
 
 
 def test_unchanged_target_lines_stay_open(tmp_telemetry):
