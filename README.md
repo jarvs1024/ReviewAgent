@@ -49,9 +49,9 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 | `/improve` | MR 评论 | 调 `code-improver` agent，逐文件发可 Apply 的 inline 建议评论 |
 | `/adopt [理由]` | 对某条 inline suggestion 的回复 | 验证代码确已改动 → 标记 adopted，resolve discussion |
 | `/dismiss [理由]` | 对某条 inline suggestion 的回复 | 标记 dismissed，resolve discussion，记入 telemetry |
-| （自动） | MR open / update（含新 commit）· Push | 按 `pr_commands` / `push_commands` 串行跑 `describe → improve` |
+| （自动） | MR open / update（含新 commit）· Push | `pr_commands=describe+improve` / `push_commands=improve` |
 
-死循环防护：bot 自评论会被忽略；`MR_COOLDOWN_SECONDS` 限频；`MAX_REVIEW_CALLS_PER_MR` 上限（默认 30，达上限后不再自动检视，提示手动 `/improve`）。
+死循环防护：bot 自评论会被忽略；`MR_COOLDOWN_SECONDS=60` 限频；`MAX_REVIEW_CALLS_PER_MR` 上限（默认 30，达上限后不再自动检视，提示手动 `/improve`）。
 
 ---
 

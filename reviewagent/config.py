@@ -62,14 +62,14 @@ class Config:
 
     # ---- 命令链（每个 MR 按顺序串行执行）----
     pr_commands: tuple[str, ...] = ("describe", "improve")
-    push_commands: tuple[str, ...] = ("describe", "improve")
+    push_commands: tuple[str, ...] = ("improve",)
 
     # ---- 存储 ----
     data_dir: Path = field(default_factory=lambda: Path("./data"))
     log_level: str = "INFO"
 
     # ---- 限制 ----
-    mr_cooldown_seconds: int = 30
+    mr_cooldown_seconds: int = 60
     max_review_calls_per_mr: int = 30  # 同 MR 最多 30 轮 review, 防无限循环; 0=不限
 
     # ---- Diff 限制 ----
@@ -141,10 +141,10 @@ class Config:
             rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "1200")),
             rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
             pr_commands=_env_tuple("PR_COMMANDS", "describe,improve"),
-            push_commands=_env_tuple("PUSH_COMMANDS", "describe,improve"),
+            push_commands=_env_tuple("PUSH_COMMANDS", "improve"),
             data_dir=Path(_env("REVIEWAGENT_DATA_DIR", "./data")),
             log_level=_env("REVIEWAGENT_LOG_LEVEL", "INFO"),
-            mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "30")),
+            mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "60")),
             max_review_calls_per_mr=int(_env("MAX_REVIEW_CALLS_PER_MR", "30")),
             max_diff_chars=int(_env("MAX_DIFF_CHARS", "50000")),
             opencode_max_diff_chars=int(_env("OPENCODE_MAX_DIFF_CHARS", "20000")),
