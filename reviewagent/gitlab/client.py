@@ -133,6 +133,35 @@ class GitLabClient:
                     project_id, mr_iid, len(diffs), len(full_diff))
         return full_diff
 
+    def list_mr_commits(self, project_id: int, mr_iid: int) -> list[dict[str, str]]:
+        """拉 MR 全部 commits (id + short_id + title + created_at).
+
+        Batch4: 用于把 suggestion 关联到 Apply suggestion commit. 不缓存, 每次
+        auto_detect_applied 调用 1 次 (MR 通常 < 50 个 commit).
+        """
+        try:
+            project = self._get_project(project_id)
+            mr = project.mergerequests.get(mr_iid)
+            commits = mr.commits.list(get_all=True)
+        except gitlab.exceptions.GitlabError as e:
+            raise GitLabError(f"list_mr_commits failed: {e}") from e
+        result = []
+        for c in commits:
+            try:
+                result.append({
+                    "id": c.id,
+                    "short_id": c.short_id,
+                    "title": c.title,
+                    "created_at": getattr(c, "created_at", ""),
+                })
+            except Exception:  # noqa: BLE001
+                continue
+        logger.info(
+            "gitlab.list_mr_commits project={} mr={} count={}",
+            project_id, mr_iid, len(result),
+        )
+        return result
+
     # ---------- 评论 ----------
     def post_mr_comment(self, project_id: int, mr_iid: int, body: str) -> int:
         """发 MR 普通评论（不是行内 DiffNote）；返回 note_id."""

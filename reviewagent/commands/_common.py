@@ -401,11 +401,15 @@ def build_overview_body(
         "medium": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
         "low": {"open": 0, "applied": 0, "dismissed": 0, "resolved": 0},
     }
+    superseded_n = 0
     try:
         from reviewagent.telemetry.store import get_store
         store = get_store()
-        all_sugs = store.list_suggestions(
-            project_id=project_id, mr_iid=mr_iid, limit=500,
+        # Batch2: 用 cohort_key 归并同问题, 只取最新一条非 superseded 记录参与统计.
+        # 旧版直接 list_suggestions 累加所有 records → MR 249 出现 22 条 applied 但
+        # 实际只有 ~13 个独立问题. 修复后: 同 cohort 只占 1 个状态.
+        all_sugs = store.list_latest_by_cohort(
+            project_id=project_id, mr_iid=mr_iid,
         )
         for s in all_sugs:
             sev = (s.get("severity") or "medium").lower()
@@ -415,6 +419,14 @@ def build_overview_body(
             if state not in sev_buckets[sev]:
                 sev_buckets[sev][state] = 0
             sev_buckets[sev][state] += 1
+        try:
+            # 同时统计显式 superseded + 被 cohort 归并隐藏的 (同一问题被多轮发布)
+            superseded_n = (
+                store.count_superseded_in_mr(project_id=project_id, mr_iid=mr_iid)
+                + store.count_hidden_by_cohort(project_id=project_id, mr_iid=mr_iid)
+            )
+        except Exception:  # noqa: BLE001
+            superseded_n = 0
     except Exception as e:
         logger.warning("build_overview_body.query failed (non-fatal): {}", e)
 
@@ -471,6 +483,9 @@ def build_overview_body(
     lines.append("")
     lines.append("> 🔒 **已关闭（未分类）**：用户在 GitLab 中直接解决了主题，但系统无法确认该建议是采纳还是忽略。")
     lines.append("")
+    if superseded_n:
+        lines.append(f"> ♻️ 同问题被多轮重复发布，{superseded_n} 条已被合并到最新版本。")
+        lines.append("")
     lines.append(f"🆕 **最后新增 {inline_posted_count} 条**{meta_suffix}")
     lines.append("")
     return "\n".join(lines)

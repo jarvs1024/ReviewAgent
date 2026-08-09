@@ -141,8 +141,8 @@ def test_resolved_without_matching_code_stays_resolved(tmp_telemetry):
     assert final["state"] == "resolved", f"state 应保持 resolved, got {final['state']}"
 
 
-def test_resolved_with_region_changed_flips_to_applied(tmp_telemetry):
-    """exact_match=False 但 _target_region_changed=True (用户在目标行附近改了等价代码) → 翻 applied."""
+def test_resolved_with_exact_match_flips_to_applied(tmp_telemetry):
+    """exact_match=True → 翻 applied (Batch1 保持)."""
     from reviewagent.commands.suggestion_actions import auto_detect_applied
     from reviewagent.telemetry.store import get_store
 
@@ -156,7 +156,6 @@ def test_resolved_with_region_changed_flips_to_applied(tmp_telemetry):
     )
 
     gl = MagicMock()
-    # posted 时代 (0a9043b0) vs current 时代 (8b7e58a3) — 目标行 x=1 被改成 x=2
     posted = "def f():\n    x = 1\n    return x\n"
     current = "def f():\n    x = 2\n    return x\n"
     gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
@@ -167,7 +166,68 @@ def test_resolved_with_region_changed_flips_to_applied(tmp_telemetry):
     with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
         result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
 
-    assert result["late_apply"] == 1, f"region_changed 应翻转, got {result}"
+    assert result["late_apply"] == 1, f"exact_match 应翻转, got {result}"
+    final = s.get_suggestion_by_note_id("resolved-note-1")
+    assert final["state"] == "applied"
+
+
+def test_resolved_region_only_stays_resolved(tmp_telemetry):
+    """Batch1: region_changed 单独不再翻 applied (MR 249 误分类修复)."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        target_line=5, target_line_end=7,
+        existing_code="def f():\n    x = 1\n    return x\n",
+        improved_code="def f():\n    x = 2\n    return x\n",
+    )
+
+    gl = MagicMock()
+    # current 文件目标行有变, 但不是 improved_code 完整内容
+    posted = "def f():\n    x = 1\n    return x\n"
+    current = "def f():\n    x = 99\n    return x\n"
+    gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
+        posted if sha.startswith("0a9043b0") else current
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 0, f"region_only 不应翻 applied, got {result}"
+    final = s.get_suggestion_by_note_id("resolved-note-1")
+    assert final["state"] == "resolved", f"应保持 resolved, got {final['state']}"
+
+
+def test_resolved_strict_token_match_flips_to_applied(tmp_telemetry):
+    """Batch1: 严格 token 匹配 (新 token 占比>=0.8, 旧 token 残余<30%) 翻 applied."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        target_line=2, target_line_end=3,
+        existing_code="print(\"diag: " + "{" + "x" + "}\")\n",
+        improved_code="logger.info(\"diag: %s\", x)\n",
+    )
+
+    gl = MagicMock()
+    posted = "def f():\n    print(\"diag: " + "{" + "x" + "}\")\n    return\n"
+    current = "def f():\n    logger.info(\"diag: %s\", x)\n    return\n"
+    gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
+        posted if sha.startswith("0a9043b0") else current
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 1, f"严格 token 匹配应翻 applied, got {result}"
     final = s.get_suggestion_by_note_id("resolved-note-1")
     assert final["state"] == "applied"
 
@@ -309,3 +369,238 @@ def test_late_detect_records_two_actions(tmp_telemetry):
     # 原 resolved 的 reason 应是 gitlab_resolve 文案, 新 adopted 是 late_detect 文案
     assert "未检测到" in by_action["resolved"][0]["reason"]
     assert "late_detect" in by_action["adopted"][0]["reason"]
+
+
+# ---------- Batch2: 汇总按 cohort 归并 ----------
+def test_list_latest_by_cohort_dedup(tmp_telemetry):
+    """同 cohort 3 条记录 + 1 条独立, list_latest_by_cohort 应返回 2 条."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "ab" * 32
+    # 同 cohort 3 轮发布: V1 open, V2 applied, V3 open
+    for i, state in enumerate(["open", "applied", "open"]):
+        nid = f"note-v{i+1}"
+        s.record_suggestion(
+            project_id=34, mr_iid=247, note_id=nid,
+            file_path="a.py", target_line=2, target_line_end=2,
+            existing_code="x = 1\n", improved_code="x = 2\n",
+            header="docstring", label="l",
+            fingerprint=f"fp-{i}", cohort_key="c-docstring",
+            severity_source="rule", head_sha=head,
+        )
+        if state != "open":
+            s.update_suggestion_state(nid, state, actor_username="t")
+    # 独立 cohort
+    s.record_suggestion(
+        project_id=34, mr_iid=247, note_id="note-print",
+        file_path="a.py", target_line=10, target_line_end=10,
+        existing_code="print(x)\n", improved_code="logger.info(x)\n",
+        header="bare print", label="l",
+        fingerprint="fp-print", cohort_key="c-print",
+        severity_source="rule", head_sha=head,
+    )
+    rows = s.list_latest_by_cohort(project_id=34, mr_iid=247)
+    assert len(rows) == 2
+    # cohort "c-docstring" 最新一条是 V3 (open)
+    docstring_row = [r for r in rows if r["cohort_key"] == "c-docstring"][0]
+    assert docstring_row["state"] == "open"
+    assert docstring_row["note_id"] == "note-v3"
+    print_row = [r for r in rows if r["cohort_key"] == "c-print"][0]
+    assert print_row["state"] == "open"
+
+
+def test_supersede_suggestion(tmp_telemetry):
+    """supsersede_suggestion 应把旧记录标 superseded + 写 supersedes_note_id."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "cd" * 32
+    s.record_suggestion(
+        project_id=34, mr_iid=247, note_id="old",
+        file_path="a.py", target_line=2,
+        existing_code="x=1\n", improved_code="x=2\n",
+        header="h", label="l",
+        fingerprint="fp", cohort_key="c",
+        severity_source="rule", head_sha=head,
+    )
+    s.record_suggestion(
+        project_id=34, mr_iid=247, note_id="new",
+        file_path="a.py", target_line=2,
+        existing_code="x=1\n", improved_code="x=2\n",
+        header="h", label="l",
+        fingerprint="fp2", cohort_key="c",
+        severity_source="rule", head_sha=head,
+    )
+    s.supersede_suggestion("old", "new", generation=2)
+    old = s.get_suggestion_by_note_id("old")
+    new = s.get_suggestion_by_note_id("new")
+    assert old["state"] == "superseded"
+    assert old["supersedes_note_id"] == "new"
+    assert new["cohort_generation"] == 2
+
+
+def test_build_overview_body_dedup(tmp_telemetry):
+    """Batch2: build_overview_body 同 cohort 多条只算 1 个 applied."""
+    from reviewagent.commands._common import build_overview_body
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "ef" * 32
+    # 同 cohort 3 条, 都是 applied
+    for i in range(3):
+        s.record_suggestion(
+            project_id=34, mr_iid=247, note_id=f"note-doc{i}",
+            file_path="a.py", target_line=2, target_line_end=2,
+            existing_code="x=1\n", improved_code="x=2\n",
+            header="docstring", label="l",
+            fingerprint=f"fp-d{i}", cohort_key="c-doc",
+            severity_source="rule", head_sha=head,
+        )
+        s.update_suggestion_state(f"note-doc{i}", "applied", actor_username="t")
+    body = build_overview_body(project_id=34, mr_iid=247)
+    # cohort 归并: 3 条同 cohort 只算 1 条, MEDIUM 行 applied=1
+    # 表格行格式: | 🟡 MEDIUM | 0 | 1 | 0 | 0 | 1 |
+    import re
+    m = re.search(r"\| 🟡 MEDIUM \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \|", body)
+    assert m, f"未找到 MEDIUM 行:\n{body}"
+    open_n, applied_n, dismissed_n, resolved_n, sum_n = map(int, m.groups())
+    assert applied_n == 1, f"应只有 1 条 applied (cohort 归并后), got {applied_n}"
+    assert sum_n == 1, f"应只有 1 条 cohort 参与, got {sum_n}"
+    assert "♻️" in body, f"应显示已合并标注:\n{body}"
+    assert "2 条已被合并" in body
+
+
+# ---------- Batch3: occurrence/generation ----------
+def test_get_latest_in_cohort_excluding(tmp_telemetry):
+    """get_latest_in_cohort_excluding 返回同 cohort 排除自己后的最新一条."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "aa" * 32
+    for i in range(3):
+        s.record_suggestion(
+            project_id=34, mr_iid=247, note_id=f"n{i}",
+            file_path="a.py", target_line=2, target_line_end=2,
+            existing_code="x=1\n", improved_code="x=2\n",
+            header="h", label="l",
+            fingerprint=f"fp{i}", cohort_key="c-X",
+            severity_source="rule", head_sha=head,
+        )
+    s.update_suggestion_state("n0", "dismissed", actor_username="t")
+    s.update_suggestion_state("n1", "applied", actor_username="t")
+    latest = s.get_latest_in_cohort_excluding(
+        project_id=34, mr_iid=247, cohort_key="c-X",
+        exclude_note_id="n2",  # 最新
+    )
+    assert latest is not None
+    assert latest["note_id"] == "n1"
+    assert latest["state"] == "applied"
+
+
+def test_handle_cohort_reoccurrence_supersedes(tmp_telemetry):
+    """Batch3: 同 cohort 旧 applied + 当前 existing 仍出现 → supersede."""
+    from unittest.mock import MagicMock
+    from reviewagent.commands.improve import _handle_cohort_reoccurrence
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "bb" * 32
+    s.record_suggestion(
+        project_id=34, mr_iid=247, note_id="n-applied",
+        file_path="a.py", target_line=2, target_line_end=2,
+        existing_code="print(x)\n", improved_code="logger.info(x)\n",
+        header="h", label="l",
+        fingerprint="fp1", cohort_key="c-print",
+        severity_source="rule", head_sha=head,
+    )
+    s.update_suggestion_state("n-applied", "applied", actor_username="t")
+    # 当前 head_sha 文件里 existing 仍出现
+    gl = MagicMock()
+    gl.get_file_at_sha.return_value = "def f():\n    print(x)\n    return\n"
+    _handle_cohort_reoccurrence(
+        store=s, project_id=34, mr_iid=247,
+        cohort_key="c-print", new_note_id="n-new",
+        file_path="a.py", target_line=2, target_line_end=2,
+        existing="print(x)\n", head_sha=head, gitlab=gl,
+    )
+    old = s.get_suggestion_by_note_id("n-applied")
+    assert old["state"] == "superseded"
+    assert old["supersedes_note_id"] == "n-new"
+
+
+def test_handle_cohort_reoccurrence_no_op_when_problem_fixed(tmp_telemetry):
+    """Batch3: existing 已不出现 → 不 supersede (走正常 dedup 路径)."""
+    from unittest.mock import MagicMock
+    from reviewagent.commands.improve import _handle_cohort_reoccurrence
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "cc" * 32
+    s.record_suggestion(
+        project_id=34, mr_iid=247, note_id="n-applied",
+        file_path="a.py", target_line=2, target_line_end=2,
+        existing_code="print(x)\n", improved_code="logger.info(x)\n",
+        header="h", label="l",
+        fingerprint="fp1", cohort_key="c-print",
+        severity_source="rule", head_sha=head,
+    )
+    s.update_suggestion_state("n-applied", "applied", actor_username="t")
+    # current 文件里 print(x) 已被 logger.info 替换
+    gl = MagicMock()
+    gl.get_file_at_sha.return_value = "def f():\n    logger.info(x)\n    return\n"
+    _handle_cohort_reoccurrence(
+        store=s, project_id=34, mr_iid=247,
+        cohort_key="c-print", new_note_id="n-new",
+        file_path="a.py", target_line=2, target_line_end=2,
+        existing="print(x)\n", head_sha=head, gitlab=gl,
+    )
+    old = s.get_suggestion_by_note_id("n-applied")
+    assert old["state"] == "applied"  # 未被 supersede
+
+
+# ---------- Batch4: Apply commit 关联 + adoption_evidence ----------
+def test_find_latest_apply_commit():
+    """Batch4: 在 commits 列表里找 Apply ... 的 commit."""
+    from reviewagent.commands.suggestion_actions import _find_latest_apply_commit
+    commits = [
+        {"id": "abc12345", "short_id": "abc12345", "title": "feat: add thing"},
+        {"id": "def67890", "short_id": "def67890", "title": "Apply 1 suggestion(s) to 1 file(s)"},
+    ]
+    # head_sha 不匹配 → fallback 到第一个 Apply commit
+    assert _find_latest_apply_commit(commits, head_sha="99999999") == "def67890"
+    # head_sha 匹配 → 返回对应 commit
+    assert _find_latest_apply_commit(commits, head_sha="def67890abc") == "def67890"
+    # 没有 Apply commit
+    assert _find_latest_apply_commit(
+        [{"id": "x", "short_id": "x", "title": "fix: stuff"}], head_sha="x",
+    ) == ""
+    # 空 / 非法输入
+    assert _find_latest_apply_commit([], head_sha="x") == ""
+    assert _find_latest_apply_commit(None, head_sha="x") == ""
+    assert _find_latest_apply_commit("not list", head_sha="x") == ""
+
+
+def test_auto_detect_records_adoption_evidence(tmp_telemetry):
+    """exact_match 路径应写 adoption_evidence='exact_match' 到 suggestion 行."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    head = "head01" + "0" * 32
+    s.record_suggestion(
+        project_id=34, mr_iid=247, note_id="n-evidence",
+        file_path="a.py", target_line=2, target_line_end=2,
+        existing_code="x = 1\n", improved_code="x = 2\n",
+        header="h", label="l",
+        fingerprint="fp-evi", cohort_key="c-evi",
+        severity_source="rule", head_sha=head,
+    )
+    from unittest.mock import MagicMock, patch
+    gl = MagicMock()
+    gl.get_file_at_sha.side_effect = ["x = 2\n", "x = 1\n"]
+    gl.is_discussion_resolved.return_value = True
+    gl.resolve_discussion.return_value = True
+    gl.list_mr_commits.return_value = [
+        {"id": "head01" + "0"*32, "short_id": "head01", "title": "Apply 1 suggestion(s) to 1 file(s)"},
+    ]
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head)
+    assert result["applied"] == 1
+    sug = s.get_suggestion_by_note_id("n-evidence")
+    assert sug["state"] == "applied"
+    assert sug["adoption_evidence"] == "exact_match"
+    assert sug["applied_commit_sha"] == "head01"
