@@ -1201,9 +1201,14 @@ class ImproveCommand(BaseCommand):
             # 简短版: rationale 第一句 (按 。/， 截断)
             short = rationale.split("。")[0].split("，")[0]
             line_str = f"L{line}" if line else ""
-            items.append(
-                f"- **`{fp}`**{line_str} — **{header}** [{severity}/{label}]{kind_tag}: {short}"
-            )
+            if line_str:
+                items.append(
+                    f"- **`{fp}` `{line_str}`** — **{header}** [{severity}/{label}]{kind_tag}: {short}"
+                )
+            else:
+                items.append(
+                    f"- **`{fp}`** — **{header}** [{severity}/{label}]{kind_tag}: {short}"
+                )
 
         body = "\n".join(items)
         skipped_dup = sum(

@@ -708,6 +708,80 @@ def test_build_summary_v2_version_increments_per_run():
     assert int(m.group(1)) >= 1
 
 
+def test_build_summary_v2_line_number_in_code_span():
+    """L# 必须包在 backtick 里, 且与 path 共用同一个 bold span — 防 `**` 悬空.
+
+    之前模板 `- **`{fp}`**{line_str} — ...` 让 `L9` 夹在两个 `**` 之间,
+    GitLab CommonMark 渲染时 `**` 视觉残留, `L9` 看起来无样式悬空.
+    修复: 把 L# 包成 `` `L9` `` 并纳入同一个 bold span:
+    `- **`path` `L9`** — **header** ...`
+    """
+    import re
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    out = cmd._build_summary_v2(
+        inline_posted=[
+            {
+                "note_id": "n1",
+                "kind": "inline",
+                "raw": {"file": "foo.py", "start_line": 9, "header": "h"},
+                "normalised": {
+                    "file": "services/verify_8bugs_real_caller_2026_08_08.py",
+                    "new_line": 9,
+                    "header": "import 路径过期",
+                    "severity": "high",
+                    "label": "potential bug",
+                    "rationale": "违反 R-OTHER-IMPACT: 第 9 行的旧路径已删",
+                },
+            },
+        ],
+        inline_skipped=[],
+        total_agent_suggestions=1,
+    )
+    # 1. path + L# 必须同处一个 bold span
+    assert "**`services/verify_8bugs_real_caller_2026_08_08.py` `L9`**" in out, (
+        f"path + L# 应在同一 bold span, got: {out!r}"
+    )
+    # 2. 禁止 `**` 紧贴无 backtick 包裹的 `L9` (旧 bug 形态)
+    assert re.search(r"\*\*L9", out) is None, (
+        f"`**` 不应紧贴裸 L9: {out!r}"
+    )
+    # 3. L# 必须在 backtick 里
+    assert "`L9`" in out
+
+
+def test_build_summary_v2_line_number_missing_falls_back():
+    """某些 note 的 new_line 为空 → 不要渲染 `L` 残骸, 也不要留 `L ` 空格."""
+    from reviewagent.commands.improve import ImproveCommand
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 163
+    out = cmd._build_summary_v2(
+        inline_posted=[
+            {
+                "note_id": "n1",
+                "kind": "inline",
+                "raw": {"file": "foo.py", "header": "h"},
+                "normalised": {
+                    "file": "foo.py",
+                    "new_line": "",
+                    "header": "no line",
+                    "severity": "low",
+                    "label": "code quality",
+                    "rationale": "无行号条目",
+                },
+            },
+        ],
+        inline_skipped=[],
+        total_agent_suggestions=1,
+    )
+    # 无 line 时: path 仍 bold, 不出现 `L`` 残骸
+    assert "**`foo.py`**" in out, f"无 line 时 path 仍应 bold: {out!r}"
+    assert "`L" not in out, f"不应渲染 `L` 残骸: {out!r}"
+
+
 def test_build_summary_placeholder_contains_version():
     """placeholder 必须包含 V{N}, 即使还没拿到 inline_posted 数据"""
     from reviewagent.commands.improve import ImproveCommand
