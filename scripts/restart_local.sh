@@ -56,7 +56,7 @@ terminate_worker_jobs() {
                 jobs_terminated=1
             fi
         done < <(pgrep -P "${worker_pid}" || true)
-    done < <(pgrep -f -- "${PROJECT_DIR}/.venv/bin/rq worker" || true)
+    done < <(pgrep -f -- "rq.cli worker" || true)
     if [[ "${jobs_terminated}" -eq 1 ]]; then
         sleep 1
     fi
@@ -75,7 +75,7 @@ while IFS= read -r worker_session; do
         echo "    killed ${worker_session}"
     fi
 done < <(screen -ls 2>/dev/null | sed -nE 's/^[[:space:]]*[0-9]+\.(revagent-worker[0-9]+)[[:space:]].*/\1/p')
-terminate_matching "${PROJECT_DIR}/.venv/bin/rq worker"
+terminate_matching "rq.cli worker"
 terminate_matching "${PROJECT_DIR}/.venv/bin/uvicorn reviewagent.main:app"
 terminate_matching "${OPENCODE_BIN} serve --port 4096"
 sleep 2
