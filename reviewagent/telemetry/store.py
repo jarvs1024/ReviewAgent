@@ -718,8 +718,33 @@ class Store:
             ).fetchone()
             if processed_row is not None:
                 return True
-            # 第二查: state='open' 必须 head_sha 一致 + rule_keys 维度.
+            # 第二查: state='open' 的 dedup 策略.
             # 没传 head_sha 时, 退回纯 (file, line, state=open) 兜底.
+            #
+            # 2026-08 MR1099 修复: 当 rule_keys 完全匹配时, 忽略 head_sha.
+            # Why: 同一规则 + 同一位置 = 同一问题, 不管 head_sha 是否变化.
+            # 如果代码已修复, _validate_suggestion 会失败 (existing_code 不匹配).
+            # 如果代码变了但问题仍在, 仍是同一问题, 不该重复发.
+            if rule_keys:
+                rks = [rk.strip() for rk in rule_keys.split(",") if rk.strip()]
+                if rks:
+                    # 优先查: rule_keys 完全匹配 (忽略 head_sha).
+                    # 语义: 同规则 + 同位置 = 同问题, 不管 commit 怎么变.
+                    rk_exact_clauses = " AND (COALESCE(rule_keys,'')='' OR " + " OR ".join(
+                        "(',' || COALESCE(rule_keys,'') || ',') LIKE ?"
+                        for _ in rks
+                    ) + ")"
+                    rk_exact_params = [f"%,{rk},%" for rk in rks]
+                    row = conn.execute(
+                        "SELECT 1 FROM suggestions "
+                        "WHERE project_id=? AND mr_iid=? "
+                        "  AND file_path=? AND target_line BETWEEN ? AND ? "
+                        "  AND state='open'" + rk_exact_clauses + " LIMIT 1",
+                        [project_id, mr_iid, file_path, lo, hi] + rk_exact_params,
+                    ).fetchone()
+                    if row is not None:
+                        return True
+            # 兜底: head_sha 一致 + rule_keys 重叠 (处理 force-push 后代码真变了的场景).
             open_sql = (
                 "SELECT 1 FROM suggestions "
                 "WHERE project_id=? AND mr_iid=? "
