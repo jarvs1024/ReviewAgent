@@ -962,6 +962,36 @@ class Store:
             )
             return note_ids
 
+    def supersede_stale_in_cohort(
+        self,
+        *,
+        project_id: int,
+        mr_iid: int,
+        cohort_key: str,
+        keep_note_id: str,
+    ) -> list[str]:
+        """把同 cohort 里除 keep_note_id 外的所有 open/resolved 标 superseded.
+
+        Why: UI Apply / push auto_detect 翻单条 state 后, 旧 round 留下的同 cohort
+        note 仍 open, build_overview (cohort 归并) 会算 2 次.
+        在 process_adopt / mark_suggestion_applied_by_diff 末尾调一次.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT note_id FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? AND cohort_key=? "
+                "AND note_id != ? AND state IN ('open', 'resolved', 'dismissed')",
+                (project_id, mr_iid, cohort_key, keep_note_id),
+            ).fetchall()
+            note_ids = [str(r["note_id"]) for r in rows]
+            if not note_ids:
+                return []
+            conn.executemany(
+                "UPDATE suggestions SET state='superseded', updated_at=? "
+                "WHERE note_id=?",
+                [(_fmt_dt(_utcnow()), nid) for nid in note_ids],
+            )
+            return note_ids
     def update_suggestion_note_id(self, suggestion_id: int, new_note_id: str) -> None:
         """回填 note_id — Fix C: file:line 兜底命中后, 把真实 GitLab note_id 写回.
 

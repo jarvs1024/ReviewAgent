@@ -1001,6 +1001,18 @@ def mark_suggestion_applied_by_diff(
             note_id, "applied", actor_username=actor_username,
             adoption_source="ui_apply",
         )
+        # 2. 把同 cohort 旧条 superseded — 避免 "applied 1 + 旧 open 1" 的 cohort 重复
+        # Why: push → improve → 旧 cohort note_id 仍 open, 调一次 supersede 让 build_overview
+        #      只看到最新一条 (applied), 不再双发.
+        try:
+            cohort_key = sug.get("cohort_key") or ""
+            if cohort_key:
+                store.supersede_stale_in_cohort(
+                    project_id=project_id, mr_iid=mr_iid,
+                    cohort_key=cohort_key, keep_note_id=note_id,
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("system_applied.supersede_in_cohort failed (non-fatal): {}", _e)
         store.record_suggestion_action(
             project_id=project_id,
             mr_iid=mr_iid,
