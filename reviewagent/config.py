@@ -61,8 +61,15 @@ class Config:
     rq_worker_count: int = 3  # 并发 worker 数
 
     # ---- 命令链（每个 MR 按顺序串行执行）----
+    # 检视顺序统一为 describe → improve: describe 先产出 MR title + description 概要,
+    # 然后 improve 在该概要上做代码级建议. 之前 push_commands=("improve",) 单跑,
+    # 会让 push 触发的 chain 不带 describe, 跟 MR open 触发的 chain 行为不一致;
+    # 历史 (UI) 上会看到 "improve → describe → improve" 错序. 统一后:
+    #   - MR open / push 都跑 describe → improve
+    #   - describe 会刷新 title + description (幂等, 跑多次无害)
+    #   - cooldown 60s 仍兜底, 避免 push 风暴时重复入队
     pr_commands: tuple[str, ...] = ("describe", "improve")
-    push_commands: tuple[str, ...] = ("improve",)
+    push_commands: tuple[str, ...] = ("describe", "improve")
 
     # ---- 存储 ----
     data_dir: Path = field(default_factory=lambda: Path("./data"))
@@ -141,7 +148,7 @@ class Config:
             rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "1200")),
             rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
             pr_commands=_env_tuple("PR_COMMANDS", "describe,improve"),
-            push_commands=_env_tuple("PUSH_COMMANDS", "improve"),
+            push_commands=_env_tuple("PUSH_COMMANDS", "describe,improve"),
             data_dir=Path(_env("REVIEWAGENT_DATA_DIR", "./data")),
             log_level=_env("REVIEWAGENT_LOG_LEVEL", "INFO"),
             mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "60")),
