@@ -63,12 +63,17 @@ from reviewagent.llm import OpencodeOutputError, get_client
 ImproveError = BaseCommandError
 
 # 规则引用正则: 匹配 SSD-RULE-XXX 形式 (rule_key_prefix 可配)
-# 规则键豁免正则: SSD-RULE-* / R-XXX / R-OTHER:* / R-OTHER-IMPACT:* 全部豁免 _score_suggestion 过滤
+# 用于从 rationale/header 中提取所有规则键 (含 R-XXX, R-OTHER:* 等)
 _RULE_REF_REGEX = re.compile(
     r"\b(?:SSD-RULE-\w+"
     r"|R-OTHER-IMPACT:[a-z0-9_]+"
     r"|R-OTHER:[a-z0-9_]+"
     r"|R-[A-Z]+(?:-[A-Z0-9_]+)*)\b"
+)
+# 豁免正则: 仅匹配 {prefix}-RULE-* 形式的规则 (如 SSD-RULE-XXX)
+# 用于评分/严重度过滤的豁免判断 — 只有仓库自定义规则才豁免, R-OTHER 等通用规则不豁免
+_RULE_EXEMPT_REGEX = re.compile(
+    rf"\b{re.escape(config.rule_key_prefix)}-RULE-\w+\b"
 )
 
 
@@ -630,7 +635,7 @@ class ImproveCommand(BaseCommand):
 
         merged_suggestions = list(seen.values())
 
-        # 严重度过滤: 低于 min_severity 的建议不发布 (SSD-RULE 引用豁免)
+        # 严重度过滤: 低于 min_severity 的建议不发布 ({prefix}-RULE 引用豁免)
         min_severity = config.improve_min_severity
         if min_severity:
             sev_levels = {"critical": 4, "high": 3, "medium": 2, "low": 1}
@@ -639,7 +644,7 @@ class ImproveCommand(BaseCommand):
                 kept = []
                 for s in merged_suggestions:
                     rationale = (s.get("rationale") or "")
-                    if _RULE_REF_REGEX.search(rationale):
+                    if _RULE_EXEMPT_REGEX.search(rationale):
                         kept.append(s)
                         continue
                     s_sev = (s.get("severity") or "medium").lower()
@@ -653,13 +658,13 @@ class ImproveCommand(BaseCommand):
                         )
                 merged_suggestions = kept
 
-        # 评分过滤: 低于 min_score 的建议不发布 (SSD-RULE 引用豁免)
+        # 评分过滤: 低于 min_score 的建议不发布 ({prefix}-RULE 引用豁免)
         min_score = config.improve_min_score
         if min_score > 0:
             kept = []
             for s in merged_suggestions:
                 rationale = (s.get("rationale") or "")
-                if _RULE_REF_REGEX.search(rationale):
+                if _RULE_EXEMPT_REGEX.search(rationale):
                     kept.append(s)
                     continue
                 sc = ImproveCommand._score_suggestion(s)
@@ -1971,8 +1976,8 @@ class ImproveCommand(BaseCommand):
             score += 15
         elif len(rationale) > 50:
             score += 8
-        # 规则引用 (+10)
-        if _RULE_REF_REGEX.search(rationale):
+        # 规则引用 (+10) — 仅 {prefix}-RULE 形式加分
+        if _RULE_EXEMPT_REGEX.search(rationale):
             score += 10
         # header 质量 (+5)
         header = (s.get("header") or "").strip()
