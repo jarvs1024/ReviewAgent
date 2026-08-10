@@ -776,14 +776,37 @@ class ImproveCommand(BaseCommand):
         if not file_lines or not existing_code.strip():
             return None
         target_lines = existing_code.strip("\n").split("\n")
-        # 裁掉 leading trivial 行 (空行 / 纯 docstring 标记), 避免定位到前一行
-        # 例: existing="""\nprint(...) → 裁掉 """ → 从 print 开始搜
+        # 裁掉 leading trivial 行，避免定位到非代码行
+        # 1. 空行
         while target_lines and not target_lines[0].strip():
             target_lines.pop(0)
+        # 2. 单行 docstring 标记 (非多行 docstring 内容)
         if target_lines and target_lines[0].strip() in ('"""', "'''"):
-            # 单行 docstring 标记 (非多行 docstring 内容) 也裁掉
             if len(target_lines) == 1 or target_lines[1].strip():
                 target_lines.pop(0)
+        # 3. Docstring 内容行 (纯文本，无代码语法)
+        #    启发式：行内无括号/运算符/关键字，且不是赋值/调用语句
+        _CODE_INDICATORS = (
+            '(', ')', '[', ']', '{', '}', '=', '+', '-', '*', '/',
+            'def ', 'class ', 'if ', 'for ', 'while ', 'return ',
+            'import ', 'from ', 'try:', 'except', 'with ', 'yield ',
+        )
+        while target_lines:
+            first = target_lines[0].strip()
+            if not first:
+                target_lines.pop(0)
+                continue
+            # 检查是否像代码行
+            looks_like_code = any(ind in first for ind in _CODE_INDICATORS)
+            # 检查是否像赋值/调用 (e.g. "x = func()" 或 "func()")
+            is_assignment_or_call = (
+                '=' in first and not first.startswith('#') or
+                '(' in first and ')' in first
+            )
+            if looks_like_code or is_assignment_or_call:
+                break
+            # 纯文本行 (docstring 内容) → 裁掉
+            target_lines.pop(0)
         target_first = target_lines[0].strip() if target_lines else ""
         if not target_first:
             return None
