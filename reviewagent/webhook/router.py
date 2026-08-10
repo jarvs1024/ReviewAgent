@@ -504,6 +504,12 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
                 )
 
         if locks.should_skip_cooldown(note.project_id, note.mr_iid, action):
+            logger.info(
+                "webhook.skip cooldown_note project={} mr={} cmd={} actor={} note={}",
+                note.project_id, note.mr_iid, action,
+                note.actor_username, note.note_id,
+            )
+            _metric_inc("reviewagent_webhook_skipped_total", reason="cooldown_note")
             return {"status": "skipped", "reason": "cooldown"}
         # 入队 (带 file_path/target_line 让 process_adopt 在 note_id 未建库时 fallback)
         from reviewagent.workers.tasks import enqueue_suggestion_action
