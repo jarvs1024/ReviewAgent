@@ -1425,9 +1425,24 @@ def auto_detect_applied(
         elif late_result == "error":
             result["errors"] += 1
 
-    if result["applied"] or result["late_apply"]:
+    if result.get("applied") or result.get("late_apply") or result.get("resolved"):
         logger.info(
             "auto_detect_applied summary project={} mr={} {}",
             project_id, mr_iid, result,
         )
+    # 修 MR262: 用户点 ✓ 后 auto_detect 标 resolved 但没刷检视汇总.
+    # 现在跟 /dismiss / /adopt / ui_apply / sync_resolved 一样, 状态一变就
+    # 立即刷一次. 用 run_late_detect=False 避免与 publish_overview 自身的
+    # late_detect 递归 (auto_detect_applied 会被 publish_overview 调用).
+    if result.get("applied") or result.get("resolved") or result.get("late_apply"):
+        try:
+            publish_overview(
+                project_id=project_id, mr_iid=mr_iid,
+                inline_posted_count=0,
+                run_late_detect=False,
+            )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "auto_detect_applied.overview_refresh failed (non-fatal): {}", _e,
+            )
     return result

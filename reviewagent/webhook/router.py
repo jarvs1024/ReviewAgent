@@ -58,6 +58,14 @@ async def webhook(request: Request) -> dict:
         logger.warning("webhook.timeout object_kind={}", object_kind)
         _metric_inc("reviewagent_webhook_skipped_total", reason="timeout")
         return {"status": "timeout", "object_kind": object_kind}
+    except Exception as _e:
+        # 任何异常都 catch 住, 避免 GitLab 标记 internal error.
+        # Why: sync_resolved_from_gitlab 中途崩 / DB lock / 网络抖动会让 webhook
+        # 返回 5xx → GitLab 不重试 → 用户点击 ✓ 后状态永远 stale.
+        # 返回 200 + reason 让 GitLab 认为投递成功, 客户端无感知.
+        logger.exception("webhook.handler_crash object_kind={} err={}", object_kind, _e)
+        _metric_inc("reviewagent_webhook_skipped_total", reason="handler_crash")
+        return {"status": "error", "reason": "handler_crash", "object_kind": object_kind}
 
     if object_kind in ("merge_request", "push"):
         return await _handle_code_change(payload, object_kind, enqueue_mr_chain)
