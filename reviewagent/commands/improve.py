@@ -630,7 +630,7 @@ class ImproveCommand(BaseCommand):
 
         merged_suggestions = list(seen.values())
 
-        # 严重度过滤: 低于 min_severity 的建议不发布
+        # 严重度过滤: 低于 min_severity 的建议不发布 (SSD-RULE 引用豁免)
         min_severity = config.improve_min_severity
         if min_severity:
             sev_levels = {"critical": 4, "high": 3, "medium": 2, "low": 1}
@@ -638,6 +638,10 @@ class ImproveCommand(BaseCommand):
             if min_level > 0:
                 kept = []
                 for s in merged_suggestions:
+                    rationale = (s.get("rationale") or "")
+                    if _RULE_REF_REGEX.search(rationale):
+                        kept.append(s)
+                        continue
                     s_sev = (s.get("severity") or "medium").lower()
                     s_level = sev_levels.get(s_sev, 2)
                     if s_level >= min_level:
