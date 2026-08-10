@@ -94,6 +94,7 @@ class Config:
     improve_max_files: int = 20              # 单次检视最大文件数 (0=不限, 超出截断并发 warning)
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
     improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
+    improve_min_severity: str = ""           # 最低严重度过滤 (空=不过滤, 可选: critical/high/medium/low)
 
     # ---- 检视文件过滤 ----
     review_exclude_extensions: tuple[str, ...] = (".md", ".doc", ".docx", ".txt", ".rst", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")
@@ -163,6 +164,7 @@ class Config:
             improve_max_files=int(_env("IMPROVE_MAX_FILES", "20")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
             improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
+            improve_min_severity=_env("IMPROVE_MIN_SEVERITY", "").lower(),
             review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",
                 ".md,.doc,.docx,.txt,.rst,.csv,.png,.jpg,.jpeg,.gif,.svg,.ico"),
         )

@@ -630,6 +630,25 @@ class ImproveCommand(BaseCommand):
 
         merged_suggestions = list(seen.values())
 
+        # 严重度过滤: 低于 min_severity 的建议不发布
+        min_severity = config.improve_min_severity
+        if min_severity:
+            sev_levels = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+            min_level = sev_levels.get(min_severity, 0)
+            if min_level > 0:
+                kept = []
+                for s in merged_suggestions:
+                    s_sev = (s.get("severity") or "medium").lower()
+                    s_level = sev_levels.get(s_sev, 2)
+                    if s_level >= min_level:
+                        kept.append(s)
+                    else:
+                        logger.info(
+                            "improve.severity_filter file={} line={} severity={} header={!r}",
+                            s.get("file"), s.get("start_line"), s_sev, s.get("header"),
+                        )
+                merged_suggestions = kept
+
         # 评分过滤: 低于 min_score 的建议不发布 (SSD-RULE 引用豁免)
         min_score = config.improve_min_score
         if min_score > 0:
@@ -777,35 +796,35 @@ class ImproveCommand(BaseCommand):
             return None
         target_lines = existing_code.strip("\n").split("\n")
         # 裁掉 leading trivial 行，避免定位到非代码行
-        # 1. 空行
-        while target_lines and not target_lines[0].strip():
-            target_lines.pop(0)
-        # 2. 单行 docstring 标记 (非多行 docstring 内容)
-        if target_lines and target_lines[0].strip() in ('"""', "'''"):
-            if len(target_lines) == 1 or target_lines[1].strip():
-                target_lines.pop(0)
-        # 3. Docstring 内容行 (纯文本，无代码语法)
-        #    启发式：行内无括号/运算符/关键字，且不是赋值/调用语句
-        _CODE_INDICATORS = (
-            '(', ')', '[', ']', '{', '}', '=', '+', '-', '*', '/',
-            'def ', 'class ', 'if ', 'for ', 'while ', 'return ',
-            'import ', 'from ', 'try:', 'except', 'with ', 'yield ',
-        )
+        # 策略：只裁掉明确的非代码行，保留注释/关键字/运算符行
         while target_lines:
             first = target_lines[0].strip()
             if not first:
+                # 空行 → 裁掉
                 target_lines.pop(0)
                 continue
-            # 检查是否像代码行
-            looks_like_code = any(ind in first for ind in _CODE_INDICATORS)
-            # 检查是否像赋值/调用 (e.g. "x = func()" 或 "func()")
-            is_assignment_or_call = (
-                '=' in first and not first.startswith('#') or
-                '(' in first and ')' in first
-            )
-            if looks_like_code or is_assignment_or_call:
+            if first in ('"""', "'''"):
+                # 单行 docstring 标记 → 裁掉
+                target_lines.pop(0)
+                continue
+            # 保留注释行
+            if first.startswith('#'):
                 break
-            # 纯文本行 (docstring 内容) → 裁掉
+            # 保留关键字开头的行
+            if first.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'return ',
+                                  'import ', 'from ', 'try', 'except', 'with ', 'yield ',
+                                  'else', 'elif ', 'case ', 'raise ', 'pass', 'break', 'continue')):
+                break
+            # 保留包含运算符/括号的行
+            if any(c in first for c in '()[]{}=+-*/<>!&|'):
+                break
+            # 保留以冒号结尾的行（块开始，如 else:）
+            if first.endswith(':'):
+                break
+            # 保留看起来像变量/函数调用的行（包含点号或下划线）
+            if '.' in first or '_' in first:
+                break
+            # 纯文本行（docstring 内容）→ 裁掉
             target_lines.pop(0)
         target_first = target_lines[0].strip() if target_lines else ""
         if not target_first:
