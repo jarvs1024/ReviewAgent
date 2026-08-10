@@ -193,6 +193,9 @@ class Store:
                 "adoption_evidence": "ALTER TABLE suggestions ADD COLUMN adoption_evidence TEXT",
                 # Batch4: 关联到的 commit sha (Apply suggestion 时记录)
                 "applied_commit_sha": "ALTER TABLE suggestions ADD COLUMN applied_commit_sha TEXT",
+                # Batch5: 内容指纹 (existing_code normalize 后 hash), 不依赖 line,
+                # 行号变化 (如 Apply docstring 后 +1) 仍能命中 dedup.
+                "content_fingerprint": "ALTER TABLE suggestions ADD COLUMN content_fingerprint TEXT",
             }
             for column, sql in migrations.items():
                 if column not in columns:
@@ -572,6 +575,7 @@ class Store:
         importance: int | None = None,
         label: str | None = None,
         fingerprint: str | None = None,
+        content_fingerprint: str | None = None,
         cohort_key: str | None = None,
         severity_source: str | None = None,
     ) -> int:
@@ -585,9 +589,9 @@ class Store:
                     existing_code, improved_code,
                     header, severity, head_sha,
                     rule_keys, one_sentence_summary, importance, label,
-                    fingerprint, cohort_key, severity_source, posted_at,
+                    fingerprint, content_fingerprint, cohort_key, severity_source, posted_at,
                     state, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
                 """,
                 (
                     project_id, mr_iid, note_id, file_path,
@@ -599,6 +603,7 @@ class Store:
                     importance,
                     label,
                     fingerprint,
+                    content_fingerprint,
                     cohort_key,
                     severity_source,
                     _fmt_dt(_utcnow()),
@@ -674,6 +679,7 @@ class Store:
         head_sha: str = "",
         line_tolerance: int = 0,
         rule_keys: str | None = None,  # 逗号分隔字符串, 命中任一即视为同规则 dedup
+        existing_code: str = "",  # 用于 content fingerprint dedup (行号变化时仍能命中)
     ) -> bool:
         """跨次去重 (heuristic): 同 (file, line[±tolerance]) 已发布则返回 True.
 
@@ -744,6 +750,38 @@ class Store:
                     ).fetchone()
                     if row is not None:
                         return True
+            # 第三查 (方案 A): 同 MR 有 state='applied' 且 applied_commit_sha == 当前 head_sha.
+            # 语义: 当前 head_sha 是用户 Apply 某个 suggestion 触发的, 该 suggestion 所在 file:line
+            # 的老 open suggestion 实际是 Apply 副作用, 视为同问题 → 命中 dedup.
+            # 只在用户已处理过的位置生效, 不影响 force-push 真残留的重新识别.
+            if head_sha:
+                applied_by_commit = conn.execute(
+                    "SELECT 1 FROM suggestions "
+                    "WHERE project_id=? AND mr_iid=? "
+                    "  AND file_path=? AND target_line BETWEEN ? AND ? "
+                    "  AND state='applied' AND applied_commit_sha=? LIMIT 1",
+                    [project_id, mr_iid, file_path, lo, hi, head_sha],
+                ).fetchone()
+                if applied_by_commit is not None:
+                    return True
+            # 第四查 (方案 B): content fingerprint 匹配 + 已处理状态.
+            # 语义: existing_code normalize 后 hash, 行号变化 (如 Apply docstring 后 +1) 不影响.
+            # 只查 applied/dismissed/resolved (用户已处理的位置不该重发);
+            # state=open 不参与 (开放中位置留给 fingerprint dedup + head_sha 一致兜底).
+            if existing_code:
+                import hashlib as _cf_hash
+                import re as _cf_re
+                _code_norm = _cf_re.sub(r"\s+", " ", (existing_code or "").strip())
+                _content_fp = _cf_hash.sha256(_code_norm.encode("utf-8")).hexdigest()[:16]
+                content_match = conn.execute(
+                    "SELECT 1 FROM suggestions "
+                    "WHERE project_id=? AND mr_iid=? "
+                    "  AND file_path=? AND content_fingerprint=? "
+                    "  AND state IN ('applied', 'dismissed', 'resolved') LIMIT 1",
+                    [project_id, mr_iid, file_path, _content_fp],
+                ).fetchone()
+                if content_match is not None:
+                    return True
             # 兜底: head_sha 一致 + rule_keys 重叠 (处理 force-push 后代码真变了的场景).
             open_sql = (
                 "SELECT 1 FROM suggestions "

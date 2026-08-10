@@ -49,6 +49,24 @@ def _suggestion_fingerprint(file_path: str, line: int, header: str | None) -> st
     return _hashlib.sha256(
         f"{file_path}:{line}:{hdr_norm}".encode("utf-8")
     ).hexdigest()[:24]
+
+
+def _suggestion_content_fingerprint(existing_code: str) -> str:
+    """基于 existing_code normalize 后的内容指纹 (16 字符 hex).
+
+    Why 不依赖 line: Apply 一个 suggestion 会让后续行号 +N, 同一行代码
+    物理位置变化但内容不变 → 行号 fingerprint 失效, 内容 fingerprint 命中.
+
+    normalize: strip + 折叠多空白为单空格. 缩进差异视为同代码 (避免 LLM
+    给的 leading-trim 噪声破坏 fingerprint).
+
+    与 _suggestion_fingerprint 互补:
+      - _suggestion_fingerprint: 同 file:line 同类问题 (行号敏感)
+      - _suggestion_content_fingerprint: 同 existing_code 内容 (行号不敏感)
+    """
+    import re as _cf_re
+    code_norm = _cf_re.sub(r"\s+", " ", (existing_code or "").strip())
+    return _hashlib.sha256(code_norm.encode("utf-8")).hexdigest()[:16]
 from reviewagent.git.diff_lines import (
     find_nearest_valid_line,
     format_line_map_for_prompt,
@@ -1490,6 +1508,7 @@ class ImproveCommand(BaseCommand):
                         decision["new_line"], _sev, head_sha=_head_sha,
                         line_tolerance=2,
                         rule_keys=_dedup_rks or None,
+                        existing_code=normalised.get("existing_code") or "",
                     ):
                         logger.info(
                             "improve.skip_at_line project={} mr={} file={} line={} severity={} head_sha={}",
@@ -1634,6 +1653,9 @@ class ImproveCommand(BaseCommand):
                         fingerprint = _suggestion_fingerprint(
                             file_path, decision["new_line"], normalised.get("header")
                         )
+                        content_fingerprint = _suggestion_content_fingerprint(
+                            normalised.get("existing_code") or ""
+                        )
                         cohort_key = _hl.sha256(
                             f"{file_path}:{decision['new_line']}:{','.join(rule_keys)}".encode("utf-8")
                         ).hexdigest()[:24]
@@ -1654,6 +1676,7 @@ class ImproveCommand(BaseCommand):
                             one_sentence_summary=(raw.get("one_sentence_summary") or normalised.get("rationale")) if isinstance(raw, dict) else None,
                             importance=raw.get("importance") if isinstance(raw, dict) else None,
                             fingerprint=fingerprint,
+                            content_fingerprint=content_fingerprint,
                             cohort_key=cohort_key,
                         )
                         # Batch3: 同 cohort 上一代是 applied/dismissed 且当前问题
