@@ -522,6 +522,32 @@ def publish_overview(
     if gitlab is None:
         gitlab = GitLabClient()
 
+    # 0. Pre-reconcile: catch-up 任何 "用户在 UI 点 ✓ 但 GitLab 没发 webhook" 的孤儿.
+    # Why: GitLab 17.5 在用户纯 UI 操作 (点解决主题、不改代码、不评论) 时, 偶尔不发
+    # note webhook 给 note_events hook. 此前依赖 sync_resolved_from_gitlab, 但那只在
+    # webhook 真到达时才触发 — 没 webhook 就没刷新, 留下 DB 永远停在 open 的孤儿.
+    # 修法: publish_overview 顶部先扫一次 GitLab is_discussion_resolved, 把已 resolved
+    # 但 DB 还 open 的同步标 resolved, 再生成 overview body. 任何触发 publish_overview
+    # 的事件 (push, /adopt, /dismiss, ui_apply, system_resolve_webhook) 都会自动
+    # catch-up. silent helper 不会触发 publish_overview, 无递归风险.
+    try:
+        from reviewagent.commands.suggestion_actions import _scan_and_mark_resolved_silent
+        reconcile_result = _scan_and_mark_resolved_silent(
+            project_id=project_id, mr_iid=mr_iid,
+            actor_username="publish_overview_pre_reconcile",
+            adoption_source="publish_overview_reconcile",
+            reason="publish_overview pre-reconcile: 用户在 UI 点 ✓ 但无 webhook 触发",
+            validation_status="publish_overview_reconcile",
+        )
+        if reconcile_result.get("updated"):
+            logger.info(
+                "publish_overview.pre_reconcile updated={} note_ids={}",
+                reconcile_result["updated"],
+                [n[:8] for n in reconcile_result["note_ids"]],
+            )
+    except Exception as e:
+        logger.warning("publish_overview.pre_reconcile failed (non-fatal): {}", e)
+
     # 1. 可选: late detect (把误分类的 resolved+gitlab_resolve 翻回 applied)
     if run_late_detect and head_sha:
         try:

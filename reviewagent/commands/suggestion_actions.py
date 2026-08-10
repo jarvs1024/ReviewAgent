@@ -1070,16 +1070,50 @@ def sync_resolved_from_gitlab(
 
     Returns: {"scanned": int, "updated": int, "note_ids": list[str]}
     """
+    result = _scan_and_mark_resolved_silent(
+        project_id=project_id, mr_iid=mr_iid,
+        actor_username=actor_username,
+        adoption_source="gitlab_resolve",
+        reason="GitLab UI 直接解决主题 (无 push 触发)",
+        validation_status="gitlab-resolve",
+    )
+
+    if result["updated"]:
+        # 立即刷新 MR 顶部"检视汇总"
+        try:
+            publish_overview(
+                project_id=project_id, mr_iid=mr_iid,
+                inline_posted_count=0,
+                run_late_detect=False,
+            )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("sync_resolved.overview_refresh failed (non-fatal): {}", _e)
+
+    return result
+
+
+# ---------- Silent reconcile: 扫描 + 标 resolved, 不调用 publish_overview ----------
+def _scan_and_mark_resolved_silent(
+    *,
+    project_id: int,
+    mr_iid: int,
+    actor_username: str,
+    adoption_source: str,
+    reason: str,
+    validation_status: str,
+) -> dict[str, Any]:
+    """扫描 MR 全部 state=open suggestion, 把 GitLab UI 已 resolved 的标 resolved.
+
+    不调用 publish_overview (供 publish_overview 自己调用, 避免递归).
+    被两个上层函数共用:
+      - sync_resolved_from_gitlab (webhook 触发, 末尾会调 publish_overview)
+      - publish_overview.pre_reconcile (publish_overview 顶部调, 用于 catch-up
+        "用户在 UI 点 ✓ 但 GitLab 没发 webhook" 这种孤儿状态)
+
+    Returns: {"scanned": int, "updated": int, "note_ids": list[str]}
+    """
     gl = GitLabClient()
     store = get_store()
-
-    # Batch4: 一次性拉取 MR 全部 commit, 用于把 suggestion 关联到 Apply suggestion commit.
-    # 不在循环内每条拉一次 (N+1 问题). miss 时直接 pass — 旧逻辑不受影响.
-    _apply_commits: list[dict[str, Any]] = []
-    try:
-        _apply_commits = gl.list_mr_commits(project_id, mr_iid)
-    except Exception as e:  # noqa: BLE001
-        logger.info("auto_detect_applied.list_mr_commits failed (non-fatal): {}", e)
 
     open_sugs = store.list_open_suggestions(project_id=project_id, mr_iid=mr_iid)
     result: dict[str, Any] = {
@@ -1096,14 +1130,14 @@ def sync_resolved_from_gitlab(
             resolved = gl.is_discussion_resolved(project_id, mr_iid, note_id)
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                "sync_resolved.is_discussion_resolved failed note={} err={}",
+                "reconcile_resolved.is_discussion_resolved failed note={} err={}",
                 note_id[:8], e,
             )
             continue
         if resolved is True:
             store.update_suggestion_state(
                 note_id, "resolved", actor_username=actor_username,
-                adoption_source="gitlab_resolve",
+                adoption_source=adoption_source,
             )
             store.record_suggestion_action(
                 project_id=project_id, mr_iid=mr_iid,
@@ -1112,28 +1146,17 @@ def sync_resolved_from_gitlab(
                 target_line=sug.get("target_line"),
                 action="resolved",
                 actor_username=actor_username,
-                reason="GitLab UI 直接解决主题 (无 push 触发)",
-                validation_status="gitlab-resolve",
-                adoption_source="gitlab_resolve",
+                reason=reason,
+                validation_status=validation_status,
+                adoption_source=adoption_source,
             )
             result["updated"] += 1
             result["note_ids"].append(note_id)
             logger.info(
-                "sync_resolved project={} mr={} note={} file={} line={}",
-                project_id, mr_iid, note_id[:8],
+                "reconcile_resolved project={} mr={} note={} src={} file={} line={}",
+                project_id, mr_iid, note_id[:8], adoption_source,
                 sug.get("file_path"), sug.get("target_line"),
             )
-
-    if result["updated"]:
-        # 立即刷新 MR 顶部"检视汇总"
-        try:
-            publish_overview(
-                project_id=project_id, mr_iid=mr_iid,
-                inline_posted_count=0,
-                run_late_detect=False,
-            )
-        except Exception as _e:  # noqa: BLE001
-            logger.warning("sync_resolved.overview_refresh failed (non-fatal): {}", _e)
 
     return result
 
