@@ -936,7 +936,11 @@ def test_dedup_at_line_processed_state_ignores_head_sha_change(tmp_telemetry):
 
 
 def test_dedup_at_line_open_state_force_push_allows_rediscovery(tmp_telemetry):
-    """Z1+: state='open' + head_sha 不一致 → 放行 (force-push 后残留应重新识别)."""
+    """Z1+: state='open' + rule_keys 完全匹配 + head_sha 不一致 → 命中 (MR1099).
+
+    同一规则 + 同一位置 = 同一问题, 不管 head_sha 怎么变 (force-push 后不重发).
+    代码真变了由 _validate_suggestion 的 existing_code 不匹配兜底.
+    """
     from reviewagent.telemetry.store import get_store
     old_sha = "cccc2222" * 5
     new_sha = "dddd3333" * 5
@@ -951,14 +955,14 @@ def test_dedup_at_line_open_state_force_push_allows_rediscovery(tmp_telemetry):
         severity_source="rule", head_sha=old_sha,
     )
 
-    # state 仍是 open + 传新 head_sha → 应放行 (force-push 后残留)
+    # state 仍是 open + 传新 head_sha + rule_keys 完全匹配 → 命中 (force-push 后不重发)
     exists = s.suggestion_exists_at_line(
         project_id=34, mr_iid=301,
         file_path="z1/bar.py", target_line=20, severity="low",
         head_sha=new_sha, line_tolerance=0, rule_keys="R-CONST",
     )
-    assert exists is False, (
-        f"open 状态 + head_sha 不匹配 → 应放行 (force-push 残留): got {exists!r}"
+    assert exists is True, (
+        f"open 状态 + rule_keys 完全匹配 + head_sha 不匹配 → 仍命中 (同一规则同一位置=同一问题): got {exists!r}"
     )
 
 
