@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jarvs.reviewagent.reconciler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jarvs/ReviewAgent/scripts/run_reconciler.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/jarvs/ReviewAgent/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- 每 60s 跑一次. 失败不影响下次启动. -->
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jarvs/ReviewAgent</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jarvs/ReviewAgent/logs/reconciler.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jarvs/ReviewAgent/logs/reconciler.log</string>
+
+    <!-- 不开机自启 — 用户手动 launchctl load 启用. -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
