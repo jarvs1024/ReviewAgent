@@ -503,7 +503,7 @@ async def _handle_note_hook(payload: dict, enqueue_command_from_note) -> dict:
                     "请到具体建议线程内回复 `/dismiss [理由]`。",
                 )
 
-        if locks.should_skip_cooldown(note.project_id, note.mr_iid, action):
+        if locks.should_skip_suggestion_cooldown(note.project_id, note.mr_iid, action, target_disc_id):
             logger.info(
                 "webhook.skip cooldown_note project={} mr={} cmd={} actor={} note={}",
                 note.project_id, note.mr_iid, action,

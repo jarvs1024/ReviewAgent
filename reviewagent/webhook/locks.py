@@ -322,6 +322,28 @@ class MRLockManager:
             logger.warning("locks.cooldown redis failed (fail-open): {}", e)
             return False
 
+    def should_skip_suggestion_cooldown(
+        self,
+        project_id: int,
+        mr_iid: int,
+        action: str,
+        suggestion_note_id: str,
+    ) -> bool:
+        """按 (MR, action, suggestion_note_id) 维度判定 cooldown.
+
+        Why 跟 should_skip_cooldown 分开: push hook 的 cooldown 防同一 head_sha
+        重复入队合理; 但 /adopt /dismiss 是用户对单条建议的操作, 不同建议应该
+        独立计数 (60s 内连续 dismiss 两条建议不应被第二条吞掉).
+        """
+        key = f"reviewagent:cooldown:{project_id}:{mr_iid}:{action}:{suggestion_note_id}"
+        try:
+            r = self._get_redis()
+            result = r.set(key, str(int(time.time())), ex=self.cooldown, nx=True)
+            return result is None
+        except Exception as e:
+            logger.warning("locks.cooldown_suggestion redis failed (fail-open): {}", e)
+            return False
+
     # ---------- chain lock ----------
     def get_lock(self, project_id: int, mr_iid: int) -> _ChainLock:
         """获取 per-MR Redis 分布式锁 (owner-token + EX TTL).
