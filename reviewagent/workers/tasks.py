@@ -230,11 +230,11 @@ def enqueue_mr_chain(
     triggered_by: str,
     actor_username: str,
 ) -> list[str]:
-    """把 command 列表变成单个 RQ chain job（串行执行，避免并发竞态）.
+    """把 command 列表变成单个 RQ chain job（并行执行，同 MR 锁保护）.
 
     设计:
-    - 单 job 内串行执行所有命令 (describe → improve)
-    - 失败隔离: 某命令失败不影响后续命令
+    - 单 job 内并行执行所有命令 (describe + improve 无数据依赖)
+    - 失败隔离: 某命令失败不影响其他命令
     - 不同 MR 并行: 多 worker 各自处理不同 MR 的 chain job
     - 重试: 瞬态失败自动重试 2 次 (interval=10s)
 
@@ -248,7 +248,8 @@ def enqueue_mr_chain(
         mr_iid=mr_iid,
         triggered_by=triggered_by,
         actor_username=actor_username,
-        job_timeout=config.rq_worker_timeout * len(commands),
+        # 并行后 timeout 不再乘以命令数 — 取最慢命令 + 300s buffer
+        job_timeout=config.rq_worker_timeout + 300,
         result_ttl=3600,
         failure_ttl=86400,
         retry=Retry(max=2, interval=10),
@@ -376,10 +377,16 @@ def run_mr_chain(
     triggered_by: str,
     actor_username: str,
 ) -> list[dict[str, Any]]:
-    """串行执行命令链 — 单 RQ job 内按顺序跑完所有命令.
+    """执行命令链 — 多命令并行 (describe + improve 无数据依赖), 单命令直接跑.
 
-    失败隔离: 某命令失败不影响后续命令执行.
-    返回: 每个命令的执行结果列表.
+    并行安全性:
+    - describe 写 title+description, improve 写 suggestions+comment, 互不干扰
+    - 每个命令独立创建 GitLabClient / LLMResult, 无共享状态
+    - telemetry store 用 check_same_thread=False + 每次新建连接, 线程安全
+    - chain lock 仍持有整个期间, 防止同 MR 的其他 chain job 并发
+
+    失败隔离: 某命令失败不影响其他命令执行.
+    返回: 每个命令的执行结果列表 (按原始命令顺序).
 
     并发保护: 同 MR 的多个 chain job (来自多次 Apply / push) 共享一把 Redis
     锁, 强制串行执行. 避免:
@@ -399,12 +406,16 @@ def run_mr_chain(
         )
         return [{"command": "lock", "status": "failed", "error": "lock_timeout"}]
     try:
+        parallel = len(commands) > 1
         logger.info(
-            "chain.lock_acquired project={} mr={} commands={}",
+            "chain.lock_acquired project={} mr={} commands={} mode={}",
             project_id, mr_iid, list(commands),
+            "parallel" if parallel else "serial",
         )
-        results: list[dict[str, Any]] = []
-        for cmd in commands:
+
+        if not parallel:
+            # 单命令 — 直接执行
+            cmd = commands[0]
             try:
                 result = _run_command(
                     cmd,
@@ -413,14 +424,47 @@ def run_mr_chain(
                     triggered_by=triggered_by,
                     actor_username=actor_username,
                 )
-                results.append({"command": cmd, "status": "success", "result": result})
+                return [{"command": cmd, "status": "success", "result": result}]
             except Exception as e:
                 logger.error(
                     "chain.run_{} failed project={} mr={} err={}",
                     cmd, project_id, mr_iid, e,
                 )
-                results.append({"command": cmd, "status": "failed", "error": str(e)})
-        return results
+                return [{"command": cmd, "status": "failed", "error": str(e)}]
+
+        # 多命令 — 并行执行 (describe + improve 无数据依赖, 可同时跑)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results_map: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=len(commands)) as pool:
+            futures = {
+                pool.submit(
+                    _run_command, cmd,
+                    project_id=project_id,
+                    mr_iid=mr_iid,
+                    triggered_by=triggered_by,
+                    actor_username=actor_username,
+                ): cmd
+                for cmd in commands
+            }
+            for future in as_completed(futures):
+                cmd = futures[future]
+                try:
+                    result = future.result()
+                    results_map[cmd] = {
+                        "command": cmd, "status": "success", "result": result,
+                    }
+                except Exception as e:
+                    logger.error(
+                        "chain.run_{} failed project={} mr={} err={}",
+                        cmd, project_id, mr_iid, e,
+                    )
+                    results_map[cmd] = {
+                        "command": cmd, "status": "failed", "error": str(e),
+                    }
+
+        # 按原始命令顺序返回
+        return [results_map[cmd] for cmd in commands]
     finally:
         try:
             lock.release()

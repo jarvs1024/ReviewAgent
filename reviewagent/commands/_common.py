@@ -244,22 +244,6 @@ class BaseCommand:
             )
             self.ws = ws  # 让 _publish 等子类方法能拿到 worktree 路径
 
-            # 3.7. 执行前二次校验 — MR 可能在排队期间已 merged/closed
-            fresh_mr = self.gitlab.get_mr(self.project_id, self.mr_iid)
-            fresh_state = fresh_mr.get("state", "")
-            if fresh_state and fresh_state not in ("opened",):
-                logger.info(
-                    "{}.skip_state_late project={} mr={} state={}",
-                    self.COMMAND_NAME, self.project_id, self.mr_iid, fresh_state,
-                )
-                duration_ms = int((time.monotonic() - t0) * 1000)
-                _mark_finished(
-                    run_id, status="skipped", model=model_used,
-                    prompt_tokens=0, completion_tokens=0,
-                    duration_ms=duration_ms,
-                )
-                return {"status": "skipped", "reason": f"mr_state_late={fresh_state}"}
-
             # 4. 调 opencode agent（子类可覆盖 _call_agent 实现并行等策略）
             agent_result = self._call_agent(ws)
             prompt_tokens = self._last_oc_result.prompt_tokens if self._last_oc_result else 0
