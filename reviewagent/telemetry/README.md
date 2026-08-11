@@ -14,6 +14,16 @@
 | `router.py` (在 `reviewagent/api/`) | FastAPI 路由, 挂载到 `/api/v1/telemetry` |
 | `README.md` | 本文档 |
 
+### 相关模块（跨目录协作）
+
+| 文件 | 职责 |
+|---|---|
+| `reviewagent/commands/_common.py` | `publish_overview` 顶部 pre-reconcile：调 `_scan_and_mark_resolved_silent` catch-up "GitLab UI 已 resolve 但 DB 还 open" 的孤儿 |
+| `reviewagent/commands/suggestion_actions.py` | `_scan_and_mark_resolved_silent` silent helper；`sync_resolved_from_gitlab` 复用之（不调 publish_overview，避免递归） |
+| `reviewagent/reconciler/__init__.py` + `loop.py` | `reconcile_single_mr()` / `reconcile_open_mrs()` 周期 reconciler，CLI `python -m reviewagent.reconciler.loop [--project-id N]` |
+| `scripts/run_reconciler.sh` | reconciler 启动脚本 |
+| `scripts/com.jarvs.reviewagent.reconciler.plist` | launchd agent 配置 (StartInterval=60，需手动 `launchctl load`) |
+
 ## 数据契约 (`models.py`)
 
 主流程通过 dataclass 写入, 不直接碰 SQL。
@@ -40,7 +50,7 @@
 |---|---|---|
 | `project_id` / `mr_iid` | int | 归属 MR |
 | `command` | str | `describe` / `review` / `improve` |
-| `triggered_by` | str | `webhook` / `note` / `scheduled` |
+| `triggered_by` | str | `webhook` (MR hook 入队) / `push` (push hook 入队) / `note` (note hook 入队) / `adopt` (/adopt 命令路径写 run 记录) |
 | `actor_username` | str | 触发者 (note 命令为评论人, webhook 为空) |
 | `started_at` | datetime | 默认 `_now()` (UTC) |
 | `finished_at` | datetime \| None | finish_run 时由 store 写入 |
@@ -112,6 +122,12 @@
 | `list_suggestions(*, project_id, mr_iid, state, since, until, limit=100, offset=0) -> list[dict]` | 多条件分页 (created_at DESC, id DESC) |
 | `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比) |
 | `suggestion_metrics(*, project_id, since, until) -> dict` | 周报 / 仪表盘维度: `state_counts` / `severity_counts` / `action_counts` / `adoption_rate` (0~1 小数) / `adoption_pct` |
+| `supersede_stale_in_cohort(*, project_id, mr_iid, cohort_key, keep_note_id) -> list[str]` | 同 cohort 内除 keep_note_id 外所有 open/resolved/dismissed 标 superseded（cohort 归并兜底；process_adopt / mark_suggestion_applied_by_diff 末尾调一次） |
+| `supersede_suggestion(suggestion_id) -> None` | 单条 supersede（被新 suggestion 取代；写 `supersedes_note_id` + `superseded_at`） |
+| `get_latest_in_cohort_excluding(...) -> dict \| None` | cohort 内排除某 note 后取最新一条（improve 去重用） |
+| `list_latest_by_cohort(project_id, mr_iid) -> list[dict]` | 每个 cohort_key (fallback 到 note_id) 只返回最新一条，排除 superseded（Batch2：build_overview_body 同问题被 V1/V2/V3 重复发布时不再各自算一个状态） |
+| `count_superseded_in_mr(*, project_id, mr_iid) -> int` | 显式 superseded 数（`supersede_suggestion` 触发） |
+| `count_hidden_by_cohort(*, project_id, mr_iid) -> int` | cohort 归并隐藏的旧记录数（list_latest_by_cohort 中 row_number > 1） |
 
 ### Action (`suggestion_actions`)
 
@@ -129,6 +145,25 @@
 |---|---|
 | `save_agent_output_fail(text, agent)` | 写 `agent_failures` 表前 500 字符 (调试用, 无 API 端点) |
 | `summary(*, since, until) -> dict` | 周报 / 仪表盘聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens}}` / `by_status` / `by_day` / `top_mrs` (前 10) |
+
+## 状态 / 来源标签映射 (`router.py`)
+
+后端在 `/mr/.../suggestions` 响应里额外加 `state_label` 和 `adoption_source_label` 字段，前端直接展示中文标签：
+
+| 内部值 | state_label | adoption_source_label |
+|---|---|---|
+| `open` | 待处理 | — |
+| `applied` | 已采纳 | — |
+| `dismissed` | 已忽略 | — |
+| `resolved` | 已关闭（未分类） | — |
+| `superseded` | 已过期 | — |
+| `ui_apply` | — | 应用建议 |
+| `manual_change` | — | 手动修改 |
+| `adopt_command` | — | /adopt |
+| `unknown` | — | 历史数据 |
+| `gitlab_resolve` | — | GitLab 直接解决主题 |
+
+未在表内的 `adoption_source` (如 `late_detect` / `periodic_reconcile`) 返回 `None`，前端走兜底展示。
 
 ## Schema
 
@@ -200,12 +235,25 @@
 | `label` | text | improve prompt 给的标签 |
 | `severity_source` | text | rule / pattern / llm 来源 (预留字段, 当前未写入) |
 | `fingerprint` | text | 单条 suggestion 指纹 (跨次去重主键) |
+| `content_fingerprint` | text | existing_code normalize 后 hash，行号变化 (如 Apply docstring 后 +1) 仍能命中 dedup (Batch5) |
 | `cohort_key` | text | 同类 bug 聚合键 (跨次去重兜底) |
-| `posted_at` / `created_at` / `updated_at` | timestamp | 发布时间 / DB 创建时间 / 最后更新 |
+| `cohort_generation` | int | cohort 代际号（默认 1）；跨多轮重复发布区分代际 (Batch2/3) |
+| `supersedes_note_id` | text | 本条 suggestion 取代的旧 note_id (Batch2/3) |
+| `superseded_at` | timestamp | 何时被取代 (Batch2/3) |
+| `adoption_evidence` | text | 采纳证据等级 (Batch2：`exact_match` / `strict_token` / `region_changed` / `late_detect` 等) |
+| `applied_commit_sha` | text | 关联到的 commit sha (Batch4: Apply suggestion 时记录，便于审计) |
+| `posted_at` / `created_at` / `updated_at` / `applied_at` / `dismissed_at` / `resolved_at` | timestamp | 发布时间 / DB 创建时间 / 最后更新 / 采纳时间 / 忽略时间 / 解决时间 |
 
 索引: `idx_sug_project_mr` on `(project_id, mr_iid)`, `idx_sug_note_id` on `note_id`, `idx_sug_state` on `state`, `idx_sug_cohort` on `(mr_iid, cohort_key)`
 
-注: `dismissed_*` / `rule_keys` / `one_sentence_summary` / `importance` / `score` / `fingerprint` / `cohort_key` / `severity_source` / `label` / `posted_at` / `adoption_source` / `resolved_*` 都是在线 ALTER TABLE 迁移加列, 旧库自动补齐。
+注: 以下列都是在线 ALTER TABLE 迁移加的, 旧库自动补齐:
+
+- `dismissed_*` / `rule_keys` / `one_sentence_summary` / `importance` / `score` / `label` / `severity_source` / `posted_at` / `adoption_source` / `resolved_*`
+- `fingerprint` / `cohort_key` — Z1+ 跨次去重维度
+- `content_fingerprint` — Batch5, 行号变化场景
+- `cohort_generation` / `supersedes_note_id` / `superseded_at` — Batch2/3 cohort 代际
+- `adoption_evidence` — Batch2 采纳证据等级
+- `applied_commit_sha` — Batch4 Apply suggestion 关联 commit
 
 ### `suggestion_actions` — /adopt /dismiss 事件流
 
@@ -219,8 +267,8 @@
 | `action` | text | `adopted` / `dismissed` |
 | `actor_username` | text | 操作人 |
 | `reason` | text | 原因 (dismiss 时用户填, adopt 走 `validation_status`) |
-| `validation_status` | text | `/adopt`: `ok` / `target-unchanged` / `content-unavailable` / `gitlab-ui-apply` / `ui-apply` |
-| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` (按 `validation_status` 反推) |
+| `validation_status` | text | `/adopt` 路径：`ok` / `target-unchanged` / `content-unavailable` / `gitlab-ui-apply` / `ui-apply`；其他：`gitlab-resolve` (GitLab 直接解决主题) / `late-detect-apply` (late_detect 兜底翻 applied) / `same-head` (head_sha 一致但行号偏移) / `already-{state}` (重复 /adopt /dismiss 已记录) / `publish_overview_reconcile` (顶部 pre-reconcile) / `periodic_reconcile` (周期 reconciler) |
+| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `periodic_reconcile` (按 `validation_status` 反推) |
 | `head_sha_posted` | text | `/adopt` 校验: suggestion 发布时的 head_sha |
 | `head_sha_current` | text | `/adopt` 校验: 当前 head_sha |
 | `created_at` | timestamp | 事件时间 |
@@ -266,7 +314,7 @@
 | GET | `/metrics/severity` | severity 维度计数 |
 | GET | `/metrics/rules` | **当前按 severity 兼容分组返回** (前端 dashboard 直接消费), 不是真正按 `rule_keys` 聚合 — `suggestion_metrics` 里没有 rule_key 聚合路径 |
 | GET | `/metrics/authors` | 按 `author_sticky` 聚合的 MR 活跃度 (没有 author 维度的 suggestion / run 计数) |
-| GET | `/weekly-reports` | 列出 `data/weekly_reports/weekly-*.json` (`project_id` 过滤按 JSON 内容里的 project_id; `limit` 默认 20) |
+| GET | `/weekly-reports` | 列出 `data/weekly_reports/weekly-*.json`；`project_id` 过滤按 JSON 内容里的 `project_id` 字段；`limit` 默认 20 |
 | GET | `/weekly-reports/{name}` | 读取单个周报 JSON (防 `../` 路径穿越) |
 
 ## 关键行为
@@ -360,16 +408,51 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 
 ## 端到端验证
 
-完整测试 (`pytest tests/`):
+完整测试 (`pytest tests/`，当前 386 passed / 3 failed — 3 个失败均为 pre-existing 与 telemetry 无关):
+
+**核心 telemetry / dedup / 状态机**
 
 - `tests/test_improve_alignment.py` — 42 个对齐 / 缩进 / 多行替换测试
 - `tests/test_suggestion_actions.py` — 16 个 /adopt /dismiss 测试
 - `tests/test_telemetry_endpoints.py` — 5 个端点集成测试 (record_suggestion 扩展字段、dismissed_reason、by-rule 聚合、adoption_source 写入与 label)
+- `tests/test_metrics_endpoint.py` — `/metrics/*` 端点
 - `tests/test_last_activity_at.py` — 6 个 `last_activity_at` MAX 语义 / 回填测试
 - `tests/test_supersede_stale_suggestions.py` — 6 个 head_sha 变化 supersede 测试
+- `tests/test_supersede_stale_in_cohort.py` — cohort 维度 supersede
 - `tests/test_auto_detect_applied.py` — auto_detect_applied 主流程
 - `tests/test_auto_detect_race.py` — mid-scan dismiss race
 - `tests/test_auto_detect_late_apply.py` — 7 个 late_detect 把 `state='resolved' + resolution_source='gitlab_resolve'` 翻回 applied (含 race 修复、region_changed、token_fallback)
+
+**Batch / 增量修复回归**
+
+- `tests/test_publish_overview_reconcile.py` — pre-reconcile + silent helper 行为 (7)
+- `tests/test_sync_resolved_regression.py` — silent helper 重构后 sync_resolved 行为不变 (3)
+- `tests/test_webhook_handler_fallback.py` — webhook handler 异常 fallback (4, commit 491a16f 回归)
+- `tests/test_reconciler_loop.py` — reconciler 行为 (silent scan / 错误隔离 / 幂等, 7)
+- `tests/test_reconciler_plist.py` — launchd plist 解析 + 配置正确 (8)
+- `tests/test_process_adopt.py` — /adopt 完整流程 (7)
+- `tests/test_process_dismiss.py` — /dismiss 完整流程 (5)
+- `tests/test_build_overview_body.py` — 检视汇总 markdown 生成 (10)
+- `tests/test_dedup_store.py` — Store dedup (fingerprint + line, 16)
+- `tests/test_cohort_dedup.py` — cohort 聚合 (list_latest_by_cohort, 8)
+- `tests/test_dedup_general.py` — 通用 dedup 行为
+- `tests/test_adopt_race_recovery.py` — /adopt 并发竞态恢复
+- `tests/test_apply_risk_check.py` — Apply 风险校验
+- `tests/test_command_chain_order.py` — 命令链顺序 (describe → improve)
+- `tests/test_bot_loop_detection.py` — bot 循环检视防护
+- `tests/test_parse_dt_formats.py` — GitLab 时间格式兼容
+- `tests/test_resolve_section_title.py` — 检视汇总标题解析
+- `tests/test_telemetry_section_render.py` — 周报 section 渲染
+- `tests/test_rule_translate_xxx.py` — rule_keys 转换
+- `tests/test_extract_action_compat.py` — /adopt /dismiss 提取兼容
+- `tests/test_sync_qoder_agents.py` — qodercli agent 同步
+- `tests/test_verify_e2e_smoke.py` — 端到端 smoke
+- `tests/test_webhook_diff_head_lock.py` — webhook diff head 锁
+- `tests/test_worker_runtime.py` — RQ worker 运行时
+- `tests/test_llm_adapter.py` + `test_llm_markdown_unwrap.py` — LLM 调用兼容
+- `tests/test_qodercli_plan_a_flags.py` + `test_qodercli_subprocess_fallback.py` — qodercli 路径
+- `tests/test_lock_ttl_and_fence.py` — 分布式锁
+- `tests/test_config_provider_defaults.py` — 配置默认值
 
 e2e 流程 (基于 `codex/telemetry-e2e-20260730-224254` MR !134):
 
@@ -399,6 +482,62 @@ curl http://127.0.0.1:5052/api/v1/telemetry/dismissals/by-rule?project_id=34
 curl http://127.0.0.1:5052/api/v1/telemetry/mrs/34/134/dismissals
 curl http://127.0.0.1:5052/api/v1/telemetry/weekly-reports
 ```
+
+## Reconciler（周期性安全网）
+
+GitLab 17.5 偶尔不发 "marked this discussion as resolved" webhook 给 note_events hook。`publish_overview` 顶部 pre-reconcile 已覆盖 "click 后还有 push /adopt /dismiss 等其他事件" 的场景；但 "纯 click-only 无任何后续事件" 的极端场景下没有事件触发 publish_overview，DB 会永远停在 `state='open'`。
+
+两层防御：
+
+1. **publish_overview pre-reconcile**（`commands/_common.py:520` 左右）—— 任何 `improve/adopt/dismiss/ui_apply/system_resolve` 路径调 publish_overview 前，先扫一遍 GitLab 把已 resolve 但 DB 还 open 的孤儿 catch-up
+2. **周期 reconciler**（`reconciler/loop.py`）—— launchd StartInterval=60 秒扫一次全部 bot 跟踪的 open MR
+
+### API
+
+```python
+from reviewagent.reconciler import reconcile_single_mr, reconcile_open_mrs
+
+# 单 MR 扫描 (测试 / 手动跑)
+result = reconcile_single_mr(project_id=34, mr_iid=247)
+# {
+#   "scanned": int,            # 扫了几条 open suggestions
+#   "updated": int,            # 翻了几条 → resolved
+#   "note_ids": list[str],     # 被翻的 note_id
+#   "overview_refreshed": bool # 顶部汇总是否已刷新
+# }
+
+# 全量扫描
+result = reconcile_open_mrs(project_id=None)  # None = 所有 bot 跟踪的 project
+# {
+#   "total_mrs": int,
+#   "total_updated": int,
+#   "mrs_updated": [{"project_id", "mr_iid", "scanned", "updated", "note_ids"}, ...],
+#   "duration_s": float
+# }
+```
+
+### CLI
+
+```bash
+# 手动跑一次
+python -m reviewagent.reconciler.loop --project-id 34
+
+# 全量
+python -m reviewagent.reconciler.loop
+```
+
+### launchd 注册
+
+```bash
+cp scripts/com.jarvs.reviewagent.reconciler.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.jarvs.reviewagent.reconciler.plist
+```
+
+启动后日志写到 `/Users/jarvs/ReviewAgent/logs/reconciler.log`；幂等，连跑两次第二次 `updated=0`。
+
+### 故障隔离
+
+单个 MR reconcile 失败不影响其他 MR（每个 MR 独立 try/except）；`publish_overview` 失败仅 warning，不阻塞 DB 更新。
 
 ## 与 pr-agent 的差异与补全
 
