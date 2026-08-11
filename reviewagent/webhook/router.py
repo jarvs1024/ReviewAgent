@@ -137,6 +137,12 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         _metric_inc("reviewagent_webhook_skipped_total", reason=f"state_{mr.state}")
         return {"status": "skipped", "reason": f"state={mr.state}", "note": "state_updated"}
 
+    # 3.5 草稿 MR 不触发 review (等用户标记为 Ready 后再触发)
+    if mr.draft:
+        logger.info("webhook.skip draft project={} mr={} title={}", mr.project_id, mr.mr_iid, mr.title[:60])
+        _metric_inc("reviewagent_webhook_skipped_total", reason="draft_mr")
+        return {"status": "skipped", "reason": "draft_mr"}
+
     # 4. 处理不同 action
     if mr.action == "update":
         # update 事件：仅当有新 commit 时才触发 push_commands

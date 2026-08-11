@@ -28,6 +28,7 @@ class MRHookPayload:
     target_branch: str
     state: str
     head_sha: str = ""          # diff_refs.head_sha — 用于判断是否有新 commit
+    draft: bool = False         # 草稿 MR (GitLab object_attributes.draft)
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "MRHookPayload":
@@ -51,6 +52,7 @@ class MRHookPayload:
             target_branch=obj.get("target_branch", ""),
             state=obj.get("state", "opened"),
             head_sha=head_sha,
+            draft=bool(obj.get("draft", False)),
         )
 
 
