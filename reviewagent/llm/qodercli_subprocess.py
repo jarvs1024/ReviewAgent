@@ -418,6 +418,12 @@ def run_subprocess(
     stop_reason = top.get("stop_reason")
     model_id = top.get("modelID") or model_name
 
+    # Log usage for all calls to help diagnose token tracking issues
+    logger.info(
+        "qodercli.usage agent={} model={} stop_reason={} usage={} pt={} ct={}",
+        agent, model_id, stop_reason, usage, prompt_tokens, completion_tokens,
+    )
+
     if stop_reason == "max_tokens":
         logger.warning(
             "qodercli output truncated (stop_reason=max_tokens); "

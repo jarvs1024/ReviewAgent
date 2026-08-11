@@ -541,7 +541,7 @@ class ImproveCommand(BaseCommand):
             "- 函数签名变了但 caller 没传新参数 / 类型不匹配 → 产 suggestion, `label: cross-file impact`\n"
             "- 常量改了引用方没同步 → 产 suggestion, `label: cross-file impact`\n"
             "- 删除/重命名的函数别处还在用 → 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n"
-            "- 跨文件影响类问题**不要求先命中 R-XXX 19 类**, 命中即产 suggestion\n"
+            "- 跨文件影响类问题**不要求先命中 R-XXX 20 类**, 命中即产 suggestion\n"
             "- `rationale` 必须以 `R-OTHER-IMPACT:<简短描述>` 开头 (例 `R-OTHER-IMPACT:caller_param` / `R-OTHER-IMPACT:schema_drift` / `R-OTHER-IMPACT:import_path` / `R-OTHER-IMPACT:fixture_break`)\n"
             "- **严格只用于跨文件影响** — 同文件内的资源/异常/循环问题应归 R-RES / R-LOOP / R-ERR 等, 不要错归 R-OTHER-IMPACT\n\n"
         )
@@ -584,7 +584,7 @@ class ImproveCommand(BaseCommand):
 
         # 通用规则清单 — **inline 进 chunk prompt**, 不再引用 system prompt.
         # Why: chunk prompt 跟 system prompt 分开发给 LLM, 引用式提示会被
-        #      LLM 跳过或被长上下文稀释注意力 → R-XXX 19 类基本不被识别.
+        #      LLM 跳过或被长上下文稀释注意力 → R-XXX 20 类基本不被识别.
         #      把清单 inline 后, LLM 能直接看到每条规则的命中条件.
         from reviewagent.prompts.loader import load_block as _load_block
         _general_rules_block = _load_block("_general_rules_block")
