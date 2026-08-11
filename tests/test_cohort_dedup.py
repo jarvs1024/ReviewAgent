@@ -166,3 +166,86 @@ def test_cohort_dedup_with_mixed_severities(tmp_telemetry):
     assert len(result) == 1
     # 最新的 mix-2 (severity=low) 被选中
     assert result[0]["note_id"] == "mix-2"
+
+
+# ============================================================
+# Batch6 / MR263 回归: terminal state 冲突时不 dedup
+# ============================================================
+
+def test_list_latest_by_cohort_preserves_conflicting_terminal_states(tmp_telemetry):
+    """同 cohort 内 applied + dismissed 冲突 → 两个 terminal 都保留.
+
+    Background (MR263):
+        用户 /dismiss 特色班 关闭了一条 HIGH, 但同 cohort 里有更新一条被 late_detect
+        翻 applied. 修复前 list_latest_by_cohort 按 id DESC 只取最新, dismissed 被隐藏,
+        检视汇总 "已忽略" 显示 0 但实际有 1. 修复后 terminal 冲突时全部保留.
+    """
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    # 同 cohort "ck-Conflict" 3 条, 状态分布:
+    _seed(s, note_id="cf-1", cohort_key="ck-Conflict", state="open")          # 最旧, 待处理
+    _seed(s, note_id="cf-2", cohort_key="ck-Conflict", state="dismissed")     # 用户 dismiss
+    _seed(s, note_id="cf-3", cohort_key="ck-Conflict", state="applied")       # 最新, late_detect
+
+    result = s.list_latest_by_cohort(project_id=34, mr_iid=263)
+
+    # 期望: cf-3 (latest) + cf-2 (terminal conflict 保留) = 2 条
+    # cf-1 (open) 被隐藏 (terminal 冲突里 open 不算 terminal, 不保留)
+    note_ids = {r["note_id"] for r in result}
+    assert note_ids == {"cf-2", "cf-3"}, (
+        f"expected dismissed + applied both preserved, got {note_ids}"
+    )
+
+
+def test_list_latest_by_cohort_dedupes_when_same_terminal_state(tmp_telemetry):
+    """同 cohort 多条同 terminal state → 仍然只取最新 (普通 dedup 不受影响)."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(s, note_id="same-1", cohort_key="ck-Same", state="dismissed")
+    _seed(s, note_id="same-2", cohort_key="ck-Same", state="dismissed")
+    _seed(s, note_id="same-3", cohort_key="ck-Same", state="dismissed")
+
+    result = s.list_latest_by_cohort(project_id=34, mr_iid=263)
+    assert len(result) == 1
+    assert result[0]["note_id"] == "same-3"
+
+
+def test_list_latest_by_cohort_dedupes_when_all_open(tmp_telemetry):
+    """同 cohort 多条全部 open → 仍然只取最新."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(s, note_id="ao-1", cohort_key="ck-AllOpen", state="open")
+    _seed(s, note_id="ao-2", cohort_key="ck-AllOpen", state="open")
+    _seed(s, note_id="ao-3", cohort_key="ck-AllOpen", state="open")
+
+    result = s.list_latest_by_cohort(project_id=34, mr_iid=263)
+    assert len(result) == 1
+    assert result[0]["note_id"] == "ao-3"
+
+
+def test_list_latest_by_cohort_preserves_three_terminal_conflict(tmp_telemetry):
+    """同 cohort 三种 terminal state (applied + dismissed + resolved) → 全保留."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(s, note_id="tri-1", cohort_key="ck-Tri", state="dismissed")
+    _seed(s, note_id="tri-2", cohort_key="ck-Tri", state="applied")
+    _seed(s, note_id="tri-3", cohort_key="ck-Tri", state="resolved")
+
+    result = s.list_latest_by_cohort(project_id=34, mr_iid=263)
+    note_ids = {r["note_id"] for r in result}
+    # latest (tri-3) + 所有 terminal (3 条全 terminal) = 3 条
+    assert note_ids == {"tri-1", "tri-2", "tri-3"}, (
+        f"expected all 3 terminal states preserved, got {note_ids}"
+    )
+
+
+def test_list_latest_by_cohort_open_does_not_trigger_conflict(tmp_telemetry):
+    """open 不算 terminal, applied + open 不算冲突, 只取最新."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(s, note_id="oa-1", cohort_key="ck-OpenApp", state="open")
+    _seed(s, note_id="oa-2", cohort_key="ck-OpenApp", state="applied")
+
+    result = s.list_latest_by_cohort(project_id=34, mr_iid=263)
+    assert len(result) == 1
+    assert result[0]["note_id"] == "oa-2"  # 只取最新, 没有 conflict

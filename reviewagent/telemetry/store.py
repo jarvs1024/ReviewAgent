@@ -1186,23 +1186,60 @@ class Store:
 
         Batch2: 用于 build_overview_body 汇总 — 同问题被 V1/V2/V3 重复发布时,
         不再各自算一个状态, 只取最新一条参与统计.
+
+        Batch6 / MR263 修正: 当 cohort 内存在多种**不同的 terminal state**
+        (applied / dismissed / resolved 之间的冲突), 所有 terminal state 的 sibling
+        都保留, 不按 id DESC 只取最新一条.
+
+        Why:
+            用户对某版本做 dismiss 时, 若同 cohort 里有更新一版被 late_detect 翻成
+            applied, 当前 id DESC 取最新会让 dismissed 被 applied 覆盖, 检视汇总里
+            "已忽略" 计数漏掉. 实际语义: 用户对不同版本做了不同明确动作, 都该可见.
+
+        保留规则:
+        - 全部 open: 只取最新 (普通重复发布场景)
+        - 全部同 terminal state: 只取最新 (普通 dedup)
+        - 多种 terminal state 冲突: 全部保留 (用户动作不互盖)
         """
-        sql = """
-        WITH ranked AS (
+        # terminal = user/bot 明确决定过的状态. open 不算 (待处理不算决定).
+        terminal_states = ("applied", "dismissed", "resolved")
+        placeholders = ",".join("?" for _ in terminal_states)
+        # SQLite 不支持 DISTINCT in window functions, 用单独 CTE 聚合再 LEFT JOIN.
+        sql = f"""
+        WITH siblings AS (
             SELECT s.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY project_id, mr_iid,
-                                    COALESCE(NULLIF(cohort_key, ''), note_id)
-                       ORDER BY id DESC
-                   ) AS row_number
+                   COALESCE(NULLIF(s.cohort_key, ''), s.note_id) AS ck
             FROM suggestions s
             WHERE s.project_id = ? AND s.mr_iid = ?
               AND COALESCE(s.state, 'open') != 'superseded'
+        ),
+        cohort_terminal_count AS (
+            SELECT ck, COUNT(DISTINCT state) AS n_terminal_states
+            FROM siblings
+            WHERE state IN ({placeholders})
+            GROUP BY ck
+        ),
+        ranked AS (
+            SELECT s.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY s.project_id, s.mr_iid, s.ck
+                       ORDER BY s.id DESC
+                   ) AS row_number,
+                   COALESCE(c.n_terminal_states, 0) AS n_terminal_states
+            FROM siblings s
+            LEFT JOIN cohort_terminal_count c ON s.ck = c.ck
         )
-        SELECT * FROM ranked WHERE row_number = 1
+        -- row_number=1 (最新一条) OR (cohort 有 terminal 冲突 且 本条是 terminal) → 保留
+        SELECT * FROM ranked
+        WHERE row_number = 1
+           OR (n_terminal_states > 1 AND state IN ({placeholders}))
         """
+        # params 顺序: siblings WHERE (project_id, mr_iid), cohort_terminal_count IN
+        # (terminal_states x3), ranked WHERE 复用 siblings 参数, 终态 IN (terminal x3).
+        # 但 SQL 里 cohort_terminal_count 用的是 {placeholders} 一次, ranked 终态判断又用一次.
+        params: list = [project_id, mr_iid] + list(terminal_states) + list(terminal_states)
         with self._conn() as conn:
-            rows = conn.execute(sql, (project_id, mr_iid)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def count_superseded_in_mr(self, *, project_id: int, mr_iid: int) -> int:
