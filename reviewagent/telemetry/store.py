@@ -940,15 +940,30 @@ class Store:
         adoption_source: str | None = None,
         adoption_evidence: str | None = None,
         applied_commit_sha: str | None = None,
-    ) -> None:
+        expected_states: tuple[str, ...] | None = None,
+    ) -> bool:
         """标记 suggestion 为 applied / dismissed / resolved / superseded.
 
         Batch1/4: 增加 adoption_evidence (采纳证据等级) + applied_commit_sha
         (关联 commit) 写库, 便于审计.
+
+        Batch7 / MR264 修复: 增加 expected_states 原子化 state guard.
+            传 expected_states 时, SQL WHERE 会带 state IN (...), 防止并发 race
+            (用户在 UI /dismiss 时, pre_reconcile 的陈旧 snapshot 不再覆盖 dismissed).
+            返回 bool: True = 实际更新, False = state 不在 expected 内 (并发修改, 跳过).
+
+        Returns: bool, True if rowcount > 0
         """
+        state_filter_sql = ""
+        state_filter_params: tuple = ()
+        if expected_states:
+            placeholders = ",".join("?" for _ in expected_states)
+            state_filter_sql = f" AND state IN ({placeholders})"
+            state_filter_params = tuple(expected_states)
+
         with self._conn() as conn:
-            conn.execute(
-                """
+            cur = conn.execute(
+                f"""
                 UPDATE suggestions
                 SET state = ?, updated_at = ?,
                     applied_at = CASE WHEN ? = 'applied' THEN ? ELSE applied_at END,
@@ -966,7 +981,7 @@ class Store:
                     ,resolved_by = CASE WHEN ? = 'resolved' THEN ? ELSE resolved_by END
                     ,resolution_source = CASE WHEN ? = 'resolved' AND ? IS NOT NULL
                                               THEN ? ELSE resolution_source END
-                WHERE note_id = ?
+                WHERE note_id = ?{state_filter_sql}
                 """,
                 (state, _fmt_dt(_utcnow()),
                  state, _fmt_dt(_utcnow()),
@@ -979,8 +994,9 @@ class Store:
                  state, _fmt_dt(_utcnow()),
                  state, actor_username,
                  state, adoption_source, adoption_source,
-                 note_id),
+                 note_id) + state_filter_params,
             )
+            return cur.rowcount > 0
 
     def supersede_stale_open_suggestions(
         self,

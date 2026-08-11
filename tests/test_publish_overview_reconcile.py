@@ -277,3 +277,148 @@ def test_publish_overview_does_not_recurse():
     assert "publish_overview" not in body_src, (
         f"silent helper 函数体内含 publish_overview — 会导致递归: {body_src}"
     )
+
+
+# ============================================================
+# Batch7 / MR264 回归: pre_reconcile 不覆盖 user 已 terminal 状态
+# ============================================================
+
+def test_scan_resolved_does_not_overwrite_dismissed_state(tmp_telemetry, monkeypatch):
+    """MR264 回归: pre_reconcile 抓 open 快照后, 用户 /dismiss 把 state 改成 dismissed,
+    pre_reconcile 的陈旧 snapshot 不应该覆盖 dismissed → resolved.
+
+    Why: 之前 update_suggestion_state 没 state guard, 任何并发修改都会被覆盖.
+    修复: update_suggestion_state(expected_states=('open',)) 加 SQL WHERE state IN,
+    原子化保护. rowcount=0 → 跳过, 不调用 record_suggestion_action.
+    """
+    from reviewagent.telemetry.store import get_store
+    from reviewagent.commands.suggestion_actions import _scan_and_mark_resolved_silent
+
+    s = get_store()
+    # 种 1 条 state=open 的 suggestion
+    s.record_suggestion(
+        project_id=34, mr_iid=264,
+        note_id="mr264-note-A",
+        file_path="x.py", target_line=10,
+        existing_code="a", improved_code="b",
+        head_sha="abc",
+        cohort_key="ck-A",
+    )
+
+    # 模拟 "is_discussion_resolved 返回 True", 但用户在 snapshot 之后 /dismiss
+    import reviewagent.commands.suggestion_actions as sa
+    original_gl = sa.GitLabClient
+
+    class FakeGL:
+        def is_discussion_resolved(self, project_id, mr_iid, note_id):
+            # 返回 True 触发 pre_reconcile 想标 resolved, 但 DB state 已 dismissed
+            # → expected_states=('open',) 应该让 SQL 命中 0 行
+            return True
+
+    monkeypatch.setattr(sa, "GitLabClient", lambda: FakeGL())
+
+    # 模拟并发 race: pre_reconcile 抓 snapshot 之前 user 已 /dismiss
+    s.update_suggestion_state(
+        "mr264-note-A", "dismissed",
+        actor_username="user@user", dismissed_reason="用户已 dismiss",
+    )
+
+    # 调用 pre_reconcile — 应该跳过 dismissed 那条
+    result = _scan_and_mark_resolved_silent(
+        project_id=34, mr_iid=264,
+        actor_username="publish_overview_pre_reconcile",
+        adoption_source="publish_overview_reconcile",
+        reason="test",
+        validation_status="publish_overview_reconcile",
+    )
+
+    # 期望: scanned=0 (state=open 已无), updated=0
+    assert result["scanned"] == 0, f"expected scanned=0, got {result['scanned']}"
+    assert result["updated"] == 0, f"expected updated=0, got {result['updated']}"
+
+    # 验证: DB state 仍为 dismissed, 没被覆盖
+    final = s.get_suggestion_by_note_id("mr264-note-A")
+    assert final is not None
+    assert final["state"] == "dismissed", (
+        f"expected dismissed, got {final['state']} — MR264 race condition regression!"
+    )
+    assert final.get("dismissed_reason") == "用户已 dismiss"
+
+
+def test_scan_resolved_skips_already_applied(tmp_telemetry, monkeypatch):
+    """类似 dismissed 测试 — pre_reconcile 不应覆盖 applied."""
+    from reviewagent.telemetry.store import get_store
+    from reviewagent.commands.suggestion_actions import _scan_and_mark_resolved_silent
+    import reviewagent.commands.suggestion_actions as sa
+
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=264,
+        note_id="mr264-note-B",
+        file_path="x.py", target_line=10,
+        existing_code="a", improved_code="b",
+        head_sha="abc",
+        cohort_key="ck-B",
+    )
+    # 用户 /adopt 后 state=applied
+    s.update_suggestion_state(
+        "mr264-note-B", "applied",
+        actor_username="user@user",
+        adoption_source="adopt_command",
+    )
+
+    class FakeGL:
+        def is_discussion_resolved(self, project_id, mr_iid, note_id):
+            return True
+
+    monkeypatch.setattr(sa, "GitLabClient", lambda: FakeGL())
+
+    result = _scan_and_mark_resolved_silent(
+        project_id=34, mr_iid=264,
+        actor_username="publish_overview_pre_reconcile",
+        adoption_source="publish_overview_reconcile",
+        reason="test",
+        validation_status="publish_overview_reconcile",
+    )
+
+    assert result["updated"] == 0
+    final = s.get_suggestion_by_note_id("mr264-note-B")
+    assert final["state"] == "applied", f"expected applied, got {final['state']}"
+
+
+def test_scan_resolved_still_works_for_genuine_orphans(tmp_telemetry, monkeypatch):
+    """真正的孤儿 (GitLab 已 resolve, DB 还 open) 仍能正常 catch-up."""
+    from reviewagent.telemetry.store import get_store
+    from reviewagent.commands.suggestion_actions import _scan_and_mark_resolved_silent
+    import reviewagent.commands.suggestion_actions as sa
+
+    s = get_store()
+    s.record_suggestion(
+        project_id=34, mr_iid=264,
+        note_id="mr264-orphan",
+        file_path="x.py", target_line=10,
+        existing_code="a", improved_code="b",
+        head_sha="abc",
+        cohort_key="ck-orphan",
+    )
+
+    class FakeGL:
+        def is_discussion_resolved(self, project_id, mr_iid, note_id):
+            return True
+
+    monkeypatch.setattr(sa, "GitLabClient", lambda: FakeGL())
+
+    result = _scan_and_mark_resolved_silent(
+        project_id=34, mr_iid=264,
+        actor_username="publish_overview_pre_reconcile",
+        adoption_source="publish_overview_reconcile",
+        reason="test",
+        validation_status="publish_overview_reconcile",
+    )
+
+    assert result["scanned"] == 1
+    assert result["updated"] == 1
+    assert "mr264-orphan" in result["note_ids"]
+
+    final = s.get_suggestion_by_note_id("mr264-orphan")
+    assert final["state"] == "resolved"

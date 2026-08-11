@@ -1135,10 +1135,22 @@ def _scan_and_mark_resolved_silent(
             )
             continue
         if resolved is True:
-            store.update_suggestion_state(
+            # expected_states=("open",) 原子化 state guard:
+            # 若用户 /dismiss 在 list_open_suggestions → update_suggestion_state 之间
+            # 把 state 改成 dismissed, SQL WHERE state IN ('open') 命中 0 行 → 跳过,
+            # 不会覆盖 dismissed → resolved (MR264 回归修复).
+            updated = store.update_suggestion_state(
                 note_id, "resolved", actor_username=actor_username,
                 adoption_source=adoption_source,
+                expected_states=("open",),
             )
+            if not updated:
+                logger.info(
+                    "reconcile_resolved skipped (state changed) project={} mr={} note={} "
+                    "src={} — likely dismissed/applied during scan",
+                    project_id, mr_iid, note_id[:8], adoption_source,
+                )
+                continue
             store.record_suggestion_action(
                 project_id=project_id, mr_iid=mr_iid,
                 suggestion_note_id=note_id,
