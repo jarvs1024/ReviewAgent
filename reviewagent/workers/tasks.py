@@ -19,8 +19,12 @@ import redis
 from rq import Queue, Retry
 
 from reviewagent.config import config
-from reviewagent.logging_setup import logger
+from reviewagent.logging_setup import logger, setup_logging
 from reviewagent.webhook.locks import locks
+
+# RQ worker 进程启动时配置日志 (文件轮转 + stderr)
+# main.py 只覆盖 webhook (uvicorn) 路径; worker 走这里
+setup_logging()
 
 
 # ---------- Redis / Queue ----------

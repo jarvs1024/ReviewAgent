@@ -1,38 +1,66 @@
 #!/usr/bin/env bash
-# ReviewAgent 服务管理脚本 (86 服务器).
+# ReviewAgent 服务管理脚本 (ci-runner / 25 服务器).
 #
 # 用法:
 #   bash scripts/services_ops.sh <command>
 #
 # 命令:
-#   start     启动所有服务
-#   stop      停止所有服务
-#   restart   重启所有服务
-#   status    查看所有服务状态 (默认, 含 PID / uptime / 最近日志)
-#   logs      实时跟踪所有服务日志 (类似 tail -f)
+#   start         启动所有服务 (systemd + qodercli 健康检查)
+#   stop          停止所有服务
+#   restart       重启所有服务 (默认)
+#   status        查看所有服务状态 (含 PID / uptime / Redis / RQ 队列)
+#   logs          实时跟踪所有服务日志
+#   clean-pycache 清理 __pycache__ 并重启 (部署后常用)
 #
 # 示例:
 #   bash scripts/services_ops.sh            # 默认查看状态
 #   bash scripts/services_ops.sh restart    # 重启
-#   bash scripts/services_ops.sh stop       # 停止
-#   bash scripts/services_ops.sh logs       # 跟踪日志
+#   bash scripts/services_ops.sh clean-pycache  # 清缓存+重启
 set -eo pipefail
 
 # ============================================================
-# 配置
+# 配置 — 从 .env 动态读取
 # ============================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+# 加载 .env (如果存在)
+if [[ -f "${PROJECT_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${PROJECT_DIR}/.env"
+    set +a
+fi
+
+WORKER_COUNT="${RQ_WORKER_COUNT:-3}"
+
+# 构造 systemd worker 列表: reviewagent-worker@1 @2 @3 ...
+SYSTEMD_WORKERS=()
+for ((i = 1; i <= WORKER_COUNT; i++)); do
+    SYSTEMD_WORKERS+=("reviewagent-worker@${i}")
+done
+
 SYSTEMD_SERVICES=(
     "reviewagent-webhook"
-    "reviewagent-worker@1"
-    "reviewagent-worker@2"
-    "reviewagent-worker@3"
+    "${SYSTEMD_WORKERS[@]}"
 )
-WORKER_COUNT=3
 
-OPENCODE_BIN="/usr/local/bin/opencode"
-OPENCODE_HOST="127.0.0.1"
-OPENCODE_PORT="4096"
-OPENCODE_LOG="/tmp/opencode-serve.log"
+# 周报相关服务
+WEEKLY_SERVICES=(
+    "reviewagent-weekly-worker"
+    "reviewagent-weekly.timer"
+)
+
+ALL_SYSTEMD=(
+    "${SYSTEMD_SERVICES[@]}"
+    "${WEEKLY_SERVICES[@]}"
+)
+
+# qodercli: 从 .env 读取, 空则自动探测
+QODERCLI_NODE="${QODERCLI_NODE_PATH:-$(which node 2>/dev/null || true)}"
+QODERCLI_JS="${QODERCLI_JS_PATH:-$(readlink -f "$(which qodercli 2>/dev/null)" 2>/dev/null || true)}"
+QODERCLI_MODEL="${QODERCLI_MODEL:-DeepSeek-V4-Flash}"
+QODERCLI_FALLBACK="${QODERCLI_FALLBACK_MODEL:-}"
 
 # 颜色
 RED='\033[0;31m'
@@ -40,7 +68,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # ============================================================
 # 工具函数
@@ -54,15 +82,56 @@ _separator() {
     echo "────────────────────────────────────────────────────────"
 }
 
-# opencode PID (可能多个, 取最新的)
-_opencode_pid() {
-    pgrep -f 'opencode serve' 2>/dev/null | head -1 || true
+# qodercli 健康检查: node + js 存在 + --version 可用
+_qodercli_healthy() {
+    [[ -n "$QODERCLI_NODE" ]] && [[ -x "$QODERCLI_NODE" ]] &&
+    [[ -n "$QODERCLI_JS" ]] && [[ -f "$QODERCLI_JS" ]] &&
+    "$QODERCLI_NODE" "$QODERCLI_JS" --version >/dev/null 2>&1
 }
 
-_opencode_alive() {
-    local pid
-    pid=$(_opencode_pid)
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+# 优雅终止匹配进程 (SIGTERM → 等待 → SIGKILL)
+# 参考 restart_local.sh 的 terminate_matching
+_terminate_matching() {
+    local pattern="$1"
+    local matched_pids
+    matched_pids="$(pgrep -f -- "${pattern}" || true)"
+    if [[ -z "${matched_pids}" ]]; then
+        return
+    fi
+    # SIGTERM
+    kill -TERM ${matched_pids} 2>/dev/null || true
+    # 等待退出 (最多 5 秒)
+    for _attempt in {1..20}; do
+        if ! pgrep -f -- "${pattern}" >/dev/null 2>&1; then
+            return
+        fi
+        sleep 0.25
+    done
+    # 仍未退出 → SIGKILL
+    matched_pids="$(pgrep -f -- "${pattern}" || true)"
+    if [[ -n "${matched_pids}" ]]; then
+        _warn "force killing: ${pattern}"
+        kill -KILL ${matched_pids} 2>/dev/null || true
+    fi
+}
+
+# 终止 RQ worker 的 horse 子进程 (正在执行的任务)
+# 参考 restart_local.sh 的 terminate_worker_jobs
+_terminate_worker_jobs() {
+    local jobs_terminated=0
+    local worker_pid horse_pid horse_pgid
+    while IFS= read -r worker_pid; do
+        while IFS= read -r horse_pid; do
+            horse_pgid="$(ps -o pgid= -p "${horse_pid}" 2>/dev/null | tr -d ' ')"
+            if [[ -n "${horse_pgid}" ]]; then
+                kill -KILL -- "-${horse_pgid}" 2>/dev/null || true
+                jobs_terminated=1
+            fi
+        done < <(pgrep -P "${worker_pid}" 2>/dev/null || true)
+    done < <(pgrep -f -- "rq.cli worker" 2>/dev/null || true)
+    if [[ "${jobs_terminated}" -eq 1 ]]; then
+        sleep 1
+    fi
 }
 
 # ============================================================
@@ -72,32 +141,33 @@ do_start() {
     _info "Starting all services ..."
     echo ""
 
-    # 1) systemd 服务
-    for svc in "${SYSTEMD_SERVICES[@]}"; do
+    # 1) systemd 服务 (批量启动)
+    local svcs_to_start=()
+    for svc in "${ALL_SYSTEMD[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             _warn "$svc already running, skipping"
         else
-            _info "Starting $svc ..."
-            systemctl start "$svc"
-            _ok "$svc started"
+            svcs_to_start+=("$svc")
         fi
     done
+    if [[ ${#svcs_to_start[@]} -gt 0 ]]; then
+        systemctl start "${svcs_to_start[@]}"
+        for svc in "${svcs_to_start[@]}"; do
+            _ok "$svc started"
+        done
+    fi
 
-    # 2) opencode
-    if _opencode_alive; then
-        _warn "opencode serve already running (PID $(_opencode_pid))"
-    else
-        _info "Starting opencode serve ..."
-        nohup "$OPENCODE_BIN" serve \
-            --hostname "$OPENCODE_HOST" --port "$OPENCODE_PORT" --print-logs \
-            > "$OPENCODE_LOG" 2>&1 &
-        sleep 2
-        if _opencode_alive; then
-            _ok "opencode serve started (PID $(_opencode_pid))"
-        else
-            _fail "opencode serve failed to start (check $OPENCODE_LOG)"
-            return 1
+    # 2) qodercli 健康检查 (subprocess 模式, 无需启动常驻进程)
+    if _qodercli_healthy; then
+        local oc_ver
+        oc_ver=$("$QODERCLI_NODE" "$QODERCLI_JS" --version 2>/dev/null || echo "unknown")
+        _ok "qodercli ready (${oc_ver}) model=${QODERCLI_MODEL}"
+        if [[ -n "$QODERCLI_FALLBACK" ]]; then
+            _ok "fallback model: ${QODERCLI_FALLBACK}"
         fi
+    else
+        _fail "qodercli not healthy (node=${QODERCLI_NODE:-<not found>} js=${QODERCLI_JS:-<not found>})"
+        all_active=false
     fi
 
     echo ""
@@ -108,31 +178,20 @@ do_stop() {
     _info "Stopping all services ..."
     echo ""
 
-    # 1) systemd 服务
-    for svc in "${SYSTEMD_SERVICES[@]}"; do
+    # 1) systemd 服务 (批量停止)
+    local svcs_to_stop=()
+    for svc in "${ALL_SYSTEMD[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            _info "Stopping $svc ..."
-            systemctl stop "$svc"
-            _ok "$svc stopped"
-        else
-            _warn "$svc not running, skipping"
+            svcs_to_stop+=("$svc")
         fi
     done
-
-    # 2) opencode
-    if _opencode_alive; then
-        local pid=$(_opencode_pid)
-        _info "Stopping opencode serve (PID $pid) ..."
-        kill "$pid" 2>/dev/null || true
-        sleep 1
-        if _opencode_alive; then
-            _warn "opencode still alive, sending SIGKILL ..."
-            kill -9 "$pid" 2>/dev/null || true
-            sleep 1
-        fi
-        _ok "opencode serve stopped"
+    if [[ ${#svcs_to_stop[@]} -gt 0 ]]; then
+        systemctl stop "${svcs_to_stop[@]}"
+        for svc in "${svcs_to_stop[@]}"; do
+            _ok "$svc stopped"
+        done
     else
-        _warn "opencode serve not running, skipping"
+        _warn "no systemd services running"
     fi
 
     echo ""
@@ -143,31 +202,17 @@ do_restart() {
     _info "Restarting all services ..."
     echo ""
 
-    # 1) systemd 服务
+    # 1) systemd 服务 (批量重启, 减少中断时间)
+    systemctl restart "${SYSTEMD_SERVICES[@]}"
     for svc in "${SYSTEMD_SERVICES[@]}"; do
-        _info "Restarting $svc ..."
-        systemctl restart "$svc"
         _ok "$svc restarted"
     done
 
-    # 2) opencode
-    if _opencode_alive; then
-        local pid=$(_opencode_pid)
-        _info "Stopping opencode serve (PID $pid) ..."
-        kill "$pid" 2>/dev/null || true
-        sleep 1
-    fi
-    _info "Starting opencode serve ..."
-    nohup "$OPENCODE_BIN" serve \
-        --hostname "$OPENCODE_HOST" --port "$OPENCODE_PORT" --print-logs \
-        > "$OPENCODE_LOG" 2>&1 &
-    sleep 2
-
-    if _opencode_alive; then
-        _ok "opencode serve started (PID $(_opencode_pid))"
+    # 2) qodercli 健康检查 (subprocess 模式, 无需重启常驻进程)
+    if _qodercli_healthy; then
+        _ok "qodercli ready"
     else
-        _fail "opencode serve failed to start (check $OPENCODE_LOG)"
-        return 1
+        _warn "qodercli not healthy (node=${QODERCLI_NODE:-<not found>} js=${QODERCLI_JS:-<not found>})"
     fi
 
     echo ""
@@ -187,7 +232,7 @@ do_status() {
     printf "  %-30s %-10s %-8s %-20s\n" "──────" "──────" "───" "──────"
 
     local all_active=true
-    for svc in "${SYSTEMD_SERVICES[@]}"; do
+    for svc in "${ALL_SYSTEMD[@]}"; do
         local status pid uptime
         status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
 
@@ -195,7 +240,6 @@ do_status() {
             pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null || echo "-")
             uptime=$(systemctl show -p ActiveEnterTimestamp --value "$svc" 2>/dev/null || echo "-")
             if [[ "$uptime" != "-" && "$uptime" != "" ]]; then
-                # 计算运行时长
                 local start_ts now_ts diff_secs
                 start_ts=$(date -d "$uptime" +%s 2>/dev/null || echo 0)
                 now_ts=$(date +%s)
@@ -215,32 +259,42 @@ do_status() {
             pid="-"
             uptime="-"
             printf "  ${RED}%-30s %-10s %-8s %-20s${NC}\n" "$svc" "$status" "$pid" "$uptime"
-            all_active=false
+            # timer 的 active (waiting) 不算 unhealthy
+            if [[ "$svc" == *"timer"* ]]; then
+                : # timer inactive 才报警
+                all_active=false
+            else
+                all_active=false
+            fi
         fi
     done
 
+    # timer 特殊处理: active (waiting) 是正常状态
+    local timer_status
+    timer_status=$(systemctl is-active reviewagent-weekly.timer 2>/dev/null || echo "unknown")
+    if [[ "$timer_status" == "active" ]]; then
+        : # already printed above
+    fi
+
     echo ""
 
-    # 2) opencode
-    _info "opencode serve:"
+    # 2) qodercli
+    _info "qodercli (LLM subprocess):"
     echo ""
-    if _opencode_alive; then
-        local oc_pid oc_mem oc_port_status
-        oc_pid=$(_opencode_pid)
-        oc_mem=$(ps -p "$oc_pid" -o rss= 2>/dev/null | awk '{printf "%.0fMB", $1/1024}' || echo "-")
-        # 检查端口是否在监听
-        if ss -tlnp 2>/dev/null | grep -q ":${OPENCODE_PORT} "; then
-            oc_port_status="${GREEN}listening on :${OPENCODE_PORT}${NC}"
-        else
-            oc_port_status="${RED}NOT listening on :${OPENCODE_PORT}${NC}"
-        fi
-        printf "  ${GREEN}%-30s %-10s %-8s %-12s %-20s${NC}\n" \
-            "opencode serve" "active" "$oc_pid" "$oc_mem" ""
-        echo -e "  Port: $oc_port_status"
-        echo -e "  Log:  $OPENCODE_LOG"
+    if _qodercli_healthy; then
+        local qc_ver qc_model qc_fallback
+        qc_ver=$("$QODERCLI_NODE" "$QODERCLI_JS" --version 2>/dev/null || echo "unknown")
+        qc_model="${QODERCLI_MODEL}"
+        qc_fallback="${QODERCLI_FALLBACK:-<none>}"
+        printf "  ${GREEN}%-20s %-10s %-30s${NC}\n" "qodercli" "ready" "version: ${qc_ver}"
+        printf "  %-20s %-10s %-30s\n" "primary model" "" "${qc_model}"
+        printf "  %-20s %-10s %-30s\n" "fallback model" "" "${qc_fallback}"
+        printf "  %-20s %s\n" "node" "${QODERCLI_NODE}"
+        printf "  %-20s %s\n" "js" "${QODERCLI_JS}"
     else
-        printf "  ${RED}%-30s %-10s %-8s${NC}\n" "opencode serve" "inactive" "-"
-        echo -e "  ${RED}Check: $OPENCODE_LOG${NC}"
+        printf "  ${RED}%-20s %-10s${NC}\n" "qodercli" "UNHEALTHY"
+        echo -e "  node: ${QODERCLI_NODE:-${RED}<not found>${NC}}"
+        echo -e "  js:   ${QODERCLI_JS:-${RED}<not found>${NC}}"
         all_active=false
     fi
 
@@ -252,8 +306,9 @@ do_status() {
     local redis_ok=false
     if command -v redis-cli &>/dev/null && redis-cli ping 2>/dev/null | grep -q PONG; then
         redis_ok=true
-    elif python3 -c "import redis; redis.Redis().ping()" 2>/dev/null \
-      || /home/workflow/ReviewAgent/.venv/bin/python -c "import redis; redis.Redis().ping()" 2>/dev/null; then
+    elif "${PROJECT_DIR}/.venv/bin/python" -c "import redis; redis.Redis().ping()" 2>/dev/null; then
+        redis_ok=true
+    elif python3 -c "import redis; redis.Redis().ping()" 2>/dev/null; then
         redis_ok=true
     fi
     if $redis_ok; then
@@ -268,17 +323,16 @@ do_status() {
     _info "RQ queues:"
     echo ""
     local rq_info
-    rq_info=$(/home/workflow/ReviewAgent/.venv/bin/python -c "
+    rq_info=$("${PROJECT_DIR}/.venv/bin/python" -c "
 import redis
 r = redis.Redis()
-for q in ['review', 'review-weekly']:
+for q in ['${RQ_QUEUE_NAME:-review-v2}', '${RQ_WEEKLY_QUEUE_NAME:-review-weekly}']:
     pending = r.llen(q)
-    # failed key may be a set (RQ >= 1.14) or list; handle both
     try:
         ktype = r.type(f'rq:failed:{q}').decode()
-        if ktype == b'set':
+        if ktype == 'set':
             failed = r.scard(f'rq:failed:{q}')
-        elif ktype == b'list':
+        elif ktype == 'list':
             failed = r.llen(f'rq:failed:{q}')
         else:
             failed = 0
@@ -303,54 +357,63 @@ do_logs() {
     _info "Tailing service logs (Ctrl+C to exit) ..."
     echo ""
 
-    local log_files=()
-
-    # systemd journal 用 journalctl
     echo "  Attaching to:"
-    for svc in "${SYSTEMD_SERVICES[@]}"; do
-        echo "    - $svc (journalctl -u $svc)"
+    for svc in "${ALL_SYSTEMD[@]}"; do
+        echo "    - $svc (journalctl)"
     done
-    if [[ -f "$OPENCODE_LOG" ]]; then
-        echo "    - opencode serve ($OPENCODE_LOG)"
-    fi
     echo ""
     _separator
     echo ""
 
-    # 用 tail -f 跟踪 opencode 日志, 同时用 journalctl 跟踪 systemd 日志
-    # 简单方案: 开两个 tail
     trap 'echo; _info "log tail stopped"; exit 0' INT TERM
 
-    if [[ -f "$OPENCODE_LOG" ]]; then
-        # 合并 journalctl + opencode log
-        (
-            journalctl -u reviewagent-webhook -u reviewagent-worker@1 \
-                       -u reviewagent-worker@2 -u reviewagent-worker@3 \
-                       -n 0 --no-pager -f 2>/dev/null &
-            tail -n 0 -f "$OPENCODE_LOG" 2>/dev/null &
-            wait
-        )
-    else
-        journalctl -u reviewagent-webhook -u reviewagent-worker@1 \
-                   -u reviewagent-worker@2 -u reviewagent-worker@3 \
-                   -n 50 --no-pager -f
-    fi
+    # 构建 journalctl -u 参数列表
+    local jc_args=(-u reviewagent-webhook)
+    for w in "${SYSTEMD_WORKERS[@]}"; do
+        jc_args+=(-u "$w")
+    done
+    jc_args+=(-u reviewagent-weekly-worker)
+
+    journalctl "${jc_args[@]}" -n 50 --no-pager -f
+}
+
+do_clean_pycache() {
+    _info "Cleaning __pycache__ ..."
+    local count
+    count=$(find "${PROJECT_DIR}/reviewagent" -type d -name __pycache__ 2>/dev/null | wc -l)
+    find "${PROJECT_DIR}/reviewagent" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    _ok "removed ${count} __pycache__ directories"
+
+    echo ""
+    _info "Restarting services ..."
+    systemctl restart "${SYSTEMD_SERVICES[@]}"
+    for svc in "${SYSTEMD_SERVICES[@]}"; do
+        _ok "$svc restarted"
+    done
+    echo ""
+    do_status
 }
 
 usage() {
-    echo "Usage: $0 {start|stop|restart|status|logs}"
+    echo "Usage: $0 {start|stop|restart|status|logs|clean-pycache}"
     echo ""
     echo "Commands:"
-    echo "  start     Start all services (webhook + workers + opencode)"
-    echo "  stop      Stop all services"
-    echo "  restart   Restart all services (default)"
-    echo "  status    Show detailed service status"
-    echo "  logs      Tail all service logs in real-time"
+    echo "  start          Start all services (webhook + workers + weekly)"
+    echo "  stop           Stop all services"
+    echo "  restart        Restart all services (default)"
+    echo "  status         Show detailed service status"
+    echo "  logs           Tail all service logs in real-time"
+    echo "  clean-pycache  Remove __pycache__ and restart services"
+    echo ""
+    echo "Environment:"
+    echo "  PROJECT_DIR     Project root (default: script's parent dir)"
+    echo "  RQ_WORKER_COUNT Number of workers (default: 3, from .env)"
     echo ""
     echo "Examples:"
-    echo "  $0              # restart (default)"
-    echo "  $0 status       # check status"
-    echo "  $0 logs         # follow logs"
+    echo "  $0                        # status (default)"
+    echo "  $0 restart                # restart all"
+    echo "  $0 clean-pycache          # deploy helper: clean cache + restart"
+    echo "  $0 logs                   # follow logs"
 }
 
 # ============================================================
@@ -359,12 +422,13 @@ usage() {
 cmd="${1:-status}"
 
 case "$cmd" in
-    start)   do_start   ;;
-    stop)    do_stop    ;;
-    restart) do_restart ;;
-    status)  do_status  ;;
-    logs)    do_logs    ;;
-    -h|--help|help) usage ;;
+    start)          do_start          ;;
+    stop)           do_stop           ;;
+    restart)        do_restart        ;;
+    status)         do_status         ;;
+    logs)           do_logs           ;;
+    clean-pycache)  do_clean_pycache  ;;
+    -h|--help|help) usage             ;;
     *)
         _fail "Unknown command: $cmd"
         usage
