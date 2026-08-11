@@ -60,7 +60,7 @@
 
 | 情况 | 正确写法 | 例子 |
 |---|---|---|
-| 兜底违规（不在 19 类 R-* 表内）| `R-OTHER:<具体短描述>` | `R-OTHER:magic_number` / `R-OTHER:typo` |
+| 兜底违规（不在 20 类 R-* 表内）| `R-OTHER:<具体短描述>` | `R-OTHER:magic_number` / `R-OTHER:typo` |
 | 跨文件影响类违规 | `R-OTHER-IMPACT:<具体短描述>` | `R-OTHER-IMPACT:caller_param` / `R-OTHER-IMPACT:import_path` |
 | 不写 rule_key 但要保留 | 写 `summary_md` 文字段，不强行命名新键 | — |
 
