@@ -52,6 +52,7 @@ class Config:
     # subprocess 是当前唯一启用路径；ACP 代码保留用于上游 stdin hang 修复后的复测.
     qodercli_permission_mode: str = ""        # Headless --permission-mode (accept_edits / bypass_permissions / dont_ask / auto). 空字符串 = 不传.
     qodercli_max_turns: int = 20               # Headless --max-turns 上限 (兜底, 防 qodercli 无限循环; 0 = 不传)
+    qodercli_fallback_model: str = ""          # 备用模型 (空=不回退); 主模型失败时自动切换, 每个任务独立尝试主模型
 
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
@@ -143,6 +144,7 @@ class Config:
             qodercli_timeout=int(_env("QODERCLI_TIMEOUT", "600")),
             qodercli_permission_mode=_env("QODERCLI_PERMISSION_MODE", ""),
             qodercli_max_turns=int(_env("QODERCLI_MAX_TURNS", "20")),
+            qodercli_fallback_model=_env("QODERCLI_FALLBACK_MODEL", ""),
             redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
             rq_queue_name=rq_queue_name,
             rq_weekly_queue_name=rq_weekly_queue_name,
