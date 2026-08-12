@@ -517,7 +517,7 @@ class TestBaseCommandExceptionHandling:
         class _T(BaseCommand):
             COMMAND_NAME = "describe"
             DEFAULT_AGENT = "describe"
-            def _call_agent(self, _ws):
+            def _call_agent(self, _ws, *, overflow_files=None):
                 raise QoderCLIError("synthetic qodercli boom")
 
         cmd = _T(project_id=1, mr_iid=1)

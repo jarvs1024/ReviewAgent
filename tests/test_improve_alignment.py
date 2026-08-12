@@ -392,13 +392,15 @@ def test_score_suggestion_label_cross_file_impact_high():
     s = {
         "label": "cross-file impact",
         "severity": "high",
-        # rationale 长度 > 50 → +8; +10 (rule ref R-OTHER-IMPACT); +5 (header)
-        "rationale": "R-OTHER-IMPACT:caller_param — 调用方 callerA 还在用旧签名, 传了 2 个参数, 新签名需要 3 个",
+        # rationale 长度 > 50 → +8; +5 (header ok)
+        # 注意: R-OTHER-IMPACT 不触发 _RULE_EXEMPT_REGEX 豁免加分 (仅 SSD-RULE-* 豁免)
+        "rationale": "R-OTHER-IMPACT:caller_param — 调用方 callerA 还在用旧签名, 传了 2 个参数, 但新签名需要 3 个必填参数, 会导致运行时 TypeError",
         "header": "caller 同步",
     }
     sc = ImproveCommand._score_suggestion(s)
-    # 30 (high) + 25 (cross-file impact) + 8 (rationale 50~100字) + 10 (rule ref) + 5 (header ok) = 78
-    assert sc >= 70, f"cross-file impact 应得高分, got {sc}"
+    # 30 (high) + 25 (cross-file impact) + 8 (rationale 50~100字) + 5 (header ok) = 68
+    # cross-file impact 与 potential bug 同为 25 分 (P1 优先级), 不依赖 SSD-RULE 豁免加分
+    assert sc >= 60, f"cross-file impact 应得高分, got {sc}"
 
 
 def test_score_suggestion_label_potential_bug_baseline():

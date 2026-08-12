@@ -92,7 +92,16 @@ class Config:
 
     # ---- improve 并行 + 限流 ----
     improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
-    improve_max_files: int = 20              # 单次检视最大文件数 (0=不限, 超出截断并发 warning)
+    improve_max_files: int = 20              # 单次检视最大文件数 (full source 配额, 0=不限, 超出降级 partial/patch)
+    improve_keyword_paths: tuple[str, ...] = (  # 文件优先级 — 关键路径加分 (排序权重)
+        "/services/", "/api/", "/core/", "/main.",
+        "/models/", "/handlers/", "/routers/",
+    )
+    improve_skip_test_paths: tuple[str, ...] = (  # 测试/配置文件路径跳过 (不进 LLM)
+        "tests/", "/tests/", "test_", "_test.", ".test.",
+        "conftest.py",
+    )
+    improve_partial_context_lines: int = 20  # partial 模式 ±N 行 (overflow 文件 context 兜底)
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
     improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
     improve_min_severity: str = ""           # 最低严重度过滤 (空=不过滤, 可选: critical/high/medium/low)
@@ -164,6 +173,11 @@ class Config:
             repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "2000")),
             improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
             improve_max_files=int(_env("IMPROVE_MAX_FILES", "20")),
+            improve_keyword_paths=_env_tuple("IMPROVE_KEYWORD_PATHS",
+                "/services/,/api/,/core/,/main.,/models/,/handlers/,/routers/"),
+            improve_skip_test_paths=_env_tuple("IMPROVE_SKIP_TEST_PATHS",
+                "tests/,/tests/,test_,_test.,.test.,conftest.py"),
+            improve_partial_context_lines=int(_env("IMPROVE_PARTIAL_CONTEXT_LINES", "20")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
             improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
             improve_min_severity=_env("IMPROVE_MIN_SEVERITY", "").lower(),

@@ -45,6 +45,29 @@ from reviewagent.telemetry import events
 from reviewagent.telemetry.models import MRRecord, ReviewRun
 
 
+def _split_diff_by_text(diff_text: str) -> dict[str, str]:
+    """按文件拆分 unified diff. 返回 {file_path: diff_text}.
+
+    与 improve._split_diff_by_file (基于 Path) 不同: 这里直接接受 diff_text 字符串,
+    用于 MAX_DIFF_CHARS 截断前的预拆分 (避免先把 diff 写盘再读盘).
+
+    与 improve.py 里同名方法同源正则, 后续可考虑抽到独立 module.
+    """
+    import re
+    result: dict[str, str] = {}
+    if not diff_text:
+        return result
+    parts = re.split(r"(?=^diff --git )", diff_text, flags=re.MULTILINE)
+    for part in parts:
+        if not part.strip():
+            continue
+        m = re.match(r"diff --git a/.+ b/(.+)", part)
+        if m:
+            fp = m.group(1).strip()
+            result[fp] = part
+    return result
+
+
 class BaseCommandError(RuntimeError):
     """所有 ReviewAgent 命令共用基类错误."""
     pass
@@ -108,8 +131,14 @@ class BaseCommand:
         """
         return None
 
-    def _call_agent(self, ws) -> dict[str, Any]:
-        """调 opencode agent，返回解析后的 dict. 子类可覆盖实现并行等策略."""
+    def _call_agent(self, ws, *, overflow_files: list[str] | None = None) -> dict[str, Any]:
+        """调 opencode agent，返回解析后的 dict. 子类可覆盖实现并行等策略.
+
+        overflow_files: MAX_DIFF_CHARS 软阈值截断出的文件列表 (V6).
+            基类实现 (describe) 忽略此参数——describe 把整份 diff 喂给 LLM 做
+            摘要, 不按文件分块, overflow 由上层 MAX_DIFF_CHARS 已控制总量.
+            子类 ImproveCommand 覆盖后会消费此参数, 把 overflow 文件降级为 patch-only.
+        """
         client = get_client()
         oc_result = client.run(
             agent=self.DEFAULT_AGENT,
@@ -205,32 +234,33 @@ class BaseCommand:
             if not diff_text.strip():
                 raise BaseCommandError("MR has no diff (empty or binary-only)")
 
-            # 2.5. MR 大小限制 — diff 过大时跳过并评论告知
-            if len(diff_text) > config.max_diff_chars:
-                logger.info(
-                    "{}.skip_large_diff project={} mr={} bytes={} limit={}",
-                    self.COMMAND_NAME, self.project_id, self.mr_iid,
-                    len(diff_text), config.max_diff_chars,
-                )
-                try:
-                    self.gitlab.post_mr_comment(
-                        self.project_id, self.mr_iid,
-                        f"> ⚠️ **{self.COMMAND_NAME}** 跳过：MR diff 过大"
-                        f"（{len(diff_text)} 字符 > 上限 {config.max_diff_chars}），"
-                        f"无法进行有效自动检视。",
+            # 2.5. MR 大小限制 (V6) — 按文件边界累加, 超限文件进 overflow 仍检视
+            # Why: 旧版整 MR skip 导致大 MR 完全丢检视, 改成"软阈值 + overflow"模式
+            #      配合 improve._call_agent 的 strategy 分配 (full/partial/patch),
+            #      兼顾检视覆盖率与 LLM token 成本.
+            files_in_scope: list[str] = []
+            files_overflow: list[str] = []
+            if config.max_diff_chars > 0 and len(diff_text) > config.max_diff_chars:
+                diff_by_file = _split_diff_by_text(diff_text)
+                total_chars = 0
+                for fp in sorted(diff_by_file.keys()):
+                    file_chars = len(diff_by_file[fp])
+                    # 已累加至少 1 个文件, 且再加就超 MAX_DIFF_CHARS → overflow
+                    # 单文件超限仍允许进入 scope (后续 partial/patch 模式兜底)
+                    if files_in_scope and (total_chars + file_chars > config.max_diff_chars):
+                        files_overflow.append(fp)
+                    else:
+                        total_chars += file_chars
+                        files_in_scope.append(fp)
+                if files_overflow:
+                    logger.info(
+                        "{}.diff_size_limit project={} mr={} total_chars={} scope={} overflow={}",
+                        self.COMMAND_NAME, self.project_id, self.mr_iid,
+                        len(diff_text), len(files_in_scope), len(files_overflow),
                     )
-                except GitLabError:
-                    pass  # best-effort comment
-                duration_ms = int((time.monotonic() - t0) * 1000)
-                _mark_finished(
-                    run_id, status="skipped", model=model_used,
-                    prompt_tokens=0, completion_tokens=0,
-                    duration_ms=duration_ms,
-                )
-                return {
-                    "status": "skipped", "reason": "diff_too_large",
-                    "diff_chars": len(diff_text), "limit": config.max_diff_chars,
-                }
+            else:
+                # 不限或未超限: 后续 _call_agent 自己按 _diff_line_map 取文件列表
+                files_overflow = []
 
             # 3. 准备 workspace
             git_url = self.gitlab.get_project_git_url(self.project_id)
@@ -245,7 +275,7 @@ class BaseCommand:
             self.ws = ws  # 让 _publish 等子类方法能拿到 worktree 路径
 
             # 4. 调 opencode agent（子类可覆盖 _call_agent 实现并行等策略）
-            agent_result = self._call_agent(ws)
+            agent_result = self._call_agent(ws, overflow_files=files_overflow or None)
             prompt_tokens = self._last_oc_result.prompt_tokens if self._last_oc_result else 0
             completion_tokens = self._last_oc_result.completion_tokens if self._last_oc_result else 0
             model_used = (self._last_oc_result.model if self._last_oc_result else "") or self.model

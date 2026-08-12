@@ -178,8 +178,17 @@ class ImproveCommand(BaseCommand):
         "非必要不要直接点「解决主题」或 ✓ 图标来关闭主题."
     )
     # ---------- 并行分块调用 ----------
-    def _call_agent(self, ws) -> dict[str, Any]:
-        """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果."""
+    def _call_agent(self, ws, *, overflow_files: list[str] | None = None) -> dict[str, Any]:
+        """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果.
+
+        V6 新增:
+        - overflow_files: 来自 MAX_DIFF_CHARS 截断的文件列表 (强制 patch-only 模式)
+        - 测试路径过滤 (improve_skip_test_paths)
+        - 文件优先级排序 (improve_keyword_paths 加分)
+        - 4 档 strategy 分配 (full / partial / patch / skip)
+        - _build_chunk_prompt 根据 strategy 切换 source_block (full/partial/patch)
+        """
+        overflow_set: set[str] = set(overflow_files or [])
         line_map = self._diff_line_map()
         all_files = sorted(line_map.keys())
 
@@ -198,31 +207,102 @@ class ImproveCommand(BaseCommand):
         if not all_files:
             return {"summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。", "suggestions": []}
 
-        # 文件数限流: 超出上限的文件跳过，在总览中注明
-        max_files = config.improve_max_files
-        if max_files > 0 and len(all_files) > max_files:
-            files = all_files[:max_files]
-            skipped_files = all_files[max_files:]
-            logger.info(
-                "improve.file_limit project={} mr={} total={} kept={} skipped={}",
-                self.project_id, self.mr_iid, len(all_files), len(files), len(skipped_files),
-            )
-            # C1: metrics 记录截断事件
-            from reviewagent.metrics import inc as _metric_inc
-            _metric_inc(
-                "reviewagent_improve_file_limit_total",
-                project_id=str(self.project_id),
-                mr_iid=str(self.mr_iid),
-            )
-            _metric_inc(
-                "reviewagent_improve_files_skipped_total",
-                amount=float(len(skipped_files)),
-                project_id=str(self.project_id),
-                mr_iid=str(self.mr_iid),
-            )
-        else:
-            files = all_files
-            skipped_files = []
+        # V6 测试路径过滤 (路径级别, 不与扩展名过滤冲突)
+        test_skipped: list[str] = []
+        skip_test_patterns = config.improve_skip_test_paths
+        if skip_test_patterns:
+            from pathlib import Path as _P
+            filtered: list[str] = []
+            for fp in all_files:
+                name = _P(fp).name
+                if any(pat in fp or name.startswith(pat.rstrip("/")) for pat in skip_test_patterns):
+                    test_skipped.append(fp)
+                else:
+                    filtered.append(fp)
+            if test_skipped:
+                logger.info(
+                    "improve.test_path_filter project={} mr={} skipped={}",
+                    self.project_id, self.mr_iid, sorted(test_skipped),
+                )
+            all_files = filtered
+
+        if not all_files:
+            return {
+                "summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。" if not test_skipped
+                              else f"## 改进总览\n\n> ⏭️ 以下 {len(test_skipped)} 个测试/配置文件跳过检视: {', '.join(test_skipped[:10])}{'...' if len(test_skipped) > 10 else ''}",
+                "suggestions": [],
+            }
+
+        # V6 文件优先级打分 (按 score 倒序排序)
+        file_meta: dict[str, tuple[int, int]] = {}
+        for fp in all_files:
+            diff_size = len(line_map.get(fp, set()))
+            file_size = self._read_file_line_count(fp, ws)
+            file_meta[fp] = (diff_size, file_size)
+
+        def _priority(fp: str) -> float:
+            diff_size, file_size = file_meta[fp]
+            score = min(diff_size, 100) * 0.5
+            # 兼容 "services/api.py" 与 "/services/api.py" 两种路径格式
+            fp_stripped = fp.lstrip("/")
+            if any(kw.lstrip("/") in fp or kw in fp_stripped for kw in config.improve_keyword_paths):
+                score += 50
+            if file_size > 0 and file_size < 500:
+                score += 30
+            return score
+
+        sorted_files = sorted(all_files, key=_priority, reverse=True)
+
+        # V6 strategy 分配 (full / partial / patch)
+        strategy: dict[str, str] = {}
+        full_quota = config.improve_max_files
+        for fp in sorted_files:
+            if fp in overflow_set:
+                strategy[fp] = "patch"  # MAX_DIFF_CHARS overflow → 强制 patch
+                continue
+            if full_quota > 0 and sum(1 for s in strategy.values() if s == "full") < full_quota:
+                strategy[fp] = "full"
+                continue
+            file_size = file_meta[fp][1]
+            if file_size > 0 and file_size < 2000:
+                strategy[fp] = "partial"
+            elif any(kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in config.improve_keyword_paths):
+                strategy[fp] = "partial"
+            else:
+                strategy[fp] = "patch"
+
+        files = list(sorted_files)  # 所有文件都进 LLM (策略降级但不丢)
+        skipped_files = list(test_skipped)  # 测试/配置文件不进 LLM
+
+        # 记录 strategy 分布 (metrics + log)
+        from reviewagent.metrics import inc as _metric_inc
+        strat_counts = {"full": 0, "partial": 0, "patch": 0}
+        for s in strategy.values():
+            strat_counts[s] = strat_counts.get(s, 0) + 1
+        _metric_inc(
+            "reviewagent_improve_strategy_total",
+            project_id=str(self.project_id),
+            mr_iid=str(self.mr_iid),
+            strategy="full", amount=float(strat_counts["full"]),
+        )
+        _metric_inc(
+            "reviewagent_improve_strategy_total",
+            project_id=str(self.project_id),
+            mr_iid=str(self.mr_iid),
+            strategy="partial", amount=float(strat_counts["partial"]),
+        )
+        _metric_inc(
+            "reviewagent_improve_strategy_total",
+            project_id=str(self.project_id),
+            mr_iid=str(self.mr_iid),
+            strategy="patch", amount=float(strat_counts["patch"]),
+        )
+        logger.info(
+            "improve.strategy project={} mr={} total={} full={} partial={} patch={} test_skip={}",
+            self.project_id, self.mr_iid, len(files),
+            strat_counts["full"], strat_counts["partial"], strat_counts["patch"],
+            len(test_skipped),
+        )
 
         if len(files) <= 1 and not skipped_files:
             return super()._call_agent(ws)  # 单文件走原路径
@@ -253,6 +333,7 @@ class ImproveCommand(BaseCommand):
                 prompt = self._build_chunk_prompt(
                     fp, file_diff, valid_lines, ws,
                     cross_file_refs=cross_file_refs_by_file.get(fp, []),
+                    strategy=strategy.get(fp, "full"),  # V6: 4 档 strategy 透传
                 )
                 fut = pool.submit(self._call_chunk, prompt, ws, fp)
                 futures[fut] = fp
@@ -278,7 +359,12 @@ class ImproveCommand(BaseCommand):
             total_prompt_tokens, total_completion_tokens, last_model
         )
 
-        return self._merge_chunks(chunk_results, skipped_files=skipped_files)
+        # skipped_files 已含 test_skipped (上文 skipped_files = list(test_skipped))
+        # V6 软阈值化后不再有"限额 overflow 丢弃"——overflow 文件降级为 patch 仍进 LLM
+        return self._merge_chunks(
+            chunk_results,
+            skipped_files=skipped_files,
+        )
 
     def _call_chunk(self, prompt: str, ws, file_path: str) -> dict[str, Any]:
         """单个 chunk 的 opencode 调用."""
@@ -550,32 +636,27 @@ class ImproveCommand(BaseCommand):
     def _build_chunk_prompt(
         self, file_path: str, file_diff: str, valid_lines: set[int], ws,
         cross_file_refs: list[dict] | None = None,
+        *, strategy: str = "full",
     ) -> str:
         """构建单文件的精简 prompt.
 
         cross_file_refs: 预计算的跨文件 caller 引用列表 (来自 _call_agent 一次全局 rg).
                          None 时回退到 per-file _find_cross_file_refs (单文件走基类路径时用).
+        strategy (V6): "full" / "partial" / "patch" — 决定 source_block 详略.
+                       full   = 完整源码 (≤5000 行)
+                       partial = diff 行 ±N 行 context (overflow 文件兜底)
+                       patch  = 仅 diff + 行号 (最弱, 行内识别 only)
         """
         wt = str(ws.worktree)
 
-        # 读取完整源码 (限制最大 5000 行, 超过截断到前 5000 行 + 提示)
-        _MAX_SOURCE_LINES = 5000
-        lines = self._read_file_lines(file_path)
-        if lines:
-            total_lines = len(lines)
-            if total_lines > _MAX_SOURCE_LINES:
-                kept_lines = lines[:_MAX_SOURCE_LINES]
-                numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(kept_lines))
-                source_block = (
-                    f"### 完整源码: `{file_path}` (共 {total_lines} 行, **已截断到前 {_MAX_SOURCE_LINES} 行**)\n"
-                    f"⚠️ 上下文不完整 — 末尾 {total_lines - _MAX_SOURCE_LINES} 行未加载, "
-                    f"如需检视请缩小 diff 范围或拆分 MR\n```\n{numbered}\n```"
-                )
-            else:
-                numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
-                source_block = f"### 完整源码: `{file_path}` (共 {len(lines)} 行)\n```\n{numbered}\n```"
+        if strategy == "full":
+            source_block = self._build_full_source_block(file_path)
+        elif strategy == "partial":
+            source_block = self._build_partial_context_block(file_path, valid_lines, ws)
+        elif strategy == "patch":
+            source_block = self._build_patch_only_block(file_path, valid_lines)
         else:
-            source_block = f"### 完整源码\n(无法读取 {file_path})"
+            raise ValueError(f"unknown strategy: {strategy}")
 
 
         # VALID NEW LINES
@@ -735,17 +816,21 @@ class ImproveCommand(BaseCommand):
             if truncated_count > 0:
                 merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
             if skipped_files:
+                # V6: skipped_files 现在仅含测试/配置文件 (IMPROVE_MAX_FILES 软阈值化后不再丢文件)
+                display = skipped_files[:10]
+                suffix = f" 等 {len(skipped_files)} 个" if len(skipped_files) > 10 else ""
                 merged_summary += (
-                    f"\n\n> ⚠️ 因 IMPROVE_MAX_FILES={config.improve_max_files} 限制, 以下 {len(skipped_files)} 个文件未检视: "
-                    f"{', '.join(skipped_files)}"
+                    f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视 (配置 IMPROVE_SKIP_TEST_PATHS 调整): "
+                    f"{', '.join(display)}{suffix}"
                 )
         else:
             merged_summary = "## 改进总览\n\n未发现问题。"
-            # 即使没出建议, 也要告诉用户有文件被截断 (否则静默丢失)
             if skipped_files:
+                display = skipped_files[:10]
+                suffix = f" 等 {len(skipped_files)} 个" if len(skipped_files) > 10 else ""
                 merged_summary += (
-                    f"\n\n> ⚠️ 以下文件因 IMPROVE_MAX_FILES={config.improve_max_files} 超限未检视: "
-                    f"{', '.join(skipped_files)}"
+                    f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视: "
+                    f"{', '.join(display)}{suffix}"
                 )
 
         return {
@@ -781,6 +866,81 @@ class ImproveCommand(BaseCommand):
         except OSError:
             return {}
         return parse_diff_line_map(diff_text)
+
+    def _read_file_line_count(self, file_path: str, ws) -> int:
+        """读 worktree 文件行数, 用于 priority 排序 + strategy 分配.
+        失败返回 -1 (排序时按最低优先级)."""
+        try:
+            wt_path = Path(ws.worktree) / file_path
+            if not wt_path.is_file():
+                return -1
+            with wt_path.open("r", encoding="utf-8", errors="replace") as f:
+                return sum(1 for _ in f)
+        except (OSError, UnicodeDecodeError):
+            return -1
+
+    def _build_full_source_block(self, file_path: str) -> str:
+        """full 模式: 读 worktree 文件, 拼完整源码 (≤ 5000 行, 超出截断)."""
+        _MAX = 5000
+        lines = self._read_file_lines(file_path)
+        if not lines:
+            return f"### 完整源码\n(无法读取 {file_path})"
+        total = len(lines)
+        if total > _MAX:
+            kept = lines[:_MAX]
+            numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(kept))
+            return (
+                f"### 完整源码: `{file_path}` (共 {total} 行, **已截断到前 {_MAX} 行**)\n"
+                f"⚠️ 末尾 {total - _MAX} 行未加载, 如需检视请缩小 diff 范围或拆分 MR\n```\n{numbered}\n```"
+            )
+        numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
+        return f"### 完整源码: `{file_path}` (共 {total} 行)\n```\n{numbered}\n```"
+
+    def _build_partial_context_block(self, file_path: str, valid_lines: set[int], ws) -> str:
+        """partial 模式 (V6): 仅取 diff 行 ±N 行 context, 多段合并.
+        适用: 超出 IMPROVE_MAX_FILES 但仍需 LLM 检视的中等文件.
+        性能: 比 full 模式省 token, 比 patch 模式多 ±N 行 context (跨行识别).
+        """
+        lines = self._read_file_lines(file_path)
+        if not lines:
+            return f"### 上下文 (partial)\n(无法读取 {file_path})"
+        n = config.improve_partial_context_lines
+        ranges: list[tuple[int, int]] = []
+        for vl in sorted(valid_lines):
+            lo, hi = max(1, vl - n), min(len(lines), vl + n)
+            ranges.append((lo, hi))
+        # 合并重叠/相邻段
+        merged: list[list[int]] = []
+        for lo, hi in sorted(ranges):
+            if merged and lo <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        blocks: list[str] = []
+        for lo, hi in merged:
+            chunk = lines[lo - 1:hi]
+            numbered = "\n".join(f"{lo+i:4d}| {ln}" for i, ln in enumerate(chunk))
+            blocks.append(numbered)
+        return (
+            f"### diff 上下文 (partial, ±{n} 行): `{file_path}`\n"
+            f"⚠️ 此文件超出 IMPROVE_MAX_FILES={config.improve_max_files} 配额, 已降级为 partial 模式\n"
+            f"⚠️ 仅显示 diff 附近 {len(merged)} 段 (±{n} 行), 跨段语义识别能力下降\n"
+            f"```\n" + "\n...\n".join(blocks) + "\n```"
+        )
+
+    def _build_patch_only_block(self, file_path: str, valid_lines: set[int]) -> str:
+        """patch-only 模式 (V6): 不读 source, 仅提示行号.
+        适用: 来自 MAX_DIFF_CHARS 截断的 overflow 文件, 仅行内/局部逻辑可识别.
+        """
+        vl = sorted(valid_lines)
+        vl_display = vl[:20]
+        vl_suffix = "..." if len(vl) > 20 else ""
+        return (
+            f"### patch-only: `{file_path}`\n"
+            f"⚠️ 此文件超出 MAX_DIFF_CHARS={config.max_diff_chars} 配额, 已降级为 patch-only\n"
+            f"⚠️ 仅 diff + 行号, 无源码上下文, 仅行内/局部逻辑可识别\n"
+            f"建议关注行: {vl_display}{vl_suffix}\n"
+        )
 
     def _read_file_lines(self, file_path: str) -> list[str]:
         """从 worktree 读 file 源，按行 split；读不到返回 []."""
