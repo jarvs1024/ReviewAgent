@@ -900,30 +900,39 @@ class Store:
         project_id: int,
         mr_iid: int,
     ) -> list[dict]:
-        """列出该 MR 全部 state=resolved 且 resolution_source='gitlab_resolve'
-        的 suggestions (给 auto_detect_applied 的 late_detect 用).
+        """列出该 MR 全部 state=resolved 且 resolution_source 在指定白名单内的
+        suggestions (给 auto_detect_applied 的 late_detect 用).
 
-        Why 只看 gitlab_resolve:
+        Why 限定白名单:
             - /adopt 流程虽然也会 resolve discussion, 但走的是 adoption_source='adopt_command'
               (或 'ui_apply'), 不应被覆盖回 applied (会丢失 /adopt 的语义).
             - /dismiss 流程走的 adoption_source='gitlab_resolve' 实际不会出现 (走
               gitlab_resolve 字段的是 bot 自己分类的"未分类") — /dismiss 状态是 dismissed,
               不会进 resolved 集合.
             - 真正需要 late_detect 重扫的是 bot 因"代码没匹配上 + 讨论已关"误分类的
-              那批, 这批的 resolution_source 全是 'gitlab_resolve'.
+              那批, 涉及两个来源:
+                1. auto_detect_applied 自己标 gitlab_resolve 的 (用户在 UI 点 ✓ 但
+                   head_sha 停在 push 前)
+                2. publish_overview.pre_reconcile 标 publish_overview_reconcile 的
+                   (webhook 漏发 + 用户在 UI 点 ✓ 但 bot 无 webhook 触发)
+              (MR289 根因 #2 — 854 gather 是 publish_overview_reconcile, 之前 SQL
+              漏扫, late_detect 永远不翻)
 
         Returns: list of dict with note_id, file_path, target_line,
         target_line_end, existing_code, improved_code, head_sha.
         """
+        # 白名单: 只扫 bot 误分类的 resolved, 不覆盖 /adopt / ui_apply
+        # MR289 根因 #2: 必须包含 publish_overview_reconcile (pre_reconcile 路径)
+        resolution_sources = ("gitlab_resolve", "publish_overview_reconcile")
         with self._conn() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT note_id, file_path, target_line, target_line_end,
                        existing_code, improved_code, head_sha
                 FROM suggestions
                 WHERE project_id=? AND mr_iid=?
                   AND state='resolved'
-                  AND resolution_source='gitlab_resolve'
+                  AND resolution_source IN {resolution_sources!r}
                 ORDER BY id
                 """,
                 (project_id, mr_iid),

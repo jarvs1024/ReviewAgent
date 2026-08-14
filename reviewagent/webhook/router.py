@@ -311,10 +311,15 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
         # 格式化为 "名字@工号"
         actor_name = (payload.get("user_name") or "").strip()
         actor = f"{actor_name}@{actor}" if actor_name and actor else actor
-        if locks.should_skip_cooldown(project_id, mr_iid, config.push_commands[0]):
-            continue
         # push event 也可能隐含 user 改了代码 (手动 apply / 直接改源) —
         # 探测哪些 open suggestion 已被实际改写, 转 state=applied
+        #
+        # 重要: auto_detect_applied 必须在 cooldown check 之前调用.
+        # 否则用户连续 Apply 多个 suggestion 时 (commit 间隔 < MR_COOLDOWN_SECONDS),
+        # 第 2 次 push 会被 cooldown 跳过, 导致后续 Apply commits 产生的 applied
+        # 永远不会被识别 (MR289 根因 #1 — 854 gather 永远停在 resolved).
+        # auto_detect_applied 本身已 idempotent + race-safe (expected_states 保护),
+        # 多次调用安全; 副作用仅多调一次 GitLab API + 一次 LCS 比对 (< 1s).
         try:
             from reviewagent.commands.suggestion_actions import auto_detect_applied
             head_sha_push = mr.get("sha") or ""
@@ -335,6 +340,8 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
                 "push.auto_detect_applied failed (non-fatal) project={} mr={}: {}",
                 project_id, mr_iid, e,
             )
+        if locks.should_skip_cooldown(project_id, mr_iid, config.push_commands[0]):
+            continue
         job_ids = enqueue_mr_chain(
             commands=config.push_commands,
             project_id=project_id,
