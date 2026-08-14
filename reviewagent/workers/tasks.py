@@ -248,8 +248,8 @@ def enqueue_mr_chain(
         mr_iid=mr_iid,
         triggered_by=triggered_by,
         actor_username=actor_username,
-        # 并行后 timeout 不再乘以命令数 — 取最慢命令 + 300s buffer
-        job_timeout=config.rq_worker_timeout + 300,
+        # 并行后 timeout 不再乘以命令数 — 取最慢命令 + 300s buffer + 600s 等锁余量
+        job_timeout=config.rq_worker_timeout + 300 + 600,
         result_ttl=3600,
         failure_ttl=86400,
         retry=Retry(max=2, interval=10),
@@ -395,11 +395,11 @@ def run_mr_chain(
       - dedup_at_line 读到中间态 head_sha (前一个 chain 还没 finish_run, 但已
         emit_run_started; 后一个 chain 算 V{N} 时把前一个当已完成)
     """
-    # 阻塞锁: 等到拿到锁才执行. blocking_timeout=600 (10 分钟) 兜底防 worker 卡死.
+    # 阻塞锁: 等到拿到锁才执行. blocking_timeout=300 (5 分钟) 兜底防 worker 卡死.
     # 不同 MR 并行: 锁 key 包含 project_id + mr_iid, 互不阻塞.
     # redis-py 8.x 签名: acquire(blocking=True, blocking_timeout=...)
     lock = locks.get_lock(project_id, mr_iid)
-    if not lock.acquire(blocking=True, blocking_timeout=600):
+    if not lock.acquire(blocking=True, blocking_timeout=300):
         logger.warning(
             "chain.lock_timeout project={} mr={} — 释放锁失败/超时, 放弃本次 chain",
             project_id, mr_iid,
