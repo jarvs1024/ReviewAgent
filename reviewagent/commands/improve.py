@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,7 @@ class ImproveCommand(BaseCommand):
         overflow_set: set[str] = set(overflow_files or [])
         line_map = self._diff_line_map()
         all_files = sorted(line_map.keys())
+        self._review_mode = "business"  # 默认值, 后续 auto 判断可能覆盖
 
         # 文件扩展名过滤: 跳过 .md/.doc/.png 等非代码文件
         excluded_ext = set(config.review_exclude_extensions)
@@ -207,9 +209,26 @@ class ImproveCommand(BaseCommand):
         if not all_files:
             return {"summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。", "suggestions": []}
 
+        # V7 检视模式判断: auto 按 diff 测试文件占比自动切 business/test
+        review_mode = config.improve_review_mode
+        if review_mode == "auto":
+            from pathlib import Path as _P
+            _test_pats = config.improve_skip_test_paths
+            _test_count = sum(
+                1 for fp in all_files
+                if any(p in fp or _P(fp).name.startswith(p.rstrip("/")) for p in _test_pats)
+            )
+            review_mode = "test" if _test_count > len(all_files) * 0.5 else "business"
+            logger.info(
+                "improve.review_mode_auto project={} mr={} test_files={} total={} -> {}",
+                self.project_id, self.mr_iid, _test_count, len(all_files), review_mode,
+            )
+        self._review_mode = review_mode
+
         # V6 测试路径过滤 (路径级别, 不与扩展名过滤冲突)
+        # V7: test 模式下不跳过测试文件 (测试代码即业务代码)
         test_skipped: list[str] = []
-        skip_test_patterns = config.improve_skip_test_paths
+        skip_test_patterns = config.improve_skip_test_paths if review_mode != "test" else ()
         if skip_test_patterns:
             from pathlib import Path as _P
             filtered: list[str] = []
@@ -233,43 +252,40 @@ class ImproveCommand(BaseCommand):
                 "suggestions": [],
             }
 
-        # V6 文件优先级打分 (按 score 倒序排序)
+        # V7 文件优先级打分 (按 score 倒序排序)
+        # 信号: 改动大小(log1p不封顶) + 关键路径 + 改动密度 + 测试特征密度
         file_meta: dict[str, tuple[int, int]] = {}
         for fp in all_files:
             diff_size = len(line_map.get(fp, set()))
             file_size = self._read_file_line_count(fp, ws)
             file_meta[fp] = (diff_size, file_size)
 
+        # 预算测试特征密度 (test 模式下才计入权重, 但所有模式都算 — log 用)
+        test_feature_cache: dict[str, float] = {}
+        if config.improve_priority_weight_test_feature > 0:
+            for fp in all_files:
+                test_feature_cache[fp] = self._test_feature_density(fp, file_meta[fp][1])
+
         def _priority(fp: str) -> float:
             diff_size, file_size = file_meta[fp]
-            score = min(diff_size, 100) * 0.5
-            # 兼容 "services/api.py" 与 "/services/api.py" 两种路径格式
+            # 改动大小: log1p 单调递增不封顶, 大改动永远比小改动高分
+            score = math.log1p(diff_size) * config.improve_priority_weight_diff
+            # 关键路径加分 (降到 25, 不再碾压 diff_size)
             fp_stripped = fp.lstrip("/")
             if any(kw.lstrip("/") in fp or kw in fp_stripped for kw in config.improve_keyword_paths):
-                score += 50
-            if file_size > 0 and file_size < 500:
-                score += 30
+                score += config.improve_priority_weight_keyword
+            # 改动密度: 改动占比 > 30% → 高风险 (整文件重写级别)
+            if file_size > 0 and (diff_size / file_size) > 0.3:
+                score += config.improve_priority_weight_density
+            # 测试特征密度: test 模式生效, business 模式权重=0
+            if config.improve_priority_weight_test_feature > 0:
+                score += test_feature_cache.get(fp, 0.0) * config.improve_priority_weight_test_feature
             return score
 
         sorted_files = sorted(all_files, key=_priority, reverse=True)
 
-        # V6 strategy 分配 (full / partial / patch)
-        strategy: dict[str, str] = {}
-        full_quota = config.improve_full_files
-        for fp in sorted_files:
-            if fp in overflow_set:
-                strategy[fp] = "patch"  # MAX_DIFF_CHARS overflow → 强制 patch
-                continue
-            if full_quota > 0 and sum(1 for s in strategy.values() if s == "full") < full_quota:
-                strategy[fp] = "full"
-                continue
-            file_size = file_meta[fp][1]
-            if file_size > 0 and file_size < 2000:
-                strategy[fp] = "partial"
-            elif any(kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in config.improve_keyword_paths):
-                strategy[fp] = "partial"
-            else:
-                strategy[fp] = "patch"
+        # V7 strategy 分配 (full / partial / patch) — 抽成独立方法
+        strategy = self._assign_strategy(sorted_files, file_meta, overflow_set)
 
         files = list(sorted_files)  # 所有文件都进 LLM (策略降级但不丢)
         skipped_files = list(test_skipped)  # 测试/配置文件不进 LLM
@@ -776,6 +792,33 @@ class ImproveCommand(BaseCommand):
                     )
             merged_suggestions = kept
 
+        # V7 per-file 建议上限: 每个文件最多保留 N 条 (按 severity), 防噪音文件吃光全局槽位
+        # 在全局截断之前做 — 保证覆盖面, 一个文件再吵也最多占 N 个位置
+        max_per_file = config.improve_max_suggestions_per_file
+        per_file_truncated = 0
+        if max_per_file > 0:
+            sev_rank = {"high": 3, "medium": 2, "low": 1}
+            by_file: dict[str, list[dict[str, Any]]] = {}
+            for s in merged_suggestions:
+                fp = s.get("file", "") or "_unknown"
+                by_file.setdefault(fp, []).append(s)
+            kept_list: list[dict[str, Any]] = []
+            for fp, suggs in by_file.items():
+                if len(suggs) > max_per_file:
+                    suggs.sort(
+                        key=lambda s: sev_rank.get((s.get("severity") or "medium").lower(), 2),
+                        reverse=True,
+                    )
+                    per_file_truncated += len(suggs) - max_per_file
+                    suggs = suggs[:max_per_file]
+                kept_list.extend(suggs)
+            if per_file_truncated > 0:
+                logger.info(
+                    "improve.per_file_limit max_per_file={} truncated={} (降为总览文字)",
+                    max_per_file, per_file_truncated,
+                )
+            merged_suggestions = kept_list
+
         # 建议数限流: 按 severity 排序，保留前 N 条，超出只写总览
         max_suggestions = config.improve_max_suggestions
         truncated_count = 0
@@ -815,6 +858,8 @@ class ImproveCommand(BaseCommand):
             )
             if truncated_count > 0:
                 merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
+            if per_file_truncated > 0:
+                merged_summary += f"\n\n> ℹ️ 另有 {per_file_truncated} 条建议因单文件上限（{max_per_file} 条/文件）降为总览文字"
             if skipped_files:
                 # V6: skipped_files 现在仅含测试/配置文件 (IMPROVE_FULL_FILES 软阈值化后不再丢文件)
                 display = skipped_files[:10]
@@ -879,6 +924,56 @@ class ImproveCommand(BaseCommand):
         except (OSError, UnicodeDecodeError):
             return -1
 
+    def _test_feature_density(self, file_path: str, file_size: int) -> float:
+        """V7 测试特征密度 (0~1): 绝对命中数 + 密度组合.
+
+        高分 → 高风险测试文件 (含 fixture/mock/parametrize/assert/setup-teardown).
+        用绝对数 + 密度组合, 避免大文件被稀释 (2000行100assert ≠ 50行10assert).
+        """
+        if file_size <= 0:
+            return 0.0
+        lines = self._read_file_lines(file_path)
+        if not lines:
+            return 0.0
+        keywords = config.improve_test_feature_keywords
+        hits = sum(1 for ln in lines if any(kw in ln for kw in keywords))
+        if hits == 0:
+            return 0.0
+        # 绝对数: 30 命中即满分 0.5
+        abs_score = min(hits, 30) / 30 * 0.5
+        # 密度: 5% 命中率即满分 0.5
+        density = hits / len(lines)
+        density_score = min(density / 0.05, 1.0) * 0.5
+        return abs_score + density_score
+
+    def _assign_strategy(
+        self, sorted_files: list[str], file_meta: dict[str, tuple[int, int]],
+        overflow_set: set[str],
+    ) -> dict[str, str]:
+        """V7 strategy 分配 (full / partial / patch) — 与 priority 解耦.
+
+        full    = 完整源码 (≤ full_files 配额, 优先高 priority 文件)
+        partial = diff 行 ±N 行 context (中等文件 / 关键路径降级)
+        patch   = diff + ±patch_context_lines 行最小 context (overflow / 大文件)
+        """
+        strategy: dict[str, str] = {}
+        full_quota = config.improve_full_files
+        for fp in sorted_files:
+            if fp in overflow_set:
+                strategy[fp] = "patch"  # MAX_DIFF_CHARS overflow → 强制 patch
+                continue
+            if full_quota > 0 and sum(1 for s in strategy.values() if s == "full") < full_quota:
+                strategy[fp] = "full"
+                continue
+            file_size = file_meta[fp][1]
+            if file_size > 0 and file_size < 2000:
+                strategy[fp] = "partial"
+            elif any(kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in config.improve_keyword_paths):
+                strategy[fp] = "partial"
+            else:
+                strategy[fp] = "patch"
+        return strategy
+
     def _build_full_source_block(self, file_path: str) -> str:
         """full 模式: 读 worktree 文件, 拼完整源码 (≤ 5000 行, 超出截断)."""
         _MAX = 5000
@@ -929,17 +1024,49 @@ class ImproveCommand(BaseCommand):
         )
 
     def _build_patch_only_block(self, file_path: str, valid_lines: set[int]) -> str:
-        """patch-only 模式 (V6): 不读 source, 仅提示行号.
-        适用: 来自 MAX_DIFF_CHARS 截断的 overflow 文件, 仅行内/局部逻辑可识别.
+        """patch-only 模式 (V7): diff 行 ±N 行最小 context.
+
+        V6 纯行号基本检不出跨行问题; V7 加 ±patch_context_lines 行 source,
+        让 LLM 能看到局部结构 (函数签名/缩进/上下文), 从"摆设"变"能用".
+        适用: MAX_DIFF_CHARS overflow 文件 + 低优先级大文件.
         """
+        n = config.improve_patch_context_lines
+        lines = self._read_file_lines(file_path)
         vl = sorted(valid_lines)
         vl_display = vl[:20]
         vl_suffix = "..." if len(vl) > 20 else ""
+
+        # ±N 行最小 context (与 partial 同算法, 但段数不限, 只取前 5 段控成本)
+        context_block = ""
+        if lines and n > 0:
+            ranges: list[tuple[int, int]] = []
+            for v in vl:
+                lo, hi = max(1, v - n), min(len(lines), v + n)
+                ranges.append((lo, hi))
+            merged: list[list[int]] = []
+            for lo, hi in sorted(ranges):
+                if merged and lo <= merged[-1][1] + 1:
+                    merged[-1][1] = max(merged[-1][1], hi)
+                else:
+                    merged.append([lo, hi])
+            blocks: list[str] = []
+            for lo, hi in merged[:5]:  # 最多 5 段, 控 token 成本
+                chunk = lines[lo - 1:hi]
+                numbered = "\n".join(f"{lo+i:4d}| {ln}" for i, ln in enumerate(chunk))
+                blocks.append(numbered)
+            omitted = len(merged) - 5 if len(merged) > 5 else 0
+            context_block = (
+                f"\n### 最小上下文 (patch, ±{n} 行, 前 {len(merged[:5])} 段)\n"
+                f"```\n" + "\n...\n".join(blocks) + "\n```\n"
+                + (f"(另有 {omitted} 段未展示)\n" if omitted else "")
+            )
+
         return (
             f"### patch-only: `{file_path}`\n"
-            f"⚠️ 此文件超出 MAX_DIFF_CHARS={config.max_diff_chars} 配额, 已降级为 patch-only\n"
-            f"⚠️ 仅 diff + 行号, 无源码上下文, 仅行内/局部逻辑可识别\n"
+            f"⚠️ 已降级为 patch-only (overflow 或低优先级), 仅 diff + ±{n} 行最小 context\n"
+            f"⚠️ 跨行/跨段语义识别能力有限, 优先识别行内问题 (裸 except / 可变默认参数 / 硬编码等)\n"
             f"建议关注行: {vl_display}{vl_suffix}\n"
+            f"{context_block}"
         )
 
     def _read_file_lines(self, file_path: str) -> list[str]:

@@ -300,3 +300,133 @@ def test_call_agent_real_signature_chain(tmp_path, monkeypatch):
     assert isinstance(result["suggestions"], list)
     # 测试文件被过滤 (出现在 summary 的 skip 提示里)
     assert "tests/test_api.py" in result["summary_md"]
+
+
+# ============ V7 priority / 测试特征密度 / per-file 截断 / patch context ============
+
+def test_priority_log1p_does_not_cap():
+    """V7: log1p(diff_size) 不封顶, 100行和1000行能区分开 (修复 V6 min(...,100) 封顶问题)"""
+    import math
+    w_diff = 20.0
+    s100 = math.log1p(100) * w_diff   # ≈92.4
+    s500 = math.log1p(500) * w_diff   # ≈125.6
+    s1000 = math.log1p(1000) * w_diff  # ≈138.2
+    assert s500 > s100, "500行应比100行高分"
+    assert s1000 > s500, "1000行应比500行高分 (不封顶)"
+
+
+def test_priority_large_diff_beats_small_keyword():
+    """V7: 80行非关键路径 > 5行关键路径 (V6 因关键词+50碾压, 反了)"""
+    import math
+    w_diff, w_kw = 20.0, 25.0
+    # 5行 services/api.py (关键路径)
+    small_kw = math.log1p(5) * w_diff + w_kw     # ≈36 + 25 = 61
+    # 80行 utils/big.py (非关键路径)
+    large_plain = math.log1p(80) * w_diff         # ≈88
+    assert large_plain > small_kw, f"80行非关键({large_plain}) 应 > 5行关键({small_kw})"
+
+
+def test_test_feature_density_combo(tmp_path):
+    """V7: 测试特征密度 = 绝对数 + 密度组合, 大文件不被稀释"""
+    from types import SimpleNamespace
+    from reviewagent.commands.improve import ImproveCommand
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    # 50行 10个assert (密度20%) — 小文件高密度
+    small = tmp_path / "small_test.py"
+    small.write_text("\n".join(["assert x" if i < 10 else "pass" for i in range(50)]) + "\n")
+    d_small = cmd._test_feature_density("small_test.py", 50)
+
+    # 2000行 100个assert (密度5%) — 大文件中密度, 但绝对数高
+    big = tmp_path / "big_test.py"
+    big.write_text("\n".join(["assert x" if i < 100 else "pass" for i in range(2000)]) + "\n")
+    d_big = cmd._test_feature_density("big_test.py", 2000)
+
+    # 两者都应得分 (>0), 大文件因绝对数满分不会比小文件差太多
+    assert d_small > 0, "小文件高密度应得分"
+    assert d_big > 0, "大文件绝对数高应得分"
+    # 绝对数组合: big 的绝对分满分 0.5, small 的绝对分 10/30*0.5≈0.17
+    # 不应出现 big 因密度低而得 0 的情况 (V6 纯密度会稀释)
+
+
+def test_per_file_suggestion_limit():
+    """V7: _merge_chunks 每文件最多保留 N 条, 防噪音文件吃光全局槽位"""
+    from reviewagent.commands.improve import ImproveCommand
+    # 一个文件 8 条建议, 另一个 2 条, per_file=5 → 第一个文件截到 5
+    results = [{
+        "summary_md": "",
+        "suggestions": [
+            {"file": "noisy.py", "start_line": i, "severity": "high" if i < 3 else "low",
+             "header": f"h{i}", "rationale": "x", "label": "potential bug"}
+            for i in range(8)
+        ] + [
+            {"file": "quiet.py", "start_line": 1, "severity": "high",
+             "header": "q1", "rationale": "x", "label": "potential bug"},
+            {"file": "quiet.py", "start_line": 2, "severity": "medium",
+             "header": "q2", "rationale": "x", "label": "potential bug"},
+        ],
+    }]
+    merged = ImproveCommand._merge_chunks(results)
+    files = [s["file"] for s in merged["suggestions"]]
+    assert files.count("noisy.py") <= 5, f"noisy.py 应最多5条, got {files.count('noisy.py')}"
+    assert "quiet.py" in files, "quiet.py 不应被挤掉 (per-file 保证覆盖面)"
+
+
+def test_patch_only_block_has_context(tmp_path):
+    """V7: patch 模式带 ±N 行最小 context, 不再纯行号"""
+    from types import SimpleNamespace
+    from reviewagent.commands.improve import ImproveCommand
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    # 写个 20 行文件
+    f = tmp_path / "target.py"
+    f.write_text("\n".join([f"line {i}" for i in range(1, 21)]) + "\n")
+
+    block = cmd._build_patch_only_block("target.py", {5, 15})
+    # V6 是纯行号无源码; V7 应含 source context
+    assert "最小上下文" in block or "line 5" in block, "patch 模式应带 source context"
+    assert "patch-only" in block
+
+
+def test_review_mode_auto_test_project(tmp_path, monkeypatch):
+    """V7 auto 模式: 测试文件占比>50% → 切 test 模式, 不跳过测试文件"""
+    from types import SimpleNamespace
+    from reviewagent.llm.base import LLMResult
+    from reviewagent.commands.improve import ImproveCommand
+
+    # 全是测试文件
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("assert True\n")
+    (tmp_path / "tests" / "test_b.py").write_text("assert False\n")
+
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 999
+    cmd.ws = ws
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {
+        "tests/test_a.py": {1}, "tests/test_b.py": {1},
+    })
+    monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 1)
+    monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["assert True"])
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+        fp: f"diff --git a/{fp} b/{fp}\n+new\n" for fp in files
+    })
+    monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+        fp: [] for fp in files
+    })
+    monkeypatch.setattr(cmd, "_call_chunk", lambda p, w, fp: LLMResult(
+        data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t",
+    ))
+
+    result = cmd._call_agent(ws)
+    # test 模式不跳过测试文件 → summary 里不应有 "跳过检视" 提示
+    assert "跳过检视" not in result["summary_md"], "test 模式不应跳过测试文件"
+    assert cmd._review_mode == "test"

@@ -102,9 +102,28 @@ class Config:
         "conftest.py",
     )
     improve_partial_context_lines: int = 20  # partial 模式 ±N 行 (overflow 文件 context 兜底)
+    improve_patch_context_lines: int = 3    # patch 模式 diff 行 ±N 行最小 context (V7: 不再纯行号)
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
+    improve_max_suggestions_per_file: int = 5  # 单文件最大建议数 (V7: 防噪音文件吃光槽位, 0=不限)
     improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
     improve_min_severity: str = ""           # 最低严重度过滤 (空=不过滤, 可选: critical/high/medium/low)
+
+    # ---- V7 检视模式 + priority 权重 (可配, 适配业务/测试项目) ----
+    improve_review_mode: str = "auto"        # "auto"/"business"/"test": auto 按 diff 测试占比自动切
+    improve_priority_weight_diff: float = 20.0       # log1p(diff_size) 系数 (改动大小主信号)
+    improve_priority_weight_keyword: float = 25.0    # 关键路径加分
+    improve_priority_weight_density: float = 20.0    # 高密度改动加分 (改动占比>30%)
+    improve_priority_weight_test_feature: float = 15.0  # 测试特征密度加分 (test 模式生效, business=0)
+    improve_test_feature_keywords: tuple[str, ...] = (  # 测试特征关键字 (命中→高风险测试文件)
+        "pytest.fixture", "fixture(", "@fixture",
+        "mock.patch", "MagicMock", "patch(",
+        "parametrize", "@pytest.mark",
+        "setup_module", "teardown_module", "setup_class", "teardown_class",
+        "setUp", "tearDown",
+        "assert ",
+        "yield fixture",
+        "pytest.raises", "contextmanager", "tmp_path", "caplog", "monkeypatch",
+    )
 
     # ---- 检视文件过滤 ----
     review_exclude_extensions: tuple[str, ...] = (".md", ".doc", ".docx", ".txt", ".rst", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")
@@ -178,9 +197,18 @@ class Config:
             improve_skip_test_paths=_env_tuple("IMPROVE_SKIP_TEST_PATHS",
                 "tests/,/tests/,test_,_test.,.test.,conftest.py"),
             improve_partial_context_lines=int(_env("IMPROVE_PARTIAL_CONTEXT_LINES", "20")),
+            improve_patch_context_lines=int(_env("IMPROVE_PATCH_CONTEXT_LINES", "3")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
+            improve_max_suggestions_per_file=int(_env("IMPROVE_MAX_SUGGESTIONS_PER_FILE", "5")),
             improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
             improve_min_severity=_env("IMPROVE_MIN_SEVERITY", "").lower(),
+            improve_review_mode=_env("IMPROVE_REVIEW_MODE", "auto").lower(),
+            improve_priority_weight_diff=float(_env("IMPROVE_PRIORITY_WEIGHT_DIFF", "20")),
+            improve_priority_weight_keyword=float(_env("IMPROVE_PRIORITY_WEIGHT_KEYWORD", "25")),
+            improve_priority_weight_density=float(_env("IMPROVE_PRIORITY_WEIGHT_DENSITY", "20")),
+            improve_priority_weight_test_feature=float(_env("IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE", "15")),
+            improve_test_feature_keywords=_env_tuple("IMPROVE_TEST_FEATURE_KEYWORDS",
+                "pytest.fixture,fixture(,@fixture,mock.patch,MagicMock,patch(,parametrize,@pytest.mark,setup_module,teardown_module,setup_class,teardown_class,setUp,tearDown,assert ,yield fixture,pytest.raises,contextmanager,tmp_path,caplog,monkeypatch"),
             review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",
                 ".md,.doc,.docx,.txt,.rst,.csv,.png,.jpg,.jpeg,.gif,.svg,.ico"),
         )
