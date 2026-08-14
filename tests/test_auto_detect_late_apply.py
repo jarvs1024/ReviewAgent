@@ -604,3 +604,187 @@ def test_auto_detect_records_adoption_evidence(tmp_telemetry):
     assert sug["state"] == "applied"
     assert sug["adoption_evidence"] == "exact_match"
     assert sug["applied_commit_sha"] == "head01"
+
+
+# ---------- MR289 根因 #2 回归测试: publish_overview_reconcile 路径 ----------
+# Bug: pre_reconcile (commands/_common.py:_scan_and_mark_resolved_silent) 标
+# resolution_source='publish_overview_reconcile', 旧 list_resolved_suggestions SQL
+# 只查 'gitlab_resolve', late_detect 永远扫不到, webhook 漏发时永远停在 resolved.
+# 修复: SQL IN ('gitlab_resolve', 'publish_overview_reconcile').
+# 验证:
+#   1. exact_match 命中 → 翻 applied (不能漏掉已 apply 的)
+#   2. exact_match 未命中 → 保持 resolved (false positive 保护)
+#   3. /adopt 路径 (adopt_command) 不被 late_detect 覆盖 → 保持 adopt 语义
+
+def test_publish_overview_reconcile_flips_to_applied(tmp_telemetry):
+    """resolution_source='publish_overview_reconcile' + exact_match → 翻 applied (MR289 Fix #2)."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        note_id="reconcile-note-1",
+        resolution_source="publish_overview_reconcile",
+        record_action=True,
+    )
+
+    gl = MagicMock()
+    gl.get_file_at_sha.return_value = (
+        "def foo():\n"
+        "    x = 2\n"          # ← improved_code 完整出现
+        "    return x\n"
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 1, (
+        f"publish_overview_reconcile + exact_match 应翻 1 条, got {result}"
+    )
+    final = s.get_suggestion_by_note_id("reconcile-note-1")
+    assert final["state"] == "applied", (
+        f"state 应翻 applied, got {final['state']}"
+    )
+    assert final["adoption_source"] == "late_detect", (
+        f"adoption_source 应是 late_detect, got {final['adoption_source']}"
+    )
+
+    # 原 action 历史保留 (resolved action 不被删除)
+    actions = s.list_suggestion_actions(project_id=34, mr_iid=247)
+    assert len(actions) == 2, f"应有 2 条 action (resolved + adopted), got {len(actions)}"
+    action_kinds = sorted(a["action"] for a in actions)
+    assert action_kinds == ["adopted", "resolved"], f"got {action_kinds}"
+
+
+def test_publish_overview_reconcile_unchanged_stays_resolved(tmp_telemetry):
+    """resolution_source='publish_overview_reconcile' + !exact_match → 保持 resolved."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        note_id="reconcile-note-2",
+        resolution_source="publish_overview_reconcile",
+    )
+
+    gl = MagicMock()
+    gl.get_file_at_sha.return_value = (
+        "def foo():\n"
+        "    x = 999\n"        # ← 完全不同, exact_match=False
+        "    return x\n"
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 0, f"不应翻转, got {result}"
+    final = s.get_suggestion_by_note_id("reconcile-note-2")
+    assert final["state"] == "resolved", (
+        f"state 应保持 resolved, got {final['state']}"
+    )
+
+
+def test_publish_overview_reconcile_dismissed_not_flipped(tmp_telemetry):
+    """resolution_source='adopt_command' (用户主动 /adopt) 不被 late_detect 覆盖.
+
+    Why: /adopt 路径走的是 adoption_source='adopt_command', SQL 白名单不含
+    这条, 防止 bot 误把"用户已主动采纳"重新判定. 这条测试覆盖 SQL 边界.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    # /adopt 路径: adopt_command (在 SQL 白名单之外, 不被 late_detect 翻)
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        note_id="adopt-note-1",
+        resolution_source="adopt_command",
+    )
+
+    gl = MagicMock()
+    # 即使代码精确匹配, /adopt 已有的 resolved 也不被覆盖
+    gl.get_file_at_sha.return_value = (
+        "def foo():\n"
+        "    x = 2\n"          # exact_match=True
+        "    return x\n"
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 0, (
+        f"adopt_command 不在 SQL 白名单, 不应翻转, got {result}"
+    )
+    final = s.get_suggestion_by_note_id("adopt-note-1")
+    assert final["state"] == "resolved", (
+        f"state 应保持 resolved (adopt_command 不被覆盖), got {final['state']}"
+    )
+
+
+# ---------- MR289 根因 #1 回归测试: _handle_push 的 auto_detect_applied 不被 cooldown skip ----------
+# Bug: _handle_push 中 cooldown skip 时 continue, 跳过了 auto_detect_applied.
+# 修复: auto_detect_applied 调用移到 cooldown check 之前.
+# 验证: locks.should_skip_cooldown 返回 True 时, auto_detect_applied 仍被调用.
+# 策略: 直接测 _handle_push 的副作用 — mockside_effect 让 locks.should_skip_cooldown 返回 True,
+# 然后断言 auto_detect_applied 被调用了.
+
+def test_handle_push_calls_auto_detect_even_under_cooldown():
+    """MR289 根因 #1: _handle_push 在 cooldown skip 时也要调用 auto_detect_applied."""
+    import asyncio
+    from unittest.mock import patch, MagicMock, AsyncMock
+
+    payload = {
+        "ref": "refs/heads/codex/test-branch",
+        "project": {"id": 34},
+        "user_username": "tester",
+        "user_name": "Test User",
+    }
+
+    # 关键: locks.should_skip_cooldown 返回 True (模拟 cooldown 期内 push)
+    with patch(
+        "reviewagent.webhook.router.locks.should_skip_cooldown",
+        return_value=True,
+    ), patch(
+        "reviewagent.webhook.router.locks.is_bot",
+        return_value=False,
+    ), patch(
+        "reviewagent.commands.suggestion_actions.auto_detect_applied",
+    ) as mock_ad, patch(
+        "reviewagent.gitlab.client.GitLabClient.list_project_mrs",
+    ) as mock_mrs:
+        # _handle_push 对 ("opened", "merged") 两个 state 各调一次
+        # 只在 "opened" 返回 MR, "merged" 返回空
+        def _mrs_side_effect(*args, **kwargs):
+            if kwargs.get("state") == "opened":
+                return [{"iid": 247, "sha": "abc123" + "0" * 32}]
+            return []
+        mock_mrs.side_effect = _mrs_side_effect
+        mock_ad.return_value = {"scanned": 0, "applied": 0, "late_apply": 0}
+
+        # Mock enqueue_mr_chain 不实际入队
+        enqueue = MagicMock()
+        enqueue.return_value = ["fake-job-id"]
+
+        from reviewagent.webhook.router import _handle_push
+        result = asyncio.run(_handle_push(payload, enqueue))
+
+    # 关键断言: auto_detect_applied 必须被调用了 (即使 cooldown skip)
+    assert mock_ad.called, (
+        f"auto_detect_applied 应在 cooldown skip 之前调用, got calls={mock_ad.call_args_list}"
+    )
+    # enqueue_mr_chain 不应被调用 (cooldown skip 时)
+    enqueue.assert_not_called(), (
+        f"enqueue_mr_chain 在 cooldown skip 时不应被调用, got calls={enqueue.call_args_list}"
+    )
+    # mock_mrs 必须被调用 (说明 _handle_push 走到了查 MR 的代码段)
+    assert mock_mrs.called, (
+        f"list_project_mrs 应被调用, got calls={mock_mrs.call_args_list}"
+    )
