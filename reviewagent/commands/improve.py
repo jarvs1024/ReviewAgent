@@ -326,15 +326,105 @@ class ImproveCommand(BaseCommand):
         # 按文件拆分 diff
         diff_by_file = self._split_diff_by_file(ws.diff_file, files)
 
-        # 全局一次 rg 找所有 diff 文件的跨文件 caller 引用 (替代 per-file 重复 rg)
-        wt = str(ws.worktree)
-        cross_file_refs_by_file = self._collect_cross_file_refs_for_mr(files, diff_by_file, wt)
+        # V8 增量检视: 同 head_sha + 同 file 的 diff 没变 → 跳过 LLM, 复用上轮 suggestions
+        _publish_head_sha = self._get_mr_head_sha() or ""
+        files_to_review: list[str] = []
+        files_reuse: list[str] = []
+        if _publish_head_sha:
+            from reviewagent.telemetry.store import get_store
+            try:
+                last_reviewed = get_store().get_reviewed_file_shas(self.project_id, self.mr_iid)
+            except Exception as e:
+                logger.warning("improve.incremental_lookup_failed (non-fatal, full review): {}", e)
+                last_reviewed = {}
 
-        # 并行调用
-        workers = min(len(files), config.improve_parallel_workers)
+            if last_reviewed:
+                # changed 文件的 diff 内容 (用于检测 unchanged 文件的标识符是否被 changed diff 影响)
+                changed_diffs = {fp: diff_by_file.get(fp, "") for fp in files
+                                 if last_reviewed.get(fp) != _publish_head_sha}
+                changed_text = "\n".join(changed_diffs.values())
+
+                for fp in files:
+                    if last_reviewed.get(fp) == _publish_head_sha:
+                        # 同 head_sha: 检查其标识符是否出现在 changed 文件的 diff 里
+                        # (跨文件影响检测: 文件A没变, 但文件B的改动可能影响A里的函数)
+                        idents = set(self._extract_identifiers(diff_by_file.get(fp, "")))
+                        cross_impact = any(
+                            ident in changed_text for ident in idents if len(ident) >= 3
+                        ) if changed_text else False
+                        if cross_impact:
+                            files_to_review.append(fp)  # 强制重检
+                        else:
+                            files_reuse.append(fp)  # 复用上轮
+                    else:
+                        files_to_review.append(fp)  # head_sha 变了, 必须重检
+
+                if files_reuse:
+                    logger.info(
+                        "improve.incremental project={} mr={} sha={} total={} review={} reuse={}",
+                        self.project_id, self.mr_iid, _publish_head_sha[:8],
+                        len(files), len(files_to_review), len(files_reuse),
+                    )
+                    from reviewagent.metrics import inc as _metric_inc
+                    _metric_inc(
+                        "reviewagent_improve_incremental_reuse_total",
+                        project_id=str(self.project_id), mr_iid=str(self.mr_iid),
+                        amount=float(len(files_reuse)),
+                    )
+            else:
+                files_to_review = list(files)
+        else:
+            files_to_review = list(files)  # 拿不到 head_sha, 全检
+
+        # 全局一次 rg 找所有 diff 文件的跨文件 caller 引用 (替代 per-file 重复 rg)
+        # V8: 只对需重检的文件做 rg (reuse 文件不调 LLM, 不需要)
+        wt = str(ws.worktree)
+        cross_file_refs_by_file = self._collect_cross_file_refs_for_mr(files_to_review, diff_by_file, wt)
+
+        # 从 store 取复用文件的上轮 suggestions
+        reuse_suggestions: list[dict[str, Any]] = []
+        if files_reuse:
+            from reviewagent.telemetry.store import get_store
+            try:
+                _store = get_store()
+                for fp in files_reuse:
+                    rows = _store.list_suggestions(
+                        project_id=self.project_id, mr_iid=self.mr_iid, limit=200,
+                    )
+                    for r in rows:
+                        if r.get("file_path") == fp and r.get("head_sha") == _publish_head_sha:
+                            reuse_suggestions.append({
+                                "file": r["file_path"],
+                                "start_line": r.get("target_line", 0),
+                                "severity": r.get("severity", "medium"),
+                                "label": r.get("label", ""),
+                                "header": r.get("header", ""),
+                                "rationale": r.get("one_sentence_summary", "") or r.get("header", ""),
+                            })
+                logger.info(
+                    "improve.incremental_reuse_loaded project={} mr={} reuse_files={} suggestions={}",
+                    self.project_id, self.mr_iid, len(files_reuse), len(reuse_suggestions),
+                )
+            except Exception as e:
+                logger.warning("improve.reuse_load_failed (non-fatal): {}", e)
+                # 复用失败 → 降级为全检
+                files_to_review = list(files)
+                files_reuse = []
+
+        # 并行调用 (只调需重检的文件)
+        # V8: files_to_review 为空 + files_reuse 非空 → 全复用, 不兜底
+        if not files_to_review and files_reuse:
+            logger.info("improve.all_reused project={} mr={} — skip LLM entirely", self.project_id, self.mr_iid)
+            return self._merge_chunks(
+                [{"summary_md": "", "suggestions": reuse_suggestions}],
+                skipped_files=skipped_files,
+            )
+        files_llm = files_to_review if files_to_review else list(files)  # 兜底: 拿不到sha或首次
+        workers = min(len(files_llm), config.improve_parallel_workers)
+
         logger.info(
-            "improve.parallel project={} mr={} files={} workers={}",
-            self.project_id, self.mr_iid, len(files), workers,
+            "improve.parallel project={} mr={} files_to_review={} reuse={} workers={}",
+            self.project_id, self.mr_iid, len(files_llm), len(files_reuse), workers,
         )
 
         chunk_results: list[dict[str, Any]] = []
@@ -343,7 +433,7 @@ class ImproveCommand(BaseCommand):
         last_model = ""
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
-            for fp in files:
+            for fp in files_llm:
                 file_diff = diff_by_file.get(fp, "")
                 valid_lines = line_map.get(fp, set())
                 prompt = self._build_chunk_prompt(
@@ -374,6 +464,10 @@ class ImproveCommand(BaseCommand):
         self._last_oc_result = type(self)._make_token_summary(
             total_prompt_tokens, total_completion_tokens, last_model
         )
+
+        # V8: 把复用的 suggestions 也合并进结果 (作为额外的 "chunk result")
+        if reuse_suggestions:
+            chunk_results.append({"summary_md": "", "suggestions": reuse_suggestions})
 
         # skipped_files 已含 test_skipped (上文 skipped_files = list(test_skipped))
         # V6 软阈值化后不再有"限额 overflow 丢弃"——overflow 文件降级为 patch 仍进 LLM

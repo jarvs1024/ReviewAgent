@@ -1114,6 +1114,22 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_reviewed_file_shas(self, project_id: int, mr_iid: int) -> dict[str, str]:
+        """V8 增量检视: 返回 {file_path: head_sha} — 该文件上次被检视时的 head_sha.
+
+        取每个 file_path 最新一条 suggestion 的 head_sha (不区分 state,
+        因为 dismissed/applied 的文件内容可能没变, 仍可复用检视结果).
+        无 suggestion 的文件不在结果中 → 调用方视为"首次检视".
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT file_path, head_sha FROM suggestions "
+                "WHERE project_id=? AND mr_iid=? AND head_sha IS NOT NULL AND head_sha != '' "
+                "AND id IN (SELECT MAX(id) FROM suggestions WHERE project_id=? AND mr_iid=? GROUP BY file_path)",
+                (project_id, mr_iid, project_id, mr_iid),
+            ).fetchall()
+        return {row["file_path"]: row["head_sha"] for row in rows if row["head_sha"]}
+
     def suggestion_stats(self, project_id: int, mr_iid: int) -> dict:
         with self._conn() as conn:
             rows = conn.execute(

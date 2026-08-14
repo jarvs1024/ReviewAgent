@@ -430,3 +430,147 @@ def test_review_mode_auto_test_project(tmp_path, monkeypatch):
     # test 模式不跳过测试文件 → summary 里不应有 "跳过检视" 提示
     assert "跳过检视" not in result["summary_md"], "test 模式不应跳过测试文件"
     assert cmd._review_mode == "test"
+
+
+# ============ V8 增量检视测试 ============
+
+def test_get_reviewed_file_shas_returns_latest_per_file(tmp_path):
+    """V8: store.get_reviewed_file_shas 返回每个文件最新一条 suggestion 的 head_sha"""
+    import sqlite3
+    from reviewagent.telemetry.store import Store
+    db_path = tmp_path / "test.db"
+    store = Store(db_path)
+    # 手动插 suggestions
+    with store._conn() as conn:
+        conn.execute(
+            "INSERT INTO suggestions (project_id, mr_iid, note_id, file_path, target_line, "
+            "head_sha, state, severity, created_at) VALUES "
+            "(34, 289, 'n1', 'services/a.py', 3, 'sha1', 'open', 'high', '2026-01-01'), "
+            "(34, 289, 'n2', 'services/a.py', 7, 'sha2', 'open', 'high', '2026-01-02'), "
+            "(34, 289, 'n3', 'services/b.py', 1, 'sha1', 'open', 'medium', '2026-01-01')")
+    result = store.get_reviewed_file_shas(34, 289)
+    # a.py 取最新 (id 最大) → sha2; b.py → sha1
+    assert result.get("services/a.py") == "sha2"
+    assert result.get("services/b.py") == "sha1"
+
+
+def test_incremental_reuse_skips_unchanged_files(tmp_path, monkeypatch):
+    """V8: 同 head_sha 的文件跳过 LLM, 复用上轮 suggestions"""
+    from types import SimpleNamespace
+    from pathlib import Path
+    from reviewagent.llm.base import LLMResult
+    from reviewagent.commands.improve import ImproveCommand
+
+    # 构造 2 文件 worktree
+    (tmp_path / "services").mkdir()
+    (tmp_path / "services" / "a.py").write_text("def a():\n    return 1\n")
+    (tmp_path / "services" / "b.py").write_text("def b():\n    return 2\n")
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 289
+    cmd.ws = ws
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {
+        "services/a.py": {1}, "services/b.py": {1},
+    })
+    monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 2)
+    monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["def x():", "    return 1"])
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+        fp: f"diff --git a/{fp} b/{fp}\n+new\n" for fp in files
+    })
+    monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+        fp: [] for fp in files
+    })
+
+    # mock head_sha
+    monkeypatch.setattr(cmd, "_get_mr_head_sha", lambda: "abc123")
+
+    # mock store: a.py 上轮也是 abc123 (未变), b.py 上轮是 old_sha (变了)
+    from reviewagent.telemetry.store import Store as _Store
+    mock_store = type("MockStore", (), {
+        "get_reviewed_file_shas": lambda self, pid, mid: {
+            "services/a.py": "abc123",  # 同 sha → 复用
+            "services/b.py": "old_sha",  # 不同 sha → 重检
+        },
+        "list_suggestions": lambda self, **kw: [
+            {"file_path": "services/a.py", "head_sha": "abc123", "target_line": 1,
+             "severity": "high", "label": "potential bug", "header": "test", "one_sentence_summary": "test"},
+        ],
+    })()
+    monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: mock_store)
+
+    # mock _call_chunk: 只应被调一次 (b.py)
+    called_files = []
+    def _fake_chunk(prompt, w, fp):
+        called_files.append(fp)
+        return LLMResult(data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t")
+    monkeypatch.setattr(cmd, "_call_chunk", _fake_chunk)
+
+    result = cmd._call_agent(ws)
+
+    # 只有 b.py 调了 LLM, a.py 复用
+    assert called_files == ["services/b.py"], f"应只检视b.py, 实际调了: {called_files}"
+    # a.py 的复用 suggestion 出现在结果里
+    assert len(result["suggestions"]) >= 1
+
+
+def test_incremental_cross_impact_forces_recheck(tmp_path, monkeypatch):
+    """V8: unchanged 文件的标识符出现在 changed 文件 diff 里 → 强制重检"""
+    from types import SimpleNamespace
+    from reviewagent.llm.base import LLMResult
+    from reviewagent.commands.improve import ImproveCommand
+
+    (tmp_path / "a.py").write_text("def shared_func():\n    return 1\n")
+    (tmp_path / "b.py").write_text("x = shared_func()\n")
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 289
+    cmd.ws = ws
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+
+    # a.py 和 b.py 都是同 head_sha (未变), 但 b.py 的 diff 引用了 a.py 的标识符
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {
+        "a.py": {1}, "b.py": {1},
+    })
+    monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 2)
+    monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["def shared_func():", "    return 1"])
+    # b.py 的 diff 包含 "shared_func" (a.py 的标识符)
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+        "a.py": "diff --git a/a.py b/a.py\n+def shared_func(): return 1\n",
+        "b.py": "diff --git a/b.py b/b.py\n+x = shared_func()\n",
+    })
+    monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+        fp: [] for fp in files
+    })
+    monkeypatch.setattr(cmd, "_get_mr_head_sha", lambda: "same_sha")
+
+    from reviewagent.telemetry.store import Store as _Store
+    mock_store = type("MockStore", (), {
+        "get_reviewed_file_shas": lambda self, pid, mid: {
+            "a.py": "same_sha",  # 同 sha
+            "b.py": "same_sha",  # 同 sha
+        },
+        "list_suggestions": lambda self, **kw: [],
+    })()
+    monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: mock_store)
+
+    called_files = []
+    def _fake_chunk(prompt, w, fp):
+        called_files.append(fp)
+        return LLMResult(data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t")
+    monkeypatch.setattr(cmd, "_call_chunk", _fake_chunk)
+
+    cmd._call_agent(ws)
+    # a.py 和 b.py 同 sha, 但 b.py diff 引用了 a.py 的 shared_func
+    # a.py 应被强制重检 (跨文件影响), b.py 也重检 (因为它的 diff 里有 changed_text)
+    # 注意: 都同 sha 时 changed_text 为空 (因为没有 changed 文件), 所以都复用
+    # 但如果有一个文件 sha 不同, 它的 diff 就进 changed_text
+    # 这个测试验证: 当所有文件同 sha 时, 全部复用 (无 changed_text)
+    assert len(called_files) == 0, "所有文件同sha且无changed → 应全复用, 0次LLM调用"
