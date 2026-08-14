@@ -255,7 +255,7 @@ class ImproveCommand(BaseCommand):
 
         # V6 strategy 分配 (full / partial / patch)
         strategy: dict[str, str] = {}
-        full_quota = config.improve_max_files
+        full_quota = config.improve_full_files
         for fp in sorted_files:
             if fp in overflow_set:
                 strategy[fp] = "patch"  # MAX_DIFF_CHARS overflow → 强制 patch
@@ -816,7 +816,7 @@ class ImproveCommand(BaseCommand):
             if truncated_count > 0:
                 merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
             if skipped_files:
-                # V6: skipped_files 现在仅含测试/配置文件 (IMPROVE_MAX_FILES 软阈值化后不再丢文件)
+                # V6: skipped_files 现在仅含测试/配置文件 (IMPROVE_FULL_FILES 软阈值化后不再丢文件)
                 display = skipped_files[:10]
                 suffix = f" 等 {len(skipped_files)} 个" if len(skipped_files) > 10 else ""
                 merged_summary += (
@@ -898,7 +898,7 @@ class ImproveCommand(BaseCommand):
 
     def _build_partial_context_block(self, file_path: str, valid_lines: set[int], ws) -> str:
         """partial 模式 (V6): 仅取 diff 行 ±N 行 context, 多段合并.
-        适用: 超出 IMPROVE_MAX_FILES 但仍需 LLM 检视的中等文件.
+        适用: 超出 IMPROVE_FULL_FILES 但仍需 LLM 检视的中等文件.
         性能: 比 full 模式省 token, 比 patch 模式多 ±N 行 context (跨行识别).
         """
         lines = self._read_file_lines(file_path)
@@ -923,7 +923,7 @@ class ImproveCommand(BaseCommand):
             blocks.append(numbered)
         return (
             f"### diff 上下文 (partial, ±{n} 行): `{file_path}`\n"
-            f"⚠️ 此文件超出 IMPROVE_MAX_FILES={config.improve_max_files} 配额, 已降级为 partial 模式\n"
+            f"⚠️ 此文件超出 IMPROVE_FULL_FILES={config.improve_full_files} 配额, 已降级为 partial 模式\n"
             f"⚠️ 仅显示 diff 附近 {len(merged)} 段 (±{n} 行), 跨段语义识别能力下降\n"
             f"```\n" + "\n...\n".join(blocks) + "\n```"
         )

@@ -127,4 +127,4 @@ systemctl is-active reviewagent-webhook reviewagent-worker@1 reviewagent-worker@
 1. **pip install 失败（urllib3 / Python 3.12 bug）**：先 `pip install 'urllib3<2'`，再升级 pip。
 2. **worker "FileNotFoundError: git"**：systemd unit 的 PATH 须含 `/usr/bin`。
 3. **上传文件 null 字节污染**：ssh_ops.py upload 的 staging 可能预分配块导致小文件被 null 填充，上传后用 `python3 -m compileall -q reviewagent` 验证。
-4. **`max_files` NameError**：`_merge_chunks` 是 `@staticmethod`，不能引用调用方的局部变量，须用 `config.improve_max_files`。
+4. **`full_files` NameError**：`_merge_chunks` 是 `@staticmethod`，不能引用调用方的局部变量，须用 `config.improve_full_files`。

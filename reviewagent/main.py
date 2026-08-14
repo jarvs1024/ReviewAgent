@@ -49,9 +49,9 @@ def _register_metric_help() -> None:
 
     helps = {
         "reviewagent_improve_file_limit_total":
-            "Number of improve runs that hit IMPROVE_MAX_FILES truncation.",
+            "Number of improve runs that hit IMPROVE_FULL_FILES truncation.",
         "reviewagent_improve_files_skipped_total":
-            "Number of files dropped because of IMPROVE_MAX_FILES.",
+            "Number of files dropped because of IMPROVE_FULL_FILES.",
         "reviewagent_webhook_received_total":
             "Webhook events received, labeled by object_kind.",
         "reviewagent_webhook_skipped_total":
