@@ -203,8 +203,38 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 3. 不要用 context 行（`@@` 附近不变的行）做 suggestion 锚点
 4. 不要用删除行（`-` 行）做 suggestion 锚点
 5. 如果你怀疑某个 issue 的真正目标行**不在** VALID NEW LINES 里：
-   - **不要填 `improved_code`**，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
+   - **`improved_code` 必须为空字符串 `""`**，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
    - 或直接不写这条 suggestion（`suggestions: []` 也是合法输出）
+   - ️ **禁止**用 VALID NEW LINES 里的其他行作为"占位锚点"并填写 `improved_code` — 这会导致建议指向错误的代码行
+
+#### 示例：目标行不在 VALID NEW LINES
+
+```
+VALID NEW LINES: [7]  # 只有 L7 改了 TESTCASE_TITLE
+
+问题：L14 的 def 行缺失 docstring（SSD-RULE-CASE-DESCRIPTION）
+
+✅ 正确做法 A — 只写 rationale，improved_code 为空:
+{
+  "file": "test_xxx.py",
+  "start_line": 7,
+  "existing_code": "",
+  "improved_code": "",
+  "rationale": "SSD-RULE-CASE-DESCRIPTION: 测试函数 (L14) 缺失 docstring。L14 不在 VALID NEW LINES 内，无法提供 Apply 建议。"
+}
+
+✅ 正确做法 B — 不写这条 suggestion:
+"suggestions": []
+
+❌ 错误做法 — 用 L7 作占位锚点并填写 improved_code:
+{
+  "file": "test_xxx.py",
+  "start_line": 7,
+  "existing_code": "TESTCASE_TITLE = ...",  # ← 这是 L7 的内容，与 docstring 问题无关！
+  "improved_code": "TESTCASE_TITLE = ...",  # ← 会错误地建议修改/删除 L7
+  "rationale": "L14 缺失 docstring..."
+}
+```
 
 ### 🔴 强制要求: 每个可疑 bug 都必须有一条 suggestion
 

@@ -1628,6 +1628,28 @@ class ImproveCommand(BaseCommand):
                 line_map=line_map,
                 file_sources=file_sources,
             )
+            # === MR1121 修复: rationale 明确说目标行不在 VALID NEW LINES 内 → 强制降级 general.
+            # Why: LLM 有时在 rationale 里写"降级为普通评论"，但 improved_code 仍指向
+            #      VALID NEW LINES 里的其他行 (占位锚点), 导致建议指向错误代码.
+            # 检测: rationale 包含"不在 VALID NEW LINES" / "不在本次 diff" / "无法提供可 Apply" 等关键词.
+            if decision["action"] == "post":
+                _rationale = (normalised.get("rationale") or "").lower()
+                _not_in_diff_keywords = (
+                    "不在 valid new lines",
+                    "不在本次 diff",
+                    "无法提供可 apply",
+                    "降级为普通评论",
+                    "not in valid new lines",
+                    "not in diff",
+                )
+                if any(kw in _rationale for kw in _not_in_diff_keywords):
+                    logger.info(
+                        "improve.force_general_not_in_diff project={} mr={} file={} line={} rationale={}",
+                        self.project_id, self.mr_iid, file_path, start_line,
+                        (normalised.get("rationale") or "")[:80],
+                    )
+                    decision = {"action": "general", "new_line": start_line,
+                                "reason": "rationale indicates target not in VALID NEW LINES"}
             # === A. 跨次去重 — 守卫所有发布动作 (post / general).
             # Why: 此前 dedup 只在 action == "post" 分支内, 收缩建议
             #      (action == "general") 走另一条路径直接发评论, 同一行
