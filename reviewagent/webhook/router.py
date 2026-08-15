@@ -335,6 +335,18 @@ async def _handle_push(payload: dict, enqueue_mr_chain) -> dict:
                 "push.auto_detect_applied failed (non-fatal) project={} mr={}: {}",
                 project_id, mr_iid, e,
             )
+        # 6a. max review calls — push hook path 也需要 (否则 push 会绕过计数触发 im chain)
+        skip_max, current_count = locks.should_skip_max_review_calls(
+            project_id, mr_iid, list(config.push_commands),
+        )
+        if skip_max:
+            from reviewagent.config import config as _config
+            logger.info(
+                "push.skip max_review_calls project={} mr={} count={} limit={}",
+                project_id, mr_iid, current_count, _config.max_review_calls_per_mr,
+            )
+            # 不入队; 不发 no_more_review notice (code_change hook 紧接着会发, 避免重复)
+            continue
         if locks.should_skip_cooldown(project_id, mr_iid, config.push_commands[0]):
             continue
         job_ids = enqueue_mr_chain(
