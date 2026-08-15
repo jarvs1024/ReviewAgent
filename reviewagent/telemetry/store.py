@@ -815,13 +815,13 @@ class Store:
         只返回轻量级字段 (不返回完整 diff) 节省 token:
           - file, line (用于 agent 判断是否已覆盖)
           - header (用于 agent 判断是否是同类问题)
-          - severity / status
+          - severity / state
           - existing_code_hash (fingerprint 前 8 位, 用于完全匹配判定)
         """
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT file_path, target_line, header, severity, status,
+                SELECT file_path, target_line, header, severity, state,
                        substr(fingerprint, 1, 8) AS fp_short
                 FROM suggestions
                 WHERE project_id = ? AND mr_iid = ?

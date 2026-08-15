@@ -194,20 +194,9 @@ def run_weekly_report_job(
 
     cfg = WeeklyReportConfig.from_env()
     if project_id is not None:
-        cfg = WeeklyReportConfig(
-            enabled=cfg.enabled,
-            target_project_id=project_id,
-            target_branch=cfg.target_branch,
-            timezone=cfg.timezone,
-            collectors=cfg.collectors,
-            notifier=cfg.notifier,
-            dingtalk_webhook_url=cfg.dingtalk_webhook_url,
-            dingtalk_secret=cfg.dingtalk_secret,
-            dingtalk_dry_run=cfg.dingtalk_dry_run,
-            dingtalk_retry_attempts=cfg.dingtalk_retry_attempts,
-            markdown_chunk_limit=cfg.markdown_chunk_limit,
-            cron_schedule=cfg.cron_schedule,
-        )
+        # 用 dataclasses.replace 只覆盖 target_project_id, 避免手动重建遗漏字段
+        import dataclasses as _dc
+        cfg = _dc.replace(cfg, target_project_id=project_id)
 
     logger.info(
         "worker.run_weekly_report_job week_offset={} push={} project_id={}",

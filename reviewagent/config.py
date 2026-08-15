@@ -41,7 +41,7 @@ class Config:
 
     # ---- LLM Provider 适配层 ----
     # 通过 LLM_PROVIDER=opencode|qodercli 在两者之间切换；详见 docs/LLM_PROVIDER_ADAPTER.md.
-    llm_provider: str = "opencode"          # "opencode" | "qodercli"
+    llm_provider: str = "qodercli"          # "opencode" | "qodercli" (qodercli 是当前推荐路径)
 
     # ---- qodercli 专属配置 ----
     qodercli_node_path: str = ""            # node 可执行文件；空则用 shutil.which("node")
@@ -165,7 +165,7 @@ class Config:
             opencode_password=_env("OPENCODE_PASSWORD", ""),
             opencode_model=_env("OPENCODE_MODEL", "deepseek/deepseek-v4-flash"),
             opencode_timeout=int(_env("OPENCODE_TIMEOUT", "900")),
-            llm_provider=_env("LLM_PROVIDER", "opencode"),
+            llm_provider=_env("LLM_PROVIDER", "qodercli"),
             qodercli_node_path=_env("QODERCLI_NODE_PATH", ""),
             qodercli_js_path=_env("QODERCLI_JS_PATH", ""),
             qodercli_model=_env("QODERCLI_MODEL", "DeepSeek-V4-Flash"),

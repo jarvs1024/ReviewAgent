@@ -41,7 +41,7 @@ async def webhook(request: Request) -> dict:
 
     # Webhook handler timeout — 防止 self-loop / 慢请求卡住 uvicorn event loop.
     # 真实命令 (improve) 通过 RQ worker 异步执行, webhook 自身只需在 30s 内完成
-    # 解析 + 入队; 超过即返回 504 让 GitLab 重试.
+    # 解析 + 入队; 超过即返回 200 (不重试, 避免雪崩).
     import asyncio
     try:
         if object_kind in ("merge_request", "push"):
@@ -66,11 +66,6 @@ async def webhook(request: Request) -> dict:
         logger.exception("webhook.handler_crash object_kind={} err={}", object_kind, _e)
         _metric_inc("reviewagent_webhook_skipped_total", reason="handler_crash")
         return {"status": "error", "reason": "handler_crash", "object_kind": object_kind}
-
-    if object_kind in ("merge_request", "push"):
-        return await _handle_code_change(payload, object_kind, enqueue_mr_chain)
-    if object_kind == "note":
-        return await _handle_note_hook(payload, enqueue_command_from_note)
 
     logger.info("webhook.ignored object_kind={}", object_kind)
     _metric_inc("reviewagent_webhook_skipped_total", reason="unknown_object_kind")

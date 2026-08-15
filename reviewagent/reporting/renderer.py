@@ -310,7 +310,7 @@ def _render_telemetry(d: dict[str, Any], *, dashboard_url: str = "") -> str:
       回退到确定性 _build_inspection_summary.
     - 指标表仅保留 5 行核心指标, 不再堆 severity 分布 / 触发最多规则 两行裸数据.
     - `dashboard_url` 非空时, 在指标表之后追加「📈 检视看板: [url](url)」一行,
-      指向 cfg.REVIEWAGENT_WEEKLY_DASHBOARD_URL 配置的检视看板地址.
+      指向 cfg.dashboard_url 配置的检视看板地址.
     """
     mr_count = d.get("mr_count", 0)
     mr_total = d.get("mr_total", 0)

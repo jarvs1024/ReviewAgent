@@ -1304,7 +1304,7 @@ class ImproveCommand(BaseCommand):
                 for s in existing[:50]:  # 限制 50 条避免 prompt 过长
                     fp = s.get("fp_short", "?")
                     sev = (s.get("severity") or "?").upper()
-                    st = (s.get("status") or "?").upper()
+                    st = (s.get("state") or "?").upper()
                     fp_path = s.get("file_path", "?")
                     line = s.get("target_line", "?")
                     hdr = (s.get("header") or "?").strip()[:30]

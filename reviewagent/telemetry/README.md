@@ -108,24 +108,25 @@
 
 | 方法 | 用途 |
 |---|---|
-| `record_suggestion(*, project_id, mr_iid, note_id, file_path, target_line, target_line_end=None, existing_code=None, improved_code=None, header=None, severity=None, head_sha, rule_keys=None, one_sentence_summary=None, importance=None, label=None, fingerprint=None, cohort_key=None, severity_source=None) -> int` | INSERT 一条 inline suggestion, 同步 touch `last_activity_at`。`posted_at` 与 `created_at` 同时写 `_utcnow()` (当前实现等价) |
+| `record_suggestion(*, project_id, mr_iid, note_id, file_path, target_line, target_line_end=None, existing_code=None, improved_code=None, header=None, severity=None, head_sha, rule_keys=None, one_sentence_summary=None, importance=None, label=None, fingerprint=None, content_fingerprint=None, cohort_key=None, severity_source=None) -> int` | INSERT 一条 inline suggestion, 同步 touch `last_activity_at`。`posted_at` 与 `created_at` 同时写 `_utcnow()` (当前实现等价)。`content_fingerprint` 是 Batch5 的行号变化场景 dedup (existing_code normalize 后 hash) |
 | `suggestion_exists_by_fingerprint(project_id, mr_iid, fingerprint) -> bool` | 跨次精确指纹 dedup (主键命中即返回 True) |
 | `suggestion_exists_at_line(project_id, mr_iid, file_path, target_line, severity="", head_sha="", line_tolerance=0, rule_keys=None) -> bool` | 跨次 heuristic dedup (`file, line±tolerance, state=open[, rule_keys 重叠]` + `head_sha` 兜底), 详见下方"关键行为" |
 | `list_suggestion_headers(project_id, mr_iid) -> list[dict]` | 轻量列表 (file / line / header / severity / fp_short 前 8 位), 给 agent prompt 注入避免重复提 |
 | `get_suggestion_by_note_id(note_id) -> dict \| None` | 按 GitLab note_id 查 (id DESC LIMIT 1) |
 | `find_open_suggestion_by_line(*, project_id, mr_iid, file_path, target_line, window=3) -> dict \| None` | UI Apply 兜底匹配 (state=open, line±window, 按行号距离 + id 排序) |
 | `list_open_suggestions(*, project_id, mr_iid) -> list[dict]` | 全量 open suggestion (note_id / file_path / target_line / existing_code / improved_code / head_sha), 给 `auto_detect_applied` 跑 reconcile |
-| `list_resolved_suggestions(*, project_id, mr_iid) -> list[dict]` | 全量 `state='resolved'` 且 `resolution_source='gitlab_resolve'` 的 suggestion (字段同上), 给 `auto_detect_applied` 的 late_detect 跑 reconcile。**只扫 gitlab_resolve 这一类**——/adopt 走 `adoption_source='adopt_command'` 不进 / /dismiss 状态是 dismissed 也不进, 避免覆盖 |
-| `update_suggestion_state(note_id, state, *, actor_username=None, dismissed_reason=None, adoption_source=None)` | 状态机: `applied` / `dismissed` / `resolved` / `superseded`; 自动写 `applied_at` / `dismissed_at` / `dismissed_by` / `dismissed_reason` / `resolved_at` / `resolved_by` / `resolution_source` / `updated_at` |
+| `list_resolved_suggestions(*, project_id, mr_iid) -> list[dict]` | 全量 `state='resolved'` 且 `resolution_source IN ('gitlab_resolve', 'publish_overview_reconcile')` 的 suggestion (字段同上), 给 `auto_detect_applied` 的 late_detect 跑 reconcile。**白名单只覆盖 bot 误分类的两条路径**——/adopt 走 `adoption_source='adopt_command'` 不进 / /dismiss 状态是 dismissed 也不进, 避免覆盖 (`publish_overview_reconcile` 是 MR289 根因 #2, commit c9760b2 加) |
+| `update_suggestion_state(note_id, state, *, actor_username=None, dismissed_reason=None, adoption_source=None, adoption_evidence=None, applied_commit_sha=None, expected_states=None) -> bool` | 状态机: `applied` / `dismissed` / `resolved` / `superseded`; 自动写 `applied_at` / `dismissed_at` / `dismissed_by` / `dismissed_reason` / `resolved_at` / `resolved_by` / `resolution_source` / `adoption_evidence` / `applied_commit_sha` / `updated_at`。传 `expected_states` 时 WHERE 带 `state IN (...)` 原子化 guard (Batch7/MR264), 防并发 race 覆盖; 返回 bool: True=实际更新, False=state 不在 expected 内 (并发修改跳过) |
 | `supersede_stale_open_suggestions(*, project_id, mr_iid, current_head_sha) -> list[str]` | head_sha 不一致的全标 superseded, 返回被 supersede 的 `note_id` 列表; `current_head_sha=""` (空字符串) 时返回 `[]` 不操作 |
 | `update_suggestion_note_id(suggestion_id, new_note_id)` | webhook /adopt 兜底命中后回写真实 GitLab note_id |
 | `list_suggestions(*, project_id, mr_iid, state, since, until, limit=100, offset=0) -> list[dict]` | 多条件分页 (created_at DESC, id DESC) |
+| `get_reviewed_file_shas(project_id, mr_iid) -> dict[str, str]` | V8 增量检视: 返回 `{file_path: head_sha}` ——每个文件最近一次被检视时的 head_sha (不区分 state, dismissed/applied 的文件复用)。无 suggestion 的文件不在结果中 → 调用方视为首次检视 (commit 7708877) |
 | `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比) |
 | `suggestion_metrics(*, project_id, since, until) -> dict` | 周报 / 仪表盘维度: `state_counts` / `severity_counts` / `action_counts` / `adoption_rate` (0~1 小数) / `adoption_pct` |
 | `supersede_stale_in_cohort(*, project_id, mr_iid, cohort_key, keep_note_id) -> list[str]` | 同 cohort 内除 keep_note_id 外所有 open/resolved/dismissed 标 superseded（cohort 归并兜底；process_adopt / mark_suggestion_applied_by_diff 末尾调一次） |
-| `supersede_suggestion(suggestion_id) -> None` | 单条 supersede（被新 suggestion 取代；写 `supersedes_note_id` + `superseded_at`） |
-| `get_latest_in_cohort_excluding(...) -> dict \| None` | cohort 内排除某 note 后取最新一条（improve 去重用） |
-| `list_latest_by_cohort(project_id, mr_iid) -> list[dict]` | 每个 cohort_key (fallback 到 note_id) 只返回最新一条，排除 superseded（Batch2：build_overview_body 同问题被 V1/V2/V3 重复发布时不再各自算一个状态） |
+| `supersede_suggestion(old_note_id, new_note_id, generation) -> None` | 单条 supersede（被新 suggestion 取代；Batch3 写 `supersedes_note_id` + `superseded_at` + 新 suggestion 的 `cohort_generation`）|
+| `get_latest_in_cohort_excluding(*, project_id, mr_iid, cohort_key, exclude_note_id) -> dict \| None` | cohort 内排除某 note 后取最新一条（Batch3 improve 去重用，跳过 state='superseded'） |
+| `list_latest_by_cohort(*, project_id, mr_iid) -> list[dict]` | 每个 cohort_key (fallback 到 note_id) 取最新一条 + 多种 terminal state 冲突时全保留 (Batch6/MR263)。排除 superseded。规则：cohort 内全 open 或全同 terminal state 只取最新；多种 terminal state 冲突 (applied/dismissed/resolved 互相盖) 全部保留——避免 dismissed 被 late_detect 翻 applied 时漏掉用户已做的忽略动作 |
 | `count_superseded_in_mr(*, project_id, mr_iid) -> int` | 显式 superseded 数（`supersede_suggestion` 触发） |
 | `count_hidden_by_cohort(*, project_id, mr_iid) -> int` | cohort 归并隐藏的旧记录数（list_latest_by_cohort 中 row_number > 1） |
 
@@ -163,7 +164,7 @@
 | `unknown` | — | 历史数据 |
 | `gitlab_resolve` | — | GitLab 直接解决主题 |
 
-未在表内的 `adoption_source` (如 `late_detect` / `periodic_reconcile`) 返回 `None`，前端走兜底展示。
+未在表内的 `adoption_source` (如 `late_detect` / `periodic_reconcile` / `publish_overview_reconcile`) 返回 `None`，前端走兜底展示。
 
 ## Schema
 
@@ -299,12 +300,12 @@
 | GET | `/health` | DB 连接 + `mr_activity` / `review_runs` 行数 |
 | GET | `/runs` | run 列表 (`project_id` / `mr_iid` / `command` / `status` / `since` / `until` / `limit` / `offset`) |
 | GET | `/runs/{run_id}` | 单 run 详情 (404 if not found) |
-| GET | `/summary` | 聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens}}` / `by_status` / `by_day` / `top_mrs` (前 10) |
+| GET | `/summary` | 聚合: `since` / `until` / `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens}}` / `by_status` / `by_day` / `top_mrs` (前 10) |
 | GET | `/mr/{project_id}/{mr_iid}` | MR 元信息 + `recent_runs` (最近 50 条); 顺手 enrich `web_url` |
 | GET | `/mr/{project_id}/{mr_iid}/runs` | MR 的 run 列表 (`limit` 默认 100) |
 | GET | `/mr/{project_id}/{mr_iid}/suggestions` | MR 的 suggestion 列表 (`state` 过滤 + 分页; 响应里加 `state_label` / `adoption_source_label`) |
 | GET | `/mr/{project_id}/{mr_iid}/stats` | state / action / severity 计数 + `adoption_rate` (applied / processed 百分比) |
-| GET | `/mr/{project_id}/{mr_iid}/timeline` | run + suggestion_posted + suggestion_action 三方归并时间线 (`event_type`, `detail`, `state` / `validation_status`) |
+| GET | `/mr/{project_id}/{mr_iid}/timeline` | run + suggestion_posted + suggestion_action 三方归并时间线 (at DESC), 响应 `{"events": [{at, event_type, event_id, detail, state}]}`。event_type=`run` 时 state=status; event_type=`suggestion_action` 时 state=validation_status; event_type=`suggestion_posted` 时 state=suggestion.state |
 | GET | `/mrs` | MR 列表 (`project_id` / `state` / `since` / `limit`); enrich `web_url` (调 GitLab API, 项目级缓存) |
 | GET | `/mrs/{project_id}/{mr_iid}` | alias of `/mr/{project_id}/{mr_iid}` (兼容 pr-agent 风格) |
 | GET | `/mrs/{project_id}/{mr_iid}/dismissals` | MR 的 dismiss 详情 (含 `dismissed_reason`, 按 `dismissed_at DESC`) |
@@ -312,7 +313,7 @@
 | GET | `/dismissals/by-rule` | dismiss 按 `suggestions.rule_keys` 聚合 (含 `(no_rule_key)` 兜底 + 每条 rule 的 `reasons[]` 分布) |
 | GET | `/metrics/overview` | `summary` 合并 `suggestion_metrics` (state_counts / severity_counts / action_counts / adopted / dismissed / resolved / adoption_rate) |
 | GET | `/metrics/severity` | severity 维度计数 |
-| GET | `/metrics/rules` | **当前按 severity 兼容分组返回** (前端 dashboard 直接消费), 不是真正按 `rule_keys` 聚合 — `suggestion_metrics` 里没有 rule_key 聚合路径 |
+| GET | `/metrics/rules` | **当前按 severity 兼容分组返回** (前端 dashboard 直接消费), 不是真正按 `rule_keys` 聚合。要按 rule_key 维度用 `Store.distinct_rule_keys(*, project_id, mr_iid)` 拉去重列表, 或 `Store.rule_key_counts(*, project_id, since, until, top_n=5)` 直接拿计数 (这俩方法无 REST 端点暴露) |
 | GET | `/metrics/authors` | 按 `author_sticky` 聚合的 MR 活跃度 (没有 author 维度的 suggestion / run 计数) |
 | GET | `/weekly-reports` | 列出 `data/weekly_reports/weekly-*.json`；`project_id` 过滤按 JSON 内容里的 `project_id` 字段；`limit` 默认 20 |
 | GET | `/weekly-reports/{name}` | 读取单个周报 JSON (防 `../` 路径穿越) |

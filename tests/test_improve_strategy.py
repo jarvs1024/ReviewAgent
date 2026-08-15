@@ -574,3 +574,43 @@ def test_incremental_cross_impact_forces_recheck(tmp_path, monkeypatch):
     # 但如果有一个文件 sha 不同, 它的 diff 就进 changed_text
     # 这个测试验证: 当所有文件同 sha 时, 全部复用 (无 changed_text)
     assert len(called_files) == 0, "所有文件同sha且无changed → 应全复用, 0次LLM调用"
+
+
+# ============ V9 架构审查修复回归测试 ============
+
+def test_list_suggestion_headers_uses_state_not_status(tmp_path):
+    """回归: list_suggestion_headers 之前查 status 列 (不存在), 静默崩 → 防重复失效.
+    修复: 改查 state 列."""
+    from pathlib import Path
+    from reviewagent.telemetry.store import Store
+
+    store = Store(tmp_path / "test.db")
+    with store._conn() as conn:
+        conn.execute(
+            "INSERT INTO suggestions (project_id, mr_iid, note_id, file_path, target_line, "
+            "head_sha, state, severity, header, fingerprint, created_at) VALUES "
+            "(34, 289, 'n1', 'services/a.py', 3, 'sha1', 'open', 'high', 'test header', 'abcdef1234', '2026-01-01'), "
+            "(34, 289, 'n2', 'services/b.py', 7, 'sha1', 'applied', 'medium', 'another', 'deadbeef5678', '2026-01-02')"
+        )
+    # 之前会抛 OperationalError: no such column: status
+    result = store.list_suggestion_headers(34, 289)
+    assert len(result) == 2
+    states = {r["state"] for r in result}
+    assert "open" in states
+    assert "applied" in states
+    assert "status" not in result[0], "不应返回 status 键, 应为 state"
+
+
+def test_weekly_config_replace_preserves_all_fields():
+    """回归: 周报配置重建之前手动列字段, 漏了 report_title/emoji/dashboard_url.
+    修复: 用 dataclasses.replace 只覆盖 target_project_id."""
+    import dataclasses
+    from reviewagent.reporting.config import WeeklyReportConfig
+
+    cfg = WeeklyReportConfig.from_env()
+    cfg2 = dataclasses.replace(cfg, target_project_id=999)
+    # 所有字段都应保留
+    assert cfg2.report_title == cfg.report_title
+    assert cfg2.report_emoji == cfg.report_emoji
+    assert cfg2.dashboard_url == cfg.dashboard_url
+    assert cfg2.target_project_id == 999
