@@ -8,7 +8,7 @@
 ## 一、本地开发
 
 ```bash
-# 1. 依赖（Python 3.12）
+# 1. 依赖（Python 3.12+，需 >=3.12，3.13 亦可）
 cd ReviewAgent
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"

@@ -22,7 +22,7 @@ ReviewAgent 通过 systemd 管理全部服务，部署在 Linux 服务器上。
 ## 一、基础依赖
 
 ```bash
-# Python 3.12 + venv
+# Python 3.12+（需 >=3.12，3.13 亦可）
 dnf install -y python3.12 python3.12-devel git
 mkdir -p /home/workflow/ReviewAgent
 cd /home/workflow/ReviewAgent
@@ -56,7 +56,7 @@ cp .env.example .env
 | `reviewagent-worker@.service` | RQ review 队列 worker（模板，实例化 @1/@2/@3） |
 | `reviewagent-weekly-worker.service` | RQ review-weekly 队列 worker（周报专用） |
 | `reviewagent-weekly-enqueue.service` | 周报入队 oneshot |
-| `reviewagent-weekly.timer` | 每周一 10:00 触发周报 |
+| `reviewagent-weekly.timer` | 每周一 10:30 触发周报（与 `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 默认一致） |
 
 ```bash
 # 部署 service 文件到 /etc/systemd/system/

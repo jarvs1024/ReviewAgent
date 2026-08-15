@@ -37,7 +37,7 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 | 周报（JSON + Markdown，可推钉钉，含固有代码全量扫描） | 脚本 / 定时 | ✅ |
 | `/review`（深度代码检视） | — | ❌ 未实现 |
 
-> 注：`prompts/` 里已为 `/review` 预留规划，但 `commands/review.py` 尚未编写，webhook 也不识别 `/review`。
+> 注：`/review`（深度代码检视）尚未实现——`commands/review.py` 未编写，webhook 不识别 `/review`，`prompts/` 下亦无对应规划。
 
 ---
 
@@ -49,7 +49,7 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 | `/improve` | MR 评论 | 调 `code-improver` agent，逐文件发可 Apply 的 inline 建议评论 |
 | `/adopt [理由]` | 对某条 inline suggestion 的回复 | 验证代码确已改动 → 标记 adopted，resolve discussion |
 | `/dismiss [理由]` | 对某条 inline suggestion 的回复 | 标记 dismissed，resolve discussion，记入 telemetry |
-| （自动） | MR open / update（含新 commit）· Push | `pr_commands=describe+improve` / `push_commands=improve` |
+| （自动） | MR open / update（含新 commit）· Push | `pr_commands=describe,improve` / `push_commands=describe,improve` |
 
 死循环防护：bot 自评论会被忽略；`MR_COOLDOWN_SECONDS=60` 限频；`MAX_REVIEW_CALLS_PER_MR` 上限（默认 30，达上限后不再自动检视，提示手动 `/improve`）。
 
@@ -122,8 +122,7 @@ reviewagent/
 │   └── counters.py        #   计数器注册表
 ├── prompts/               # agent prompt（Markdown frontmatter；核心交付物）
 │   ├── describe.md        #   pr-describer（MR 标题 + 中文描述）
-│   ├── improve.md         #   /improve 命令编排 prompt
-│   ├── improve_agent.md   #   code-improver（LLM primary agent，发 inline 建议）
+│   ├── improve.md         #   code-improver（LLM primary agent，发 inline 建议）+ /improve 命令编排（自包含完整 agent 规范）
 │   ├── weekly_inspection_summary.md  # 周报一：本周检视概况叙事（LLM）
 │   ├── weekly_change_summary.md      # 周报二：main 变更汇总（LLM）
 │   ├── weekly_quality_scan.md        # 周报三：代码质量全量扫描，含固有代码评估（LLM）
@@ -176,16 +175,16 @@ reviewagent/
 | GitLab | `GITLAB_URL` `GITLAB_PERSONAL_ACCESS_TOKEN` `GITLAB_WEBHOOK_SECRET` `GITLAB_BOT_USERNAME` | 必填；PAT 最低 `api` scope |
 | LLM | `LLM_PROVIDER` `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | 默认 `qodercli`（subprocess）；切 `opencode` 走 HTTP API；`OPENCODE_TIMEOUT` 默认 900s |
 | QoderCLI | `QODERCLI_NODE_PATH` `QODERCLI_JS_PATH` `QODERCLI_MODEL` `QODERCLI_TIMEOUT` `QODERCLI_MAX_TURNS` `QODERCLI_PERMISSION_MODE` | qodercli subprocess 模式专属配置；路径留空自动探测 |
-| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` `RQ_WORKER_CLASS` | 队列名两环境不同（`review`/`review-v2`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数；macOS 使用 `ReviewAgentSpawnWorker` 避免 RQ fork crash |
+| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` `RQ_WORKER_CLASS` | 队列名默认 `review`（周报队列 `review-weekly`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数；macOS 使用 `ReviewAgentSpawnWorker` 避免 RQ fork crash |
 | 存储 | `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` | 默认 `./data` |
 | 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过 |
 | 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库读 `AGENTS.md` / `.agents/rules/*.md`；`REPO_CONTEXT_MAX_LINES` 规则文件最大行数（默认 2000） |
-| improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SCORE` | 并行度 / 限流；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先 |
+| improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MIN_SCORE` `IMPROVE_MIN_SEVERITY` `IMPROVE_REVIEW_MODE` `IMPROVE_KEYWORD_PATHS` `IMPROVE_SKIP_TEST_PATHS` `IMPROVE_PARTIAL_CONTEXT_LINES` `IMPROVE_PATCH_CONTEXT_LINES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_PRIORITY_WEIGHT_DIFF` `IMPROVE_PRIORITY_WEIGHT_KEYWORD` `IMPROVE_PRIORITY_WEIGHT_DENSITY` `IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE` | 并行度 / 限流 / 模式 / priority 权重；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先 |
 | 检视过滤 | `REVIEW_EXCLUDE_EXTENSIONS` | 不送审的文件扩展名（默认含 `.md`/`.txt`/图片等） |
 | 周报-总开关 | `REVIEWAGENT_WEEKLY_ENABLED` `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` `REVIEWAGENT_WEEKLY_TARGET_BRANCH` `REVIEWAGENT_WEEKLY_TIMEZONE` | 总开关（默认 true）；目标项目 id（0=跳过 merged_mrs/repo_scan 段）/ 分支（默认 `main`）/ 时区（默认 `Asia/Shanghai`） |
 | 周报-采集 | `REVIEWAGENT_WEEKLY_COLLECTORS` `REVIEWAGENT_WEEKLY_NOTIFIER` | 启用的采集段（默认 `telemetry,merged_mrs,repo_scan`）；通知器（默认 `dingtalk`） |
-| 周报-调度 | `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` | cron 触发时间，`OnCalendar` 格式（默认 `Mon 09:00`；当前无 systemd timer，由 `scripts/run_weekly_report.sh` 或外部 cron 调用） |
-| 周报-钉钉 | `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为兼容回退）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
+| 周报-调度 | `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` | cron 触发时间，`OnCalendar` 格式（默认 `Mon 10:30`；由 `scripts/run_weekly_report.sh` 或外部 cron 调用） |
+| 周报-钉钉 | `REVIEWAGENT_WEEKLY_DASHBOARD_URL` `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | 看板地址（渲染到「本周检视概况」末尾，空=不显示）；webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为兼容回退）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
 | 周报-标题 | `REVIEWAGENT_WEEKLY_REPORT_TITLE` `REVIEWAGENT_WEEKLY_REPORT_EMOJI` | 周报标题（默认 `SSD自动化代码检视周报`）/ emoji（默认 📊） |
 
 ---
@@ -201,7 +200,7 @@ reviewagent/
 - 跨次建议去重（fingerprint）+ 跨文件引用分析 + 评分过滤。
 
 ### 计划 / 进行中
-- **`/review` 命令**：深度代码检视（设计见 prompts 规划），目前尚未实现。
+- **`/review` 命令**：深度代码检视，目前尚未实现（无 prompt 规划、无命令实现）。
 - **多项目扩展**：当前按 project 维度接，后续计划批量接入 + per-project 配置。
 - **监控告警**：webhook 5xx / token 超限 / 服务下线。
 

@@ -109,8 +109,8 @@
 | 方法 | 用途 |
 |---|---|
 | `record_suggestion(*, project_id, mr_iid, note_id, file_path, target_line, target_line_end=None, existing_code=None, improved_code=None, header=None, severity=None, head_sha, rule_keys=None, one_sentence_summary=None, importance=None, label=None, fingerprint=None, content_fingerprint=None, cohort_key=None, severity_source=None) -> int` | INSERT 一条 inline suggestion, 同步 touch `last_activity_at`。`posted_at` 与 `created_at` 同时写 `_utcnow()` (当前实现等价)。`content_fingerprint` 是 Batch5 的行号变化场景 dedup (existing_code normalize 后 hash) |
-| `suggestion_exists_by_fingerprint(project_id, mr_iid, fingerprint) -> bool` | 跨次精确指纹 dedup (主键命中即返回 True) |
-| `suggestion_exists_at_line(project_id, mr_iid, file_path, target_line, severity="", head_sha="", line_tolerance=0, rule_keys=None) -> bool` | 跨次 heuristic dedup (`file, line±tolerance, state=open[, rule_keys 重叠]` + `head_sha` 兜底), 详见下方"关键行为" |
+| `suggestion_exists_by_fingerprint(project_id, mr_iid, fingerprint, head_sha="") -> bool` | 跨次精确指纹 dedup (主键命中即返回 True)。Z3+ 行为: 已处理状态 (applied/dismissed/resolved) 永远命中; `state="open"` 必须 `head_sha` 一致 (force-push 后残留 → 放行重新识别), 防止 fingerprint 维度因 head_sha 变化误命中 |
+| `suggestion_exists_at_line(project_id, mr_iid, file_path, target_line, severity="", head_sha="", line_tolerance=0, rule_keys=None, existing_code="") -> bool` | 跨次 heuristic dedup (`file, line±tolerance, state=open[, rule_keys 重叠 | content_fingerprint 命中]` + `head_sha` 兜底), 详见下方"关键行为"。`existing_code` 用于 content_fingerprint dedup (行号变化如 Apply docstring 后 +1 仍能命中, Batch5; MR301/aa87d4c 补充: 无 rule_keys 时退化为 content_fingerprint 维度拦住重复发布); `severity` 保留参数仅为向后兼容, 当前实现不再按 severity 过滤 |
 | `list_suggestion_headers(project_id, mr_iid) -> list[dict]` | 轻量列表 (file / line / header / severity / fp_short 前 8 位), 给 agent prompt 注入避免重复提 |
 | `get_suggestion_by_note_id(note_id) -> dict \| None` | 按 GitLab note_id 查 (id DESC LIMIT 1) |
 | `find_open_suggestion_by_line(*, project_id, mr_iid, file_path, target_line, window=3) -> dict \| None` | UI Apply 兜底匹配 (state=open, line±window, 按行号距离 + id 排序) |
@@ -126,7 +126,7 @@
 | `supersede_stale_in_cohort(*, project_id, mr_iid, cohort_key, keep_note_id) -> list[str]` | 同 cohort 内除 keep_note_id 外所有 open/resolved/dismissed 标 superseded（cohort 归并兜底；process_adopt / mark_suggestion_applied_by_diff 末尾调一次） |
 | `supersede_suggestion(old_note_id, new_note_id, generation) -> None` | 单条 supersede（被新 suggestion 取代；Batch3 写 `supersedes_note_id` + `superseded_at` + 新 suggestion 的 `cohort_generation`）|
 | `get_latest_in_cohort_excluding(*, project_id, mr_iid, cohort_key, exclude_note_id) -> dict \| None` | cohort 内排除某 note 后取最新一条（Batch3 improve 去重用，跳过 state='superseded'） |
-| `list_latest_by_cohort(*, project_id, mr_iid) -> list[dict]` | 每个 cohort_key (fallback 到 note_id) 取最新一条 + 多种 terminal state 冲突时全保留 (Batch6/MR263)。排除 superseded。规则：cohort 内全 open 或全同 terminal state 只取最新；多种 terminal state 冲突 (applied/dismissed/resolved 互相盖) 全部保留——避免 dismissed 被 late_detect 翻 applied 时漏掉用户已做的忽略动作 |
+| `list_latest_by_cohort(*, project_id, mr_iid) -> list[dict]` | 每个 cohort_key (fallback 到 note_id) 取最新一条 + 任何 terminal state 全保留 (Batch6/MR263 + MR299 二次扩展)。排除 superseded。规则: `row_number=1` (最新一条) 永远保留;任何 terminal state (applied/dismissed/resolved) 全部保留——不论 row_number。MR299 修复 "terminal + open 共存" 场景: 用户对老版本做了 applied/resolved/dismissed, 新一轮又发了同位置 open suggestion 时, 老版本 terminal 与新 open 都参与统计 (旧版本用户动作不能被新一代 open 覆盖) |
 | `count_superseded_in_mr(*, project_id, mr_iid) -> int` | 显式 superseded 数（`supersede_suggestion` 触发） |
 | `count_hidden_by_cohort(*, project_id, mr_iid) -> int` | cohort 归并隐藏的旧记录数（list_latest_by_cohort 中 row_number > 1） |
 
@@ -225,7 +225,7 @@
 | `head_sha` | text | 发布时的 MR head_sha (supersede 判定用) |
 | `state` | text | `open` / `applied` / `dismissed` / `resolved` / `superseded` (5 个值) |
 | `applied_at` / `dismissed_at` / `resolved_at` | timestamp | 状态变更时间 |
-| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` |
+| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `publish_overview_reconcile` (4 → 7, MR289 + c9760b2 扩展) |
 | `dismissed_by` / `resolved_by` | text | 操作者 |
 | `dismissed_reason` | text | 用户提供的 dismiss 原因 (dashboard 聚合用) |
 | `resolution_source` | text | resolved 时的来源 (`gitlab_resolve` 等) |
@@ -269,7 +269,7 @@
 | `actor_username` | text | 操作人 |
 | `reason` | text | 原因 (dismiss 时用户填, adopt 走 `validation_status`) |
 | `validation_status` | text | `/adopt` 路径：`ok` / `target-unchanged` / `content-unavailable` / `gitlab-ui-apply` / `ui-apply`；其他：`gitlab-resolve` (GitLab 直接解决主题) / `late-detect-apply` (late_detect 兜底翻 applied) / `same-head` (head_sha 一致但行号偏移) / `already-{state}` (重复 /adopt /dismiss 已记录) / `publish_overview_reconcile` (顶部 pre-reconcile) / `periodic_reconcile` (周期 reconciler) |
-| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `periodic_reconcile` (按 `validation_status` 反推) |
+| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `periodic_reconcile` / `publish_overview_reconcile` (按 `validation_status` 反推 + c9760b2 扩展) |
 | `head_sha_posted` | text | `/adopt` 校验: suggestion 发布时的 head_sha |
 | `head_sha_current` | text | `/adopt` 校验: 当前 head_sha |
 | `created_at` | timestamp | 事件时间 |
@@ -338,6 +338,7 @@ Why: dashboard "MR 最后活动时间" 区别于 `last_review_at` (后者只在�
 2. `rule_keys` 维度 (任一命中):
    - 已有建议 `rule_keys` 为空 / None (旧数据) → 视为命中 (兼容旧行为)
    - 已有建议 `rule_keys` 与新建议 `rule_keys` 任一重叠 (LIKE `%,rk,%` 包裹避免前缀误匹配, 如 `SSD-RULE-NO-LOG` 不能误命中 `SSD-RULE-NO-LOG-EXC`) → 视为命中
+2b. `content_fingerprint` 维度 (MR301 修复, commit aa87d4c 新增): 当新建议无 `rule_keys` 时, 第 2 点整段被 `if rule_keys:` 守卫跳过, 此时退化为仅靠 `fingerprint` 主键 (而旧数据 `fingerprint` 落入空串 hash 形同虚设). 新增对 `state='open' AND content_fingerprint=? AND target_line BETWEEN line±tolerance` 的已有建议命中 → 拦住"无 rule_keys + head_sha 已变 + 同 existing_code"的重复发布 (MR301: V2 重复 V1 同位置建议). `content_fingerprint` = `existing_code` normalize 后 sha256 前 16 位; 修复前从 `normalised.get("existing_code")` 取值恒为 None → 全部落入空串 hash; 修复后从 raw `existing_code` 取值, 并在 `_init_schema` 加回填迁移补齐历史记录.
 3. `state='open'` 限定: 已 `applied` / `dismissed` / `superseded` 视为"已处理", 允许重新检视 (用户 push 改了内容让 auto_detect 标 applied, 然后又撤回原始内容 → 系统应能重新检视出新 issue)
 4. `line_tolerance` 默认 2 行 (LLM 跨次 ±1~3 漂移容差), 设为 0 = 严格相等
 5. **不限定 `head_sha`**: 跨 V1 / V2 / V3 同一 file:line 仍 dedup, 避免 GitLab 重复评论
@@ -409,7 +410,7 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 
 ## 端到端验证
 
-完整测试 (`pytest tests/`，当前 386 passed / 3 failed — 3 个失败均为 pre-existing 与 telemetry 无关):
+完整测试 (`pytest tests/`，当前 452 passed / 0 failed — 不含与 telemetry 无关的预存在 fakeredis lock 测试 `test_lock_ttl_and_fence.py`):
 
 **核心 telemetry / dedup / 状态机**
 
@@ -422,11 +423,11 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 - `tests/test_supersede_stale_in_cohort.py` — cohort 维度 supersede
 - `tests/test_auto_detect_applied.py` — auto_detect_applied 主流程
 - `tests/test_auto_detect_race.py` — mid-scan dismiss race
-- `tests/test_auto_detect_late_apply.py` — 7 个 late_detect 把 `state='resolved' + resolution_source='gitlab_resolve'` 翻回 applied (含 race 修复、region_changed、token_fallback)
+- `tests/test_auto_detect_late_apply.py` — 21 个 late_detect 行为测试: `state='resolved' + resolution_source IN ('gitlab_resolve', 'publish_overview_reconcile')` 翻回 applied (含 race 修复、region_changed、token_fallback、cohort 归并、MR289 publish_overview_reconcile 路径)
 
 **Batch / 增量修复回归**
 
-- `tests/test_publish_overview_reconcile.py` — pre-reconcile + silent helper 行为 (7)
+- `tests/test_publish_overview_reconcile.py` — pre-reconcile + silent helper 行为 (10)
 - `tests/test_sync_resolved_regression.py` — silent helper 重构后 sync_resolved 行为不变 (3)
 - `tests/test_webhook_handler_fallback.py` — webhook handler 异常 fallback (4, commit 491a16f 回归)
 - `tests/test_reconciler_loop.py` — reconciler 行为 (silent scan / 错误隔离 / 幂等, 7)
@@ -435,10 +436,12 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 - `tests/test_process_dismiss.py` — /dismiss 完整流程 (5)
 - `tests/test_build_overview_body.py` — 检视汇总 markdown 生成 (10)
 - `tests/test_dedup_store.py` — Store dedup (fingerprint + line, 16)
-- `tests/test_cohort_dedup.py` — cohort 聚合 (list_latest_by_cohort, 8)
+- `tests/test_cohort_dedup.py` — cohort 聚合 (list_latest_by_cohort, 13)
 - `tests/test_dedup_general.py` — 通用 dedup 行为
 - `tests/test_adopt_race_recovery.py` — /adopt 并发竞态恢复
-- `tests/test_apply_risk_check.py` — Apply 风险校验
+- `tests/test_apply_risk_check.py` — Apply 风险校验 (27)
+- `tests/test_apply_risk_target_syntax_error.py` — 目标文件 SyntaxError 时不误报 '目标文件未定义 X' (11, MR299 + a5c6b72)
+- `tests/test_list_latest_by_cohort.py` — cohort 归并 list_latest_by_cohort 行为回归 (9, MR299 + c070b06)
 - `tests/test_command_chain_order.py` — 命令链顺序 (describe → improve)
 - `tests/test_bot_loop_detection.py` — bot 循环检视防护
 - `tests/test_parse_dt_formats.py` — GitLab 时间格式兼容
@@ -459,7 +462,7 @@ e2e 流程 (基于 `codex/telemetry-e2e-20260730-224254` MR !134):
 
 ```bash
 # 1) 触发 open webhook
-curl -X POST http://127.0.0.1:5052/webhook \
+curl -X POST http://127.0.0.1:3000/webhook \
   -H 'Content-Type: application/json' -H 'X-Gitlab-Token: ...' \
   -d '{"object_kind":"merge_request","event_type":"merge_request","project":{"id":34},
        "object_attributes":{"iid":134,"action":"open","state":"opened",
@@ -468,7 +471,7 @@ curl -X POST http://127.0.0.1:5052/webhook \
        "user":{"username":"e2e-telemetry"}}'
 
 # 2) /dismiss 触发 (note webhook)
-curl -X POST http://127.0.0.1:5052/webhook \
+curl -X POST http://127.0.0.1:3000/webhook \
   -H 'Content-Type: application/json' -H 'X-Gitlab-Token: ...' \
   -d '{"object_kind":"note","event_type":"note","project":{"id":34},
        "merge_request":{"iid":134},
@@ -478,10 +481,10 @@ curl -X POST http://127.0.0.1:5052/webhook \
        "user":{"username":"e2e-runner"}}'
 
 # 3) 查询
-curl http://127.0.0.1:5052/api/v1/telemetry/mr/34/134/stats
-curl http://127.0.0.1:5052/api/v1/telemetry/dismissals/by-rule?project_id=34
-curl http://127.0.0.1:5052/api/v1/telemetry/mrs/34/134/dismissals
-curl http://127.0.0.1:5052/api/v1/telemetry/weekly-reports
+curl http://127.0.0.1:3000/api/v1/telemetry/mr/34/134/stats
+curl http://127.0.0.1:3000/api/v1/telemetry/dismissals/by-rule?project_id=34
+curl http://127.0.0.1:3000/api/v1/telemetry/mrs/34/134/dismissals
+curl http://127.0.0.1:3000/api/v1/telemetry/weekly-reports
 ```
 
 ## Reconciler（周期性安全网）
