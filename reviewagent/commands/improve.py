@@ -2063,6 +2063,30 @@ class ImproveCommand(BaseCommand):
         inline_posted: list[dict[str, Any]] = []
         inline_skipped: list[dict[str, Any]] = []
 
+        # 0c. Pre-reconcile: 发布前先同步 GitLab resolved 状态到 DB.
+        # Why: 用户可能在上一轮检视后于 GitLab UI 点了 ✓ resolve / Apply,
+        #      但如果 GitLab 没发 webhook (或 webhook 被 cooldown 吞), DB 里
+        #      这些 suggestion 还是 open → dedup 第一查 (processed states) miss
+        #      → 同位置重复发布 (MR301 V2 重复 V1 的根因之一).
+        #      发布前扫一次, 把 GitLab 已 resolved 的标 resolved, dedup 就能命中.
+        try:
+            from reviewagent.commands.suggestion_actions import _scan_and_mark_resolved_silent
+            _pre_reconcile = _scan_and_mark_resolved_silent(
+                project_id=self.project_id, mr_iid=self.mr_iid,
+                actor_username="improve_pre_publish_reconcile",
+                adoption_source="improve_pre_publish",
+                reason="improve 发布前 pre-reconcile: GitLab UI 已 resolve 但 DB 还 open",
+                validation_status="improve_pre_publish_reconcile",
+            )
+            if _pre_reconcile.get("updated"):
+                logger.info(
+                    "improve.pre_publish_reconcile updated={} note_ids={}",
+                    _pre_reconcile["updated"],
+                    [n[:8] for n in _pre_reconcile["note_ids"]],
+                )
+        except Exception as e:
+            logger.warning("improve.pre_publish_reconcile failed (non-fatal): {}", e)
+
         for raw in suggestions:
             try:
                 normalised = self._normalise_suggestion(raw)
@@ -2148,7 +2172,7 @@ class ImproveCommand(BaseCommand):
                         decision["new_line"], _sev, head_sha=_head_sha,
                         line_tolerance=2,
                         rule_keys=_dedup_rks or None,
-                        existing_code=normalised.get("existing_code") or "",
+                        existing_code=existing or "",
                     ):
                         logger.info(
                             "improve.skip_at_line project={} mr={} file={} line={} severity={} head_sha={}",
@@ -2293,11 +2317,13 @@ class ImproveCommand(BaseCommand):
                         fingerprint = _suggestion_fingerprint(
                             file_path, decision["new_line"], normalised.get("header")
                         )
-                        content_fingerprint = _suggestion_content_fingerprint(
-                            normalised.get("existing_code") or ""
-                        )
+                        content_fingerprint = _suggestion_content_fingerprint(existing)
+                        # cohort_key 用 file + header (不用 rule_keys / line):
+                        # rule_keys LLM 可能不输出 (→ 空 → key 不稳定);
+                        # line 在 apply 后会漂移. header 同文件同类问题稳定.
+                        _cohort_hdr = re.sub(r"\s+", " ", (normalised.get("header") or "").strip().lower())
                         cohort_key = _hl.sha256(
-                            f"{file_path}:{decision['new_line']}:{','.join(rule_keys)}".encode("utf-8")
+                            f"{file_path}:{_cohort_hdr}".encode("utf-8")
                         ).hexdigest()[:24]
                         get_store().record_suggestion(
                             project_id=self.project_id,

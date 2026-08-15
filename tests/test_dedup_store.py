@@ -36,13 +36,19 @@ def tmp_telemetry(monkeypatch):
 
 
 def _seed(s, *, note_id, fp, line=10, file_path="a.py", state="open",
-          head_sha="abc", rule_keys="R1", cohort_key=None):
+          head_sha="abc", rule_keys="R1", cohort_key=None,
+          existing_code="old\n"):
+    import hashlib as _hl
+    import re as _re
+    _norm = _re.sub(r"\s+", " ", existing_code.strip())
+    _cf = _hl.sha256(_norm.encode("utf-8")).hexdigest()[:16]
     s.record_suggestion(
         project_id=34, mr_iid=263, note_id=note_id,
         file_path=file_path, target_line=line, target_line_end=line,
-        existing_code="old\n", improved_code="new\n",
+        existing_code=existing_code, improved_code="new\n",
         header="h", label="l",
-        fingerprint=fp, rule_keys=rule_keys.split(","),
+        fingerprint=fp, content_fingerprint=_cf,
+        rule_keys=rule_keys.split(","),
         cohort_key=cohort_key or f"cohort-{note_id}",
         severity="medium", severity_source="rule", head_sha=head_sha,
     )
@@ -166,6 +172,100 @@ def test_line_dedup_rule_keys_open_no_overlap_misses(tmp_telemetry):
     _seed(s, note_id="ln-7", fp="FP7", line=10, state="open", head_sha="sha1", rule_keys="R1,R2")
 
     assert s.suggestion_exists_at_line(34, 263, "a.py", 10, head_sha="sha1", rule_keys="R8,R9") is False
+
+
+# ---------- content-based open dedup (MR301 fix) ----------
+
+def test_content_dedup_open_same_code_different_head_sha_hits(tmp_telemetry):
+    """MR301 场景: open + 同 existing_code + 同 file:line + 不同 head_sha + 无 rule_keys → 命中.
+
+    根因: V2 LLM 不吐 rule_keys → rule_keys dedup 跳过; head_sha 因 apply 变了 →
+    兜底也漏. 但 existing_code 没变 (同一问题还在) → content_fingerprint 命中.
+    """
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(
+        s, note_id="cf-1", fp="FP-CF1", line=10,
+        state="open", head_sha="sha_v1", rule_keys="R-SHELL,R-RES",
+        existing_code="    conn = sqlite3.connect('db.sqlite')\n    cur.execute(f'INSERT...')\n",
+    )
+    # V2: 不同 head_sha, 无 rule_keys, 但同 existing_code → content dedup 命中
+    assert s.suggestion_exists_at_line(
+        34, 263, "a.py", 10,
+        head_sha="sha_v2",  # 不同
+        rule_keys=None,     # LLM 没吐
+        existing_code="    conn = sqlite3.connect('db.sqlite')\n    cur.execute(f'INSERT...')\n",
+    ) is True
+
+
+def test_content_dedup_open_different_code_misses(tmp_telemetry):
+    """open + 同 file:line + 不同 existing_code → 不命中 (不同问题)."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(
+        s, note_id="cf-2", fp="FP-CF2", line=10,
+        state="open", head_sha="sha1", rule_keys="R1",
+        existing_code="    original_code_here()\n",
+    )
+    assert s.suggestion_exists_at_line(
+        34, 263, "a.py", 10,
+        head_sha="sha2",
+        rule_keys=None,
+        existing_code="    completely_different_code()\n",
+    ) is False
+
+
+def test_content_dedup_open_line_tolerance(tmp_telemetry):
+    """content dedup + line_tolerance=2: 同 existing_code 在 ±2 行内 → 命中."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(
+        s, note_id="cf-3", fp="FP-CF3", line=10,
+        state="open", head_sha="sha1", rule_keys="R1",
+        existing_code="    target_code()\n",
+    )
+    assert s.suggestion_exists_at_line(
+        34, 263, "a.py", 12,  # line 漂移 +2
+        head_sha="sha2",
+        rule_keys=None,
+        existing_code="    target_code()\n",
+        line_tolerance=2,
+    ) is True
+
+
+def test_content_dedup_open_different_file_misses(tmp_telemetry):
+    """content dedup: 同 existing_code 但不同 file → 不命中."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(
+        s, note_id="cf-4", fp="FP-CF4", line=10, file_path="a.py",
+        state="open", head_sha="sha1", rule_keys="R1",
+        existing_code="    shared_pattern()\n",
+    )
+    assert s.suggestion_exists_at_line(
+        34, 263, "b.py", 10,  # 不同文件
+        head_sha="sha2",
+        rule_keys=None,
+        existing_code="    shared_pattern()\n",
+    ) is False
+
+
+def test_content_dedup_empty_existing_code_skipped(tmp_telemetry):
+    """existing_code 为空 → content dedup 不运行 (避免空串误判)."""
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(
+        s, note_id="cf-5", fp="FP-CF5", line=10,
+        state="open", head_sha="sha1", rule_keys="R1",
+        existing_code="    some_code()\n",
+    )
+    # 新建议没传 existing_code → content dedup 跳过, 退回其他查询
+    assert s.suggestion_exists_at_line(
+        34, 263, "a.py", 10,
+        head_sha="sha2",
+        rule_keys=None,
+        existing_code="",  # 空
+    ) is False
 
 
 # ---------- record_suggestion side effects ----------

@@ -263,6 +263,32 @@ class Store:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sug_cohort ON suggestions(mr_iid, cohort_key)"
             )
+            # Backfill content_fingerprint (2026-08 fix):
+            # 之前 improve.py 用 normalised.get("existing_code") (恒 None) 算 fp
+            # → 所有记录的 content_fingerprint 都是空串 hash (e3b0c442...),
+            # content-based dedup 完全失效. 修复后从 existing_code 列回填.
+            # 幂等: 回填后 fp ≠ empty_fp, 下次 init 查询返回 0 行.
+            import hashlib as _bf_hash
+            import re as _bf_re
+            _empty_fp = _bf_hash.sha256(b"").hexdigest()[:16]
+            _bf_rows = conn.execute(
+                "SELECT id, existing_code FROM suggestions "
+                "WHERE (content_fingerprint IS NULL OR content_fingerprint = ?) "
+                "  AND existing_code IS NOT NULL AND existing_code != ''",
+                [_empty_fp],
+            ).fetchall()
+            if _bf_rows:
+                for _bf_r in _bf_rows:
+                    _bf_norm = _bf_re.sub(r"\s+", " ", (_bf_r["existing_code"] or "").strip())
+                    _bf_fp = _bf_hash.sha256(_bf_norm.encode("utf-8")).hexdigest()[:16]
+                    conn.execute(
+                        "UPDATE suggestions SET content_fingerprint=? WHERE id=?",
+                        [_bf_fp, _bf_r["id"]],
+                    )
+                logger.info(
+                    "telemetry.store backfill content_fingerprint rows={}",
+                    len(_bf_rows),
+                )
 
     @contextmanager
     def _conn(self):
@@ -797,6 +823,21 @@ class Store:
                     [project_id, mr_iid, file_path, _content_fp],
                 ).fetchone()
                 if content_match is not None:
+                    return True
+                # 第四查 b: content fingerprint + state='open' + 同 file:line.
+                # Why (MR301): V2 LLM 不吐 rule_keys → 第二查整段跳过;
+                #   head_sha 因 apply 变了 → 兜底 (第五查) 也漏. 但同位置
+                #   existing_code 没变 (同一问题还在) → content_fingerprint
+                #   命中 → 拦截重复发布. 只查同 file:line±tolerance, 避免
+                #   同文件不同位置的同模式代码误杀.
+                content_open_match = conn.execute(
+                    "SELECT 1 FROM suggestions "
+                    "WHERE project_id=? AND mr_iid=? "
+                    "  AND file_path=? AND target_line BETWEEN ? AND ? "
+                    "  AND state='open' AND content_fingerprint=? LIMIT 1",
+                    [project_id, mr_iid, file_path, lo, hi, _content_fp],
+                ).fetchone()
+                if content_open_match is not None:
                     return True
             # 兜底: head_sha 一致 + rule_keys 重叠 (处理 force-push 后代码真变了的场景).
             open_sql = (
