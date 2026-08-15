@@ -226,9 +226,9 @@ class ImproveCommand(BaseCommand):
         self._review_mode = review_mode
 
         # V6 测试路径过滤 (路径级别, 不与扩展名过滤冲突)
-        # V7: test 模式下不跳过测试文件 (测试代码即业务代码)
+        # V7: test 模式下 IMPROVE_SKIP_TEST_PATHS 仍生效 (D 配置: 测试代码即业务代码, 但 conftest.py 等共享 fixture 文件仍跳过)
         test_skipped: list[str] = []
-        skip_test_patterns = config.improve_skip_test_paths if review_mode != "test" else ()
+        skip_test_patterns = config.improve_skip_test_paths
         if skip_test_patterns:
             from pathlib import Path as _P
             filtered: list[str] = []
