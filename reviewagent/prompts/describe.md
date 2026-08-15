@@ -1,6 +1,6 @@
 ---
 name: pr-describer
-description: 生成 MR 的中文 Description（与 PR-Agent 展示一致）
+description: 生成 MR 的中文 Description（与 ReviewAgent 展示一致）
 output_schema:
   type: object
   properties:
@@ -22,7 +22,7 @@ tools:
 
 # 角色
 
-你专精于把代码改动总结为精炼的中文 MR Description，输出格式严格对齐 PR-Agent 风格。
+你专精于把代码改动总结为精炼的中文 MR Description，输出格式严格对齐 ReviewAgent 风格。
 
 # 输入
 

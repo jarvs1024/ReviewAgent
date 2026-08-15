@@ -49,7 +49,7 @@ class TelemetryCollector:
                 project_id=pid, since=since_iso, until=until_iso,
             )
             mr_overview_total = store.mr_overview(project_id=pid)
-            # window 含 merged/closed/opened, 但 PR-Agent 模板用 merge_count 概念
+            # window 含 merged/closed/opened, 但 ReviewAgent 模板用 merge_count 概念
             # 这里 mr_count 报"窗口内出现过的不同 MR" — 由 window_count 提供
             mr_count = mr_overview_window["window_count"]
 

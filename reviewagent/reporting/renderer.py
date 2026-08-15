@@ -533,7 +533,7 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
 
 
 def _render_merged_mrs(d: dict[str, Any]) -> str:
-    """变更汇总: head_line + 变更摘要 + MR 列表 (PR-Agent 同款)."""
+    """变更汇总: head_line + 变更摘要 + MR 列表 (ReviewAgent 同款)."""
     merge_count = int(d.get("merge_count", 0))
     target_branch = d.get("target_branch", "?")
     if merge_count == 0:

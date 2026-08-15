@@ -1,6 +1,6 @@
 ---
 name: code-improver
-description: 对 MR diff 输出 PR-Agent 同款可 Apply 代码改进建议
+description: 对 MR diff 输出 ReviewAgent 同款可 Apply 代码改进建议
 output_schema:
   type: object
   properties:

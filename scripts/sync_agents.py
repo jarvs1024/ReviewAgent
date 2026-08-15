@@ -29,15 +29,15 @@ DEFAULT_AGENT_DIR = Path.home() / ".config" / "opencode" / "agent"
 #  what to disable)
 AGENT_META: dict[str, dict[str, object]] = {
     "describe": {
-        "description": "生成 MR 的中文 Description（与 PR-Agent 展示一致）",
+        "description": "生成 MR 的中文 Description（与 ReviewAgent 展示一致）",
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
     "review": {
-        "description": "对 MR diff 做深度代码检视（与 PR-Agent 同款 key_issues_to_review 输出）",
+        "description": "对 MR diff 做深度代码检视（与 ReviewAgent 同款 key_issues_to_review 输出）",
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
     "improve": {
-        "description": "对 MR diff 输出可 Apply 的代码改进建议（PR-Agent code-suggestion 风格）",
+        "description": "对 MR diff 输出可 Apply 的代码改进建议（ReviewAgent code-suggestion 风格）",
         "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
     },
     "weekly_change_summary": {

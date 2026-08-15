@@ -1954,7 +1954,7 @@ class ImproveCommand(BaseCommand):
                 return (
                     f"## 改进总览 V{version}\n\n"
                     f"ℹ️ 本次未发布建议（{skipped_other} 条建议因行号/校验未通过未发布）\n\n"
-                    f"如果反复看到此提示, 检视能力可能需调整 (见 PR-Agent 文档)."
+                    f"如果反复看到此提示, 检视能力可能需调整 (见 ReviewAgent 文档)."
                 )
             # 都没 inline_posted 也没 skipped — 真的空
             return (

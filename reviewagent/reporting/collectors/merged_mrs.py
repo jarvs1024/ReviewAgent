@@ -73,7 +73,7 @@ class MergedMrsCollector:
             else:
                 logger.debug("merged_mrs out_of_window iid={} merged_at={}", m.get("iid"), merged_at)
 
-        # mr_list (PR-Agent 命名) + items (向后兼容) 同时返回
+        # mr_list (ReviewAgent 命名) + items (向后兼容) 同时返回
         author_set: set[str] = set()
         additions_total = 0
         deletions_total = 0
@@ -103,7 +103,7 @@ class MergedMrsCollector:
                 "source_branch": m.get("source_branch"),
                 "target_branch": m.get("target_branch"),
                 "web_url": m.get("web_url"),
-                "url": m.get("web_url"),  # PR-Agent 风格
+                "url": m.get("web_url"),  # ReviewAgent 风格
                 "additions": adds,
                 "deletions": dels,
                 "changed_files": files_changed,

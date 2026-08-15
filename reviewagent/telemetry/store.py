@@ -434,7 +434,7 @@ class Store:
 
     def mr_overview(self, *, project_id: int | None = None, since: str | None = None,
                     until: str | None = None) -> dict:
-        """PR-Agent 风格的 MR 概览: {total, opened, closed, merged, window_count}."""
+        """ReviewAgent 风格的 MR 概览: {total, opened, closed, merged, window_count}."""
         clauses, params = [], []
         if project_id is not None:
             clauses.append("project_id = ?"); params.append(project_id)
