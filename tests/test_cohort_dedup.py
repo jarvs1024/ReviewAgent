@@ -197,8 +197,16 @@ def test_list_latest_by_cohort_preserves_conflicting_terminal_states(tmp_telemet
     )
 
 
-def test_list_latest_by_cohort_dedupes_when_same_terminal_state(tmp_telemetry):
-    """同 cohort 多条同 terminal state → 仍然只取最新 (普通 dedup 不受影响)."""
+def test_list_latest_by_cohort_keeps_all_terminal_in_same_cohort(tmp_telemetry):
+    """MR299 修正: 同 cohort 多个同 terminal state 也全部保留 (而非 dedup 最新).
+
+    Why: 旧逻辑 "普通 dedup 同 terminal → 只留最新" 会让用户对老版本做的明确动作
+    被新一代同 cohort 覆盖. 实际语义: 每条 terminal 都对应用户的一次明确决定,
+    都该独立保留并计入检视汇总.
+
+    现实场景: 用户对 V1/V2/V3 三条同 cohort dismissed suggestion 都做了 dismiss 确认
+    (虽然罕见, 但语义上每条都是一次用户动作).
+    """
     from reviewagent.telemetry.store import get_store
     s = get_store()
     _seed(s, note_id="same-1", cohort_key="ck-Same", state="dismissed")
@@ -206,8 +214,12 @@ def test_list_latest_by_cohort_dedupes_when_same_terminal_state(tmp_telemetry):
     _seed(s, note_id="same-3", cohort_key="ck-Same", state="dismissed")
 
     result = s.list_latest_by_cohort(project_id=34, mr_iid=263)
-    assert len(result) == 1
-    assert result[0]["note_id"] == "same-3"
+    # 修复后: 任何 terminal state 都保留 (不论 row_number)
+    note_ids = sorted(r["note_id"] for r in result)
+    assert note_ids == ["same-1", "same-2", "same-3"], (
+        f"3 条同 terminal 都应保留, got {note_ids}"
+    )
+    assert all(r["state"] == "dismissed" for r in result)
 
 
 def test_list_latest_by_cohort_dedupes_when_all_open(tmp_telemetry):

@@ -1232,15 +1232,18 @@ class Store:
         (applied / dismissed / resolved 之间的冲突), 所有 terminal state 的 sibling
         都保留, 不按 id DESC 只取最新一条.
 
-        Why:
-            用户对某版本做 dismiss 时, 若同 cohort 里有更新一版被 late_detect 翻成
-            applied, 当前 id DESC 取最新会让 dismissed 被 applied 覆盖, 检视汇总里
-            "已忽略" 计数漏掉. 实际语义: 用户对不同版本做了不同明确动作, 都该可见.
+        MR299 修正: 旧版 SQL 只对 "多种 terminal 冲突" 做保留, 遗漏了
+        "terminal + open 共存" 的 case — 用户对老版本做了 applied/resolved/dismissed
+        后, 新一轮又发了同位置 open suggestion. 这种情况下:
+          - 旧版本 terminal 应保留 (用户的明确动作不能丢)
+          - 新版本 open 也应保留 (LLM 又发了新建议)
+        新规则: 任何 terminal state 都保留 (不论 row_number).
 
         保留规则:
-        - 全部 open: 只取最新 (普通重复发布场景)
-        - 全部同 terminal state: 只取最新 (普通 dedup)
-        - 多种 terminal state 冲突: 全部保留 (用户动作不互盖)
+        - row_number=1 (最新一条): 永远保留 → 同 cohort 全 open 只留一条
+        - 任何 terminal state (applied/dismissed/resolved): 全部保留 → 用户动作
+          不被新一代 open 覆盖, 多种 terminal 冲突自然也满足此规则
+        - superseded: WHERE 已排除
         """
         # terminal = user/bot 明确决定过的状态. open 不算 (待处理不算决定).
         terminal_states = ("applied", "dismissed", "resolved")
@@ -1270,10 +1273,18 @@ class Store:
             FROM siblings s
             LEFT JOIN cohort_terminal_count c ON s.ck = c.ck
         )
-        -- row_number=1 (最新一条) OR (cohort 有 terminal 冲突 且 本条是 terminal) → 保留
+        -- 保留规则 (修复 MR299 + 类似 case):
+        --   1) row_number=1 (最新一条) 永远保留 → 同 cohort 全 open 只一条
+        --   2) 任何 terminal state (applied/dismissed/resolved) 也保留 → 不论 row_number
+        --      解决 "terminal + open 共存" 漏统计: 旧版本 applied/resolved 不能被
+        --      新发布的 open 覆盖 (旧版本用户的明确动作不该丢失).
+        -- 其他场景:
+        --   - 同 cohort 全 open → 走 (1) 只留最新 (普通 dedup)
+        --   - 同 cohort 多种 terminal (applied + dismissed 等) → 全保留 (用户动作不互盖)
+        --   - 同 cohort supersede → 已 WHERE 排除
         SELECT * FROM ranked
         WHERE row_number = 1
-           OR (n_terminal_states > 1 AND state IN ({placeholders}))
+           OR state IN ({placeholders})
         """
         # params 顺序: siblings WHERE (project_id, mr_iid), cohort_terminal_count IN
         # (terminal_states x3), ranked WHERE 复用 siblings 参数, 终态 IN (terminal x3).

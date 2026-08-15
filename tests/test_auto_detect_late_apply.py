@@ -373,7 +373,9 @@ def test_late_detect_records_two_actions(tmp_telemetry):
 
 # ---------- Batch2: 汇总按 cohort 归并 ----------
 def test_list_latest_by_cohort_dedup(tmp_telemetry):
-    """同 cohort 3 条记录 + 1 条独立, list_latest_by_cohort 应返回 2 条."""
+    """MR299 修复: 同 cohort V1 open, V2 applied, V3 open → 都保留 (V2 用户的 applied 
+    不能被 V3 新 open 覆盖).
+    同 cohort 全 open 仍 dedup, 但 terminal + open 共存时 terminal 也保留."""
     from reviewagent.telemetry.store import get_store
     s = get_store()
     head = "ab" * 32
@@ -400,11 +402,17 @@ def test_list_latest_by_cohort_dedup(tmp_telemetry):
         severity_source="rule", head_sha=head,
     )
     rows = s.list_latest_by_cohort(project_id=34, mr_iid=247)
-    assert len(rows) == 2
-    # cohort "c-docstring" 最新一条是 V3 (open)
-    docstring_row = [r for r in rows if r["cohort_key"] == "c-docstring"][0]
-    assert docstring_row["state"] == "open"
-    assert docstring_row["note_id"] == "note-v3"
+    # MR299 修复后: terminal V2 (applied) + 最新 V3 (open) + 独立 c-print = 3 条
+    assert len(rows) == 3, f"应保留 V3 (open) + V2 (applied) + 独立 c-print, got {len(rows)}"
+    # cohort "c-docstring": V3 (open, 最新) + V2 (applied, terminal) → 2 条
+    docstring_rows = [r for r in rows if r["cohort_key"] == "c-docstring"]
+    assert len(docstring_rows) == 2, f"同 cohort 应保留 2 条 (V3 open + V2 applied), got {len(docstring_rows)}"
+    # V3 是最新 (id 最大), V2 是 applied terminal
+    note_ids = sorted(r["note_id"] for r in docstring_rows)
+    assert note_ids == ["note-v2", "note-v3"], f"应保留 V2(applied) + V3(open), got {note_ids}"
+    states = sorted(r["state"] for r in docstring_rows)
+    assert states == ["applied", "open"], f"应保留 applied + open, got {states}"
+    # 独立 cohort
     print_row = [r for r in rows if r["cohort_key"] == "c-print"][0]
     assert print_row["state"] == "open"
 
@@ -439,12 +447,14 @@ def test_supersede_suggestion(tmp_telemetry):
 
 
 def test_build_overview_body_dedup(tmp_telemetry):
-    """Batch2: build_overview_body 同 cohort 多条只算 1 个 applied."""
+    """MR299 修复: build_overview_body 多条 terminal state 的同 cohort 全部计入.
+    之前 (Batch2 旧语义): 同 cohort 多条 applied 只算 1 → 丢了用户的多轮明确动作.
+    现在: 任何 terminal state 都计入 (用户动作不互盖)."""
     from reviewagent.commands._common import build_overview_body
     from reviewagent.telemetry.store import get_store
     s = get_store()
     head = "ef" * 32
-    # 同 cohort 3 条, 都是 applied
+    # 同 cohort 3 条, 都是 applied (极端 case, 实际难以触发, 但语义上保留)
     for i in range(3):
         s.record_suggestion(
             project_id=34, mr_iid=247, note_id=f"note-doc{i}",
@@ -456,16 +466,19 @@ def test_build_overview_body_dedup(tmp_telemetry):
         )
         s.update_suggestion_state(f"note-doc{i}", "applied", actor_username="t")
     body = build_overview_body(project_id=34, mr_iid=247)
-    # cohort 归并: 3 条同 cohort 只算 1 条, MEDIUM 行 applied=1
-    # 表格行格式: | 🟡 MEDIUM | 0 | 1 | 0 | 0 | 1 |
+    # 修复后: 3 条 applied terminal 都保留, MEDIUM 行 applied=3
+    # 表格行格式: | 🟡 MEDIUM | 0 | 3 | 0 | 0 | 3 |
     import re
     m = re.search(r"\| 🟡 MEDIUM \| (\d+) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \|", body)
     assert m, f"未找到 MEDIUM 行:\n{body}"
     open_n, applied_n, dismissed_n, resolved_n, sum_n = map(int, m.groups())
-    assert applied_n == 1, f"应只有 1 条 applied (cohort 归并后), got {applied_n}"
-    assert sum_n == 1, f"应只有 1 条 cohort 参与, got {sum_n}"
-    assert "♻️" in body, f"应显示已合并标注:\n{body}"
-    assert "2 条已被合并" in body
+    assert applied_n == 3, f"3 条 applied terminal 都应保留, got {applied_n}"
+    assert sum_n == 3, f"3 条 cohort 成员都应参与, got {sum_n}"
+    # "已被合并" 标注对应 cohort 隐藏数 (row_number > 1): 3 条 cohort 留 3 条,
+    # 但 hidden by cohort 只算 row_number > 1 = 2. 这里验证 '已被合并' 行存在且数字对.
+    # 修复前 (Batch2 旧语义): 只留 1, hidden=2 标注有; 修复后: 留 3, hidden=2 (同样).
+    assert "已被合并" in body, f"应显示 cohort 隐藏数标注:\n{body}"
+    assert "2 条已被合并" in body, f"cohort c-doc 3 条, hidden by cohort 应为 2:\n{body}"
 
 
 # ---------- Batch3: occurrence/generation ----------
