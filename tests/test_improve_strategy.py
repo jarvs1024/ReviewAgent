@@ -392,13 +392,17 @@ def test_patch_only_block_has_context(tmp_path):
     assert "patch-only" in block
 
 
-def test_review_mode_auto_test_project(tmp_path, monkeypatch):
-    """V7 auto 模式: 测试文件占比>50% → 切 test 模式, 不跳过测试文件"""
+def test_review_mode_auto_test_project_skip_paths_active(tmp_path, monkeypatch):
+    """D 配置: test mode 下 IMPROVE_SKIP_TEST_PATHS 仍生效.
+
+    默认 config.improve_skip_test_paths = ('tests/', '/tests/', 'test_', '_test.',
+    '.test.', 'conftest.py'), 所以 tests/test_*.py 命中 'tests/' pattern 被过滤.
+    这是 D 配置的语义 (test mode 不再硬编码屏蔽 skip).
+    """
     from types import SimpleNamespace
     from reviewagent.llm.base import LLMResult
     from reviewagent.commands.improve import ImproveCommand
 
-    # 全是测试文件
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_a.py").write_text("assert True\n")
     (tmp_path / "tests" / "test_b.py").write_text("assert False\n")
@@ -422,17 +426,76 @@ def test_review_mode_auto_test_project(tmp_path, monkeypatch):
     monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
         fp: [] for fp in files
     })
+    # 偷看: 不想跑 LLM 调用, 让 _call_chunk 返回空 suggestions 但走完 summary
     monkeypatch.setattr(cmd, "_call_chunk", lambda p, w, fp: LLMResult(
         data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t",
     ))
 
     result = cmd._call_agent(ws)
-    # test 模式不跳过测试文件 → summary 里不应有 "跳过检视" 提示
-    assert "跳过检视" not in result["summary_md"], "test 模式不应跳过测试文件"
+    # 默认 skip 含 'tests/' → tests/test_*.py 被过滤, summary 应有 "跳过检视"
+    assert "跳过检视" in result["summary_md"], (
+        "test mode + 默认 skip 列表含 'tests/' → tests/test_*.py 应被过滤"
+    )
     assert cmd._review_mode == "test"
 
 
-# ============ V8 增量检视测试 ============
+def test_review_mode_auto_test_project_skip_only_conftest(tmp_path, monkeypatch):
+    """D 配置示例: skip paths 仅 conftest.py → test mode 下 tests/test_*.py 不跳过,
+    但 conftest.py 仍被过滤 (conftest 是 pytest fixture 共享文件, 无业务测试逻辑).
+    """
+    from types import SimpleNamespace
+    from reviewagent.llm.base import LLMResult
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.config import config
+
+    # Config 是 frozen dataclass, 用 object.__setattr__ 绕过冻结
+    _orig_skip = config.improve_skip_test_paths
+    object.__setattr__(config, "improve_skip_test_paths", ("conftest.py",))
+    # 同时把 review_mode 锁成 'test' (避免 auto 算法被边界 50% 切到 business)
+    _orig_mode = config.improve_review_mode
+    object.__setattr__(config, "improve_review_mode", "test")
+    try:
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("assert True\n")
+        (tmp_path / "tests" / "test_b.py").write_text("assert True\n")
+        (tmp_path / "tests" / "test_c.py").write_text("assert True\n")
+        (tmp_path / "tests" / "conftest.py").write_text("# pytest fixture\n")
+
+        ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+        cmd = ImproveCommand.__new__(ImproveCommand)
+        cmd.project_id = 34
+        cmd.mr_iid = 999
+        cmd.ws = ws
+        cmd._last_oc_result = None
+        cmd.repo_context = ""
+
+        monkeypatch.setattr(cmd, "_diff_line_map", lambda: {
+            "tests/test_a.py": {1}, "tests/test_b.py": {1},
+            "tests/test_c.py": {1}, "tests/conftest.py": {1},
+        })
+        monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 1)
+        monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["assert True"])
+        monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+            fp: f"diff --git a/{fp} b/{fp}\n+new\n" for fp in files
+        })
+        monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+            fp: [] for fp in files
+        })
+        monkeypatch.setattr(cmd, "_call_chunk", lambda p, w, fp: LLMResult(
+            data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t",
+        ))
+
+        result = cmd._call_agent(ws)
+        skip_msg = result["summary_md"]
+        # conftest.py 应出现在跳过列表
+        assert "conftest.py" in skip_msg, f"conftest.py 应被过滤, summary: {skip_msg}"
+        # tests/test_a.py 不应出现在 summary 跳过列表 (它进 LLM)
+        assert "tests/test_a.py" not in skip_msg, f"tests/test_a.py 不应被过滤, summary: {skip_msg}"
+        assert cmd._review_mode == "test"
+    finally:
+        object.__setattr__(config, "improve_skip_test_paths", _orig_skip)
+        object.__setattr__(config, "improve_review_mode", _orig_mode)
+
 
 def test_get_reviewed_file_shas_returns_latest_per_file(tmp_path):
     """V8: store.get_reviewed_file_shas 返回每个文件最新一条 suggestion 的 head_sha"""

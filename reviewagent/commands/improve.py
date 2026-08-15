@@ -1458,6 +1458,46 @@ class ImproveCommand(BaseCommand):
                     defs.add(name)
         return defs
 
+    def _safe_parse_defs(
+        self,
+        src: str,
+        _ast_module,
+    ) -> tuple[set[str], "SyntaxError | None"]:
+        """解析 src 收集 defs, 带 partial fallback.
+
+        返回 (defs, error):
+          - 完整 parse 成功 → (full_defs, None)
+          - 完整 parse 失败但 first error 之前能 parse → (partial_defs, error)
+          - 第一行就错, partial 也失败 → (empty, error)
+
+        partial 策略: 切到 first error 行之前再往前逐行回退 (避免 dangling def header),
+        直到 partial 能 parse 或到达 src 起点. 这样能最大限度保留 file-level defs
+        (import/def/class) 用于 missing 检测.
+
+        Why: 旧逻辑裸 `except SyntaxError: pass` 让 local_defs 留空,
+             file-level import/def/class 全部被误判为 missing
+             (MR299 L58 scene: big_service.py L63 cart} SyntaxError
+             引发对所有 fetch_* 改进误报 '目标文件未定义 requests/user_id').
+        """
+        if not src:
+            return set(), None
+        try:
+            tree = _ast_module.parse(src)
+            return self._collect_defined_names(tree, _ast_module), None
+        except SyntaxError as e:
+            if not e.lineno or e.lineno <= 1:
+                return set(), e
+            lines = src.splitlines()
+            # 从 e.lineno - 1 行往前逐行回退, 直到 partial 能 parse 或归 0
+            for end in range(e.lineno - 1, 0, -1):
+                head_src = "\n".join(lines[:end])
+                try:
+                    tree_p = _ast_module.parse(head_src)
+                    return self._collect_defined_names(tree_p, _ast_module), e
+                except SyntaxError:
+                    continue
+            return set(), e
+
     def _detect_apply_risk(
         self,
         *,
@@ -1506,13 +1546,13 @@ class ImproveCommand(BaseCommand):
 
         file_src = "\n".join(file_lines_local)
 
-        # === 收集本文件已定义符号 ===
-        local_defs: set[str] = set()
-        try:
-            mod = _ast.parse(file_src)
-            local_defs = self._collect_defined_names(mod, _ast)
-        except SyntaxError:
-            pass
+        # === 收集本文件已定义符号 (含 SyntaxError partial fallback) ===
+        local_defs, file_syntax_err = self._safe_parse_defs(file_src, _ast)
+        # target_unparseable: partial 也没成功 (e.g. 首行即错) →
+        # 不能可靠判断 missing, 后续走 file-level hint 路径不发 "目标文件未定义 X" 误报
+        target_unparseable = (
+            file_syntax_err is not None and not local_defs
+        )
 
         import builtins as _bi
         builtin_names = set(dir(_bi))
@@ -1534,14 +1574,22 @@ class ImproveCommand(BaseCommand):
         # 注解在运行时不被求值, 只出现在注解里的符号不会触发 NameError
         # (e.g. def f(x: Any) -> None, Any 未 import 也能正常运行).
         has_future_annotations = False
-        try:
-            mod = _ast.parse(file_src)
-            for n in mod.body:
-                if isinstance(n, _ast.ImportFrom) and n.module == "__future__":
-                    if any(alias.name == "annotations" for alias in n.names):
-                        has_future_annotations = True
-        except SyntaxError:
-            pass
+        if not target_unparseable and file_src:
+            # SyntaxError 时 partial head 已 parse 过, 直接用 partial 段重新检查
+            # __future__ import 通常在文件顶部, partial head 一定包含
+            fa_src = (
+                "\n".join(file_src.splitlines()[: file_syntax_err.lineno - 1])
+                if file_syntax_err and file_syntax_err.lineno
+                else file_src
+            )
+            try:
+                mod_fa = _ast.parse(fa_src)
+                for n in mod_fa.body:
+                    if isinstance(n, _ast.ImportFrom) and n.module == "__future__":
+                        if any(alias.name == "annotations" for alias in n.names):
+                            has_future_annotations = True
+            except SyntaxError:
+                pass
 
         annot_use: dict[str, int] = {}
         total_use: dict[str, int] = {}
@@ -1608,7 +1656,10 @@ class ImproveCommand(BaseCommand):
                 seen.add(n)
                 uniq_missing.append(n)
 
-        if not uniq_missing:
+        # 完整文件 (file_syntax_err is None) 时, missing 为空 → ok
+        # 文件本身有 SyntaxError 时, 即使 partial 拿到 defs 让 missing 为空,
+        # 仍要继续往后走, 让用户看到根本 SyntaxError hint (而不是看似 ok 忽略)
+        if not uniq_missing and not file_syntax_err:
             return "ok", []
 
         # 建议正文已声明补救的符号 (补 import / from-import / 定义 X): 降级提示,
@@ -1618,6 +1669,16 @@ class ImproveCommand(BaseCommand):
         hard_missing = [n for n in uniq_missing if n not in remedied]
 
         msgs: list[str] = []
+        if target_unparseable:
+            # 文件本身 SyntaxError 且 partial 也无法 parse → 不能可靠判断 missing,
+            # 不发"目标文件未定义 X"误报; 改为告诉用户先修根本问题.
+            line_no = file_syntax_err.lineno if file_syntax_err else 0
+            err_msg = file_syntax_err.msg if file_syntax_err else "unknown syntax error"
+            msgs.append(
+                f"**目标文件本身有 SyntaxError** (line {line_no}: {err_msg}); "
+                f"apply 当前行可以, 但请先修复根本 SyntaxError 再运行文件."
+            )
+            return "warn", msgs
         if hard_missing:
             symbols_str = ", ".join(hard_missing[:8])
             first = hard_missing[0]
@@ -1631,6 +1692,16 @@ class ImproveCommand(BaseCommand):
             msgs.append(
                 f"**建议要求补充** ({syms_str}) — 建议正文已说明补救方式 "
                 f"(补 import / 定义)；Apply 只替换当前行，请按建议手动补上后再运行"
+            )
+        # partial parse 成功 (target_unparseable=False) 时也要附加 file-level hint,
+        # 让用户知道目标文件本身有错, missing 列表可能不完整 (例如 partial 后段
+        # 还有 defs 导致 missing 漏报, 即使 uniq_missing 为空也建议先修根本).
+        if file_syntax_err:
+            line_no = file_syntax_err.lineno or 0
+            err_msg = file_syntax_err.msg or "unknown"
+            msgs.append(
+                f"ℹ️ 目标文件本身另有 SyntaxError (line {line_no}: {err_msg}); "
+                f"partial parse 后 missing 列表可能不完整, 请先修复根本问题."
             )
 
         return "warn", msgs
