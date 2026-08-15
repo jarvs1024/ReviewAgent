@@ -477,6 +477,7 @@ class ImproveCommand(BaseCommand):
         chunk_results: list[dict[str, Any]] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        total_cost_credits = 0.0
         last_model = ""
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
@@ -498,6 +499,7 @@ class ImproveCommand(BaseCommand):
                     chunk_results.append(oc_result.data)
                     total_prompt_tokens += oc_result.prompt_tokens
                     total_completion_tokens += oc_result.completion_tokens
+                    total_cost_credits += oc_result.cost_credits
                     if oc_result.model:
                         last_model = oc_result.model
                 except Exception as e:
@@ -510,7 +512,7 @@ class ImproveCommand(BaseCommand):
 
         # 汇总 token 统计到 _last_oc_result (主线程安全写入)
         self._last_oc_result = type(self)._make_token_summary(
-            total_prompt_tokens, total_completion_tokens, last_model
+            total_prompt_tokens, total_completion_tokens, last_model, total_cost_credits
         )
 
         # V8: 把复用的 suggestions 也合并进结果 (作为额外的 "chunk result")
@@ -1101,12 +1103,12 @@ class ImproveCommand(BaseCommand):
 
     # ---------- helpers ----------
     @staticmethod
-    def _make_token_summary(prompt_tokens: int, completion_tokens: int, model: str):
+    def _make_token_summary(prompt_tokens: int, completion_tokens: int, model: str, cost_credits: float = 0.0):
         """创建汇总 token 统计的 LLMResult (仅用于 _last_oc_result 替代)."""
         from reviewagent.llm.base import LLMResult
         return LLMResult(
             data={}, prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens, model=model,
+            completion_tokens=completion_tokens, cost_credits=cost_credits, model=model,
         )
 
     def _get_mr_head_sha(self) -> str | None:

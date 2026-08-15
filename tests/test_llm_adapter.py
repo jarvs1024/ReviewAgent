@@ -180,6 +180,19 @@ _QODERCLI_RESULT_NOT_JSON_TOP = json.dumps({
     "modelID": "DeepSeek-V4-Flash",
 })
 
+# dfmodel (DeepSeek-V4-Flash) 真实行为: usage.input_tokens 恒为 0, modelUsage 也为 0,
+# 真实成本信号只在 total_credits / context_usage_ratio. 验证被动提取逻辑.
+_QODERCLI_DFMODEL_ZERO_TOKENS_TOP = json.dumps({
+    "type": "result", "subtype": "success",
+    "result": json.dumps({"summary_md": "ok", "suggestions": []}, ensure_ascii=False),
+    "stop_reason": "end_turn",
+    "duration_ms": 4100,
+    "total_credits": 0.4217,
+    "usage": {"input_tokens": 0, "output_tokens": 0, "context_usage_ratio": 0.053},
+    "modelUsage": {"dfmodel": {"inputTokens": 0, "outputTokens": 0}},
+    "modelID": "DeepSeek-V4-Flash",
+})
+
 
 class _FakeCompleted:
     def __init__(self, returncode=0, stdout="", stderr=""):
@@ -246,6 +259,24 @@ class TestQoderCLIProvider:
         assert result.provider == "qodercli"
         assert result.duration_ms >= 0
         assert "summary_md" in result.raw_output
+
+    def test_run_dfmodel_zero_tokens_reports_cost_credits(self, monkeypatch):
+        """dfmodel 不回写 token 数 (input_tokens=0), 但 total_credits / context_usage_ratio 真实可用.
+
+        prompt_tokens 应为 0 (best-effort 提取失败), 同时 cost_credits / context_usage_ratio
+        应被正确提取 — 这是 telemetry 计量不再失真的关键信号.
+        """
+        completed = _FakeCompleted(returncode=0, stdout=_QODERCLI_DFMODEL_ZERO_TOKENS_TOP)
+        provider, _ = self._make(completed)
+        self._patch_run(monkeypatch, completed)
+        result = provider.run(
+            agent="improve", prompt="review this",
+            workdir=Path("/tmp/wt"), files=[], timeout=60,
+        )
+        assert result.prompt_tokens == 0, "dfmodel 不报 token, 应为 0"
+        assert result.completion_tokens == 0
+        assert abs(result.cost_credits - 0.4217) < 1e-6, "total_credits 应被提取"
+        assert abs(result.context_usage_ratio - 0.053) < 1e-6, "context_usage_ratio 应被提取"
 
     def test_run_with_disallowed_tools(self, monkeypatch):
         completed = _FakeCompleted(returncode=0, stdout=_QODERCLI_OK_TOP)

@@ -219,6 +219,7 @@ class Store:
                 "triggered_by": "ALTER TABLE review_runs ADD COLUMN triggered_by TEXT",
                 "rule_keys_cited": "ALTER TABLE review_runs ADD COLUMN rule_keys_cited TEXT",
                 "suggestion_count": "ALTER TABLE review_runs ADD COLUMN suggestion_count INTEGER DEFAULT 0",
+                "cost_credits": "ALTER TABLE review_runs ADD COLUMN cost_credits REAL DEFAULT 0",
             }.items():
                 if column not in run_columns:
                     conn.execute(sql)
@@ -504,6 +505,7 @@ class Store:
         model: str | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        cost_credits: float = 0.0,
         duration_ms: int = 0,
     ) -> None:
         with self._conn() as conn:
@@ -513,13 +515,13 @@ class Store:
                 UPDATE review_runs
                 SET finished_at = ?, status = ?, error = ?, model = ?,
                     prompt_tokens = ?, completion_tokens = ?,
-                    total_tokens = ?, duration_ms = ?
+                    total_tokens = ?, cost_credits = ?, duration_ms = ?
                 WHERE id = ?
                 """,
                 (
                     now, status, error, model,
                     prompt_tokens, completion_tokens,
-                    prompt_tokens + completion_tokens, duration_ms,
+                    prompt_tokens + completion_tokens, cost_credits, duration_ms,
                     run_id,
                 ),
             )
@@ -1663,7 +1665,8 @@ class Store:
             rows = conn.execute(
                 f"SELECT command, COUNT(*) as n, "
                 f"AVG(duration_ms) as avg_dur, "
-                f"SUM(total_tokens) as tokens "
+                f"SUM(total_tokens) as tokens, "
+                f"SUM(cost_credits) as credits "
                 f"FROM review_runs {where} GROUP BY command",
                 params,
             ).fetchall()
@@ -1674,6 +1677,7 @@ class Store:
                     "success": 0, "failed": 0, "timeout": 0, "running": 0,
                     "avg_duration_ms": int(r["avg_dur"] or 0),
                     "total_tokens": int(r["tokens"] or 0),
+                    "cost_credits": float(r["credits"] or 0.0),
                 }
             rows = conn.execute(
                 f"SELECT command, status, COUNT(*) as n "

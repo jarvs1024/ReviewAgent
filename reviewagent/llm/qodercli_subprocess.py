@@ -250,6 +250,30 @@ def _unwrap_markdown_wrapper(text: str) -> str:
     )
 
 
+def _extract_input_tokens(top: dict, usage: dict) -> int:
+    """best-effort 提取 input token 数.
+
+    qodercli 不同 model 回写的 token 字段位置不统一:
+      - 多数: ``usage.input_tokens``
+      - dfmodel (如 DeepSeek-V4-Flash): ``usage.input_tokens`` 恒为 0,
+        真实值可能在 ``modelUsage.<provider>.inputTokens`` (同样可能为 0).
+    优先取 ``usage.input_tokens``, 非零即用之; 否则遍历 ``modelUsage`` 各
+    provider 的 ``inputTokens`` / ``input_tokens`` 兜底. 全部为 0 时返回 0
+    (表示该 provider/model 不回写 token 数, 调用方应改用 cost_credits 计量).
+    """
+    val = int(usage.get("input_tokens", 0) or 0)
+    if val > 0:
+        return val
+    for nested in (top.get("modelUsage") or {}).values():
+        if not isinstance(nested, dict):
+            continue
+        for key in ("inputTokens", "input_tokens"):
+            v = int(nested.get(key, 0) or 0)
+            if v > 0:
+                return v
+    return 0
+
+
 def _build_cmd(
     *,
     node_path: str,
@@ -413,15 +437,21 @@ def run_subprocess(
         )
 
     usage = top.get("usage", {}) or {}
-    prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+    prompt_tokens = _extract_input_tokens(top, usage)
     completion_tokens = int(usage.get("output_tokens", 0) or 0)
+    # dfmodel / DeepSeek-V4-Flash 等模型 qodercli 不回写真实 token 数
+    # (usage.input_tokens 恒为 0). 用 total_credits 作为唯一可信的成本信号,
+    # 用 context_usage_ratio 作为上下文占用信号. 二者均来自真实返回.
+    cost_credits = float(top.get("total_credits") or 0.0) or 0.0
+    context_usage_ratio = float(usage.get("context_usage_ratio") or 0.0) or 0.0
     stop_reason = top.get("stop_reason")
     model_id = top.get("modelID") or model_name
 
     # Log usage for all calls to help diagnose token tracking issues
     logger.info(
-        "qodercli.usage agent={} model={} stop_reason={} usage={} pt={} ct={}",
+        "qodercli.usage agent={} model={} stop_reason={} usage={} pt={} ct={} credits={:.4f} ctx_ratio={:.4f}",
         agent, model_id, stop_reason, usage, prompt_tokens, completion_tokens,
+        cost_credits, context_usage_ratio,
     )
 
     if stop_reason == "max_tokens":
@@ -440,6 +470,8 @@ def run_subprocess(
             provider="qodercli",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cost_credits=cost_credits,
+            context_usage_ratio=context_usage_ratio,
             duration_ms=duration_ms,
             model=model_id,
             raw_output=inner_text,
@@ -470,6 +502,8 @@ def run_subprocess(
                 provider="qodercli",
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+            cost_credits=cost_credits,
+            context_usage_ratio=context_usage_ratio,
                 duration_ms=duration_ms,
                 model=model_id,
                 raw_output=text,
@@ -483,6 +517,8 @@ def run_subprocess(
         provider="qodercli",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cost_credits=cost_credits,
+        context_usage_ratio=context_usage_ratio,
         duration_ms=duration_ms,
         model=model_id,
         raw_output=text,

@@ -29,6 +29,7 @@ def emit_run_finished(
     model: str | None = None,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    cost_credits: float = 0.0,
     duration_ms: int = 0,
 ) -> None:
     try:
@@ -39,6 +40,7 @@ def emit_run_finished(
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cost_credits=cost_credits,
             duration_ms=duration_ms,
         )
     except Exception as e:

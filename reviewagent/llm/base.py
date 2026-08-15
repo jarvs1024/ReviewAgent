@@ -29,7 +29,13 @@ class LLMResult:
     Attributes:
         data: 解析后的 agent 输出 dict（agent prompt 强约束的 JSON）.
         prompt_tokens: input token 数；部分 provider / model 可能为 0.
+            （例如 qodercli + dfmodel / DeepSeek-V4-Flash 不回写真实 token 数，
+              qodercli_subprocess 已做 best-effort 提取，失败时为 0）
         completion_tokens: output token 数.
+        cost_credits: 真实计费/成本信号（来自 qodercli `total_credits`）；
+            token 数不可得时，这是唯一可信的成本代理。opencode 等无此字段时为 0.0.
+        context_usage_ratio: 上下文占用比例（0~1，来自 qodercli `usage.context_usage_ratio`）；
+            可用于估算 input token 占用，不报 token 数时作为上下文压力信号.
         model: 实际调用的模型名（空字符串表示 provider 未填充）.
         duration_ms: 端到端耗时（毫秒）.
         provider: provider 名 "opencode" | "qodercli"；用于 telemetry / 日志.
@@ -39,6 +45,8 @@ class LLMResult:
     data: dict[str, Any]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cost_credits: float = 0.0
+    context_usage_ratio: float = 0.0
     model: str = ""
     duration_ms: int = 0
     provider: str = ""

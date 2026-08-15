@@ -68,6 +68,7 @@ class ReviewRun:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cost_credits: float = 0.0     # 真实成本信号 (qodercli total_credits); token 不可得时的可信计量
     duration_ms: int = 0
 
 

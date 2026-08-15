@@ -166,6 +166,7 @@ class BaseCommand:
         result_summary: dict[str, Any] = {}
         prompt_tokens = 0
         completion_tokens = 0
+        cost_credits = 0.0
         model_used = self.model
         _run_finished = False  # finally 安全网: 确保 run 状态一定被标记
 
@@ -278,6 +279,7 @@ class BaseCommand:
             agent_result = self._call_agent(ws, overflow_files=files_overflow or None)
             prompt_tokens = self._last_oc_result.prompt_tokens if self._last_oc_result else 0
             completion_tokens = self._last_oc_result.completion_tokens if self._last_oc_result else 0
+            cost_credits = self._last_oc_result.cost_credits if self._last_oc_result else 0.0
             model_used = (self._last_oc_result.model if self._last_oc_result else "") or self.model
 
             if isinstance(agent_result, dict):
@@ -310,6 +312,7 @@ class BaseCommand:
             _mark_finished(
                 run_id, status="success", model=model_used,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                cost_credits=cost_credits,
                 duration_ms=duration_ms,
             )
             result_summary.setdefault("status", "success")
@@ -330,6 +333,7 @@ class BaseCommand:
             _mark_finished(
                 run_id, status="failed", error=f"{provider_name}: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                cost_credits=cost_credits,
                 duration_ms=duration_ms,
             )
             raise BaseCommandError(f"{provider_name} error: {e}") from e
@@ -338,6 +342,7 @@ class BaseCommand:
             _mark_finished(
                 run_id, status="failed", error=f"infra: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                cost_credits=cost_credits,
                 duration_ms=duration_ms,
             )
             raise BaseCommandError(f"infra error: {e}") from e
@@ -346,6 +351,7 @@ class BaseCommand:
             _mark_finished(
                 run_id, status="failed", error=f"unexpected: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                cost_credits=cost_credits,
                 duration_ms=duration_ms,
             )
             raise
