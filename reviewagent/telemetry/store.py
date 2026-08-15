@@ -121,6 +121,20 @@ CREATE TABLE IF NOT EXISTS suggestions (
 CREATE INDEX IF NOT EXISTS idx_sug_project_mr ON suggestions(project_id, mr_iid);
 CREATE INDEX IF NOT EXISTS idx_sug_note_id ON suggestions(note_id);
 CREATE INDEX IF NOT EXISTS idx_sug_state ON suggestions(state);
+
+-- reviewed_file_state: 每个文件上次被检视时的内容指纹 + head_sha (V9 增量复用)
+-- 用途: apply 到文件 A 后 push 新 commit → 只有 A 的 blob 变 → 仅重检 A, 复用 B/C/D.
+-- (整 MR head_sha 复用在 apply 循环里收益为 0, 因为每次 push 都改 head)
+CREATE TABLE IF NOT EXISTS reviewed_file_state (
+    project_id      INTEGER NOT NULL,
+    mr_iid          INTEGER NOT NULL,
+    file_path       TEXT NOT NULL,
+    blob_sha        TEXT,                  -- 文件内容指纹 (sha1 of raw bytes at head); NULL=未知
+    head_sha        TEXT,                   -- 记录时的 MR head_sha
+    suggestion_count INTEGER DEFAULT 0,    -- 该文件本轮产出的建议数 (0=无建议也记录, 避免重检空跑)
+    reviewed_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (project_id, mr_iid, file_path)
+);
 """
 
 
@@ -1129,6 +1143,51 @@ class Store:
                 (project_id, mr_iid, project_id, mr_iid),
             ).fetchall()
         return {row["file_path"]: row["head_sha"] for row in rows if row["head_sha"]}
+
+    def upsert_file_review_state(
+        self, *, project_id: int, mr_iid: int, file_path: str,
+        blob_sha: str | None, head_sha: str | None, suggestion_count: int = 0,
+    ) -> None:
+        """V9 增量复用: 记录某文件本轮被检视时的内容指纹 + head_sha.
+
+        每个文件每轮 UPSERT 一行 (主键 project_id+mr_iid+file_path).
+        即使本轮 0 建议也记录 (避免下一轮对"上次没产出建议"的文件重跑 LLM).
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO reviewed_file_state
+                    (project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, mr_iid, file_path) DO UPDATE SET
+                    blob_sha=excluded.blob_sha,
+                    head_sha=excluded.head_sha,
+                    suggestion_count=excluded.suggestion_count,
+                    reviewed_at=excluded.reviewed_at
+                """,
+                (project_id, mr_iid, file_path, blob_sha, head_sha,
+                 suggestion_count, _fmt_dt(_utcnow())),
+            )
+
+    def get_file_review_states(self, project_id: int, mr_iid: int) -> dict[str, dict[str, str | None]]:
+        """V9: 返回 {file_path: {blob_sha, head_sha, suggestion_count}} — 每文件上次检视状态.
+
+        复用决策: 当前文件 blob == 上次 blob → 内容未变 → 复用 (跨文件影响检测后).
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT file_path, blob_sha, head_sha, suggestion_count "
+                "FROM reviewed_file_state WHERE project_id=? AND mr_iid=?",
+                (project_id, mr_iid),
+            ).fetchall()
+        return {
+            row["file_path"]: {
+                "blob_sha": row["blob_sha"],
+                "head_sha": row["head_sha"],
+                "suggestion_count": row["suggestion_count"] or 0,
+            }
+            for row in rows
+        }
 
     def suggestion_stats(self, project_id: int, mr_iid: int) -> dict:
         with self._conn() as conn:

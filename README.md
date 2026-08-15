@@ -180,7 +180,7 @@ reviewagent/
 | 存储 | `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` | 默认 `./data` |
 | 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过 |
 | 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库读 `AGENTS.md` / `.agents/rules/*.md`；`REPO_CONTEXT_MAX_LINES` 规则文件最大行数（默认 2000） |
-| improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MIN_SCORE` | 并行度 / 限流 |
+| improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SCORE` | 并行度 / 限流；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先 |
 | 检视过滤 | `REVIEW_EXCLUDE_EXTENSIONS` | 不送审的文件扩展名（默认含 `.md`/`.txt`/图片等） |
 | 周报-总开关 | `REVIEWAGENT_WEEKLY_ENABLED` `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` `REVIEWAGENT_WEEKLY_TARGET_BRANCH` `REVIEWAGENT_WEEKLY_TIMEZONE` | 总开关（默认 true）；目标项目 id（0=跳过 merged_mrs/repo_scan 段）/ 分支（默认 `main`）/ 时区（默认 `Asia/Shanghai`） |
 | 周报-采集 | `REVIEWAGENT_WEEKLY_COLLECTORS` `REVIEWAGENT_WEEKLY_NOTIFIER` | 启用的采集段（默认 `telemetry,merged_mrs,repo_scan`）；通知器（默认 `dingtalk`） |

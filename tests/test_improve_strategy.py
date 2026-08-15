@@ -60,7 +60,7 @@ class FakeImproveCommand:
             prompt_tokens=10, completion_tokens=5, model="test-model",
         )
 
-    def _merge_chunks(self, results, *, skipped_files=None, test_skipped=None):
+    def _merge_chunks(self, results, *, skipped_files=None, test_skipped=None, file_priorities=None):
         merged_summary = "## 改进总览\n\n"
         summaries = [r.get("summary_md", "") for r in results if r.get("summary_md")]
         if summaries:
@@ -374,6 +374,106 @@ def test_per_file_suggestion_limit():
     assert "quiet.py" in files, "quiet.py 不应被挤掉 (per-file 保证覆盖面)"
 
 
+def test_v9_selection_coverage_50_files(monkeypatch):
+    """V9: 50 文件各 1 条 medium, G=15 → 覆盖 15 个不同文件 (不是 15 条全落 1 个文件).
+
+    修复前: 全局只按 severity 稳定排序, 同档保序=处理序 → top15 全落前几个文件.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    import dataclasses
+    from reviewagent.config import config as _orig
+    _cfg = dataclasses.replace(_orig, improve_max_suggestions=15,
+                               improve_max_suggestions_per_file=5,
+                               improve_min_suggestions_per_file=1)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+    suggestions = [
+        {"file": f"f{i:02d}.py", "start_line": 1, "severity": "medium",
+         "header": f"h{i}", "rationale": "x" * 60, "label": "potential bug"}
+        for i in range(50)
+    ]
+    merged = ImproveCommand._merge_chunks([{"summary_md": "", "suggestions": suggestions}])
+    files = [s["file"] for s in merged["suggestions"]]
+    assert len(merged["suggestions"]) == 15, f"应保留 15 条, got {len(merged['suggestions'])}"
+    assert len(set(files)) == 15, f"应覆盖 15 个不同文件, 实际覆盖 {len(set(files))}"
+
+
+def test_v9_selection_high_not_displaced_by_medium(monkeypatch):
+    """V9: (severity, score) 复合键 → high 全保留, medium 才被截断.
+
+    修复前: 截断只按 severity, 但同档内随机; 且 high 数 < G 时 medium 也可能挤掉 high 的位置 (覆盖逻辑).
+    现在 high 主键在前, 必然先占满.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    import dataclasses
+    from reviewagent.config import config as _orig
+    _cfg = dataclasses.replace(_orig, improve_max_suggestions=8,
+                               improve_max_suggestions_per_file=5,
+                               improve_min_suggestions_per_file=1)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+    suggestions = [
+        *[{"file": "a.py", "start_line": i, "severity": "high",
+           "header": f"h{i}", "rationale": "x" * 60, "label": "potential bug"} for i in range(5)],
+        *[{"file": "b.py", "start_line": i, "severity": "medium",
+           "header": f"m{i}", "rationale": "x", "label": "enhancement"} for i in range(5)],
+    ]
+    merged = ImproveCommand._merge_chunks([{"summary_md": "", "suggestions": suggestions}])
+    sev = [s["severity"] for s in merged["suggestions"]]
+    assert sev.count("high") == 5, f"5 条 high 应全保留, got {sev.count('high')}"
+    assert len(merged["suggestions"]) == 8, f"上限 8, got {len(merged['suggestions'])}"
+
+
+def test_v9_priority_weighted_budget(monkeypatch):
+    """V9: per-file 预算按 priority 加权 — 高优先级文件拿更多槽位.
+
+    budget(fp) = min + round((max-min) * P/Pmax). A=5.0(满)→5, B=1.0→2+round(3*0.2)=3.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+    import dataclasses
+    from reviewagent.config import config as _orig
+    _cfg = dataclasses.replace(_orig, improve_max_suggestions=15,
+                               improve_max_suggestions_per_file=5,
+                               improve_min_suggestions_per_file=2)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+    suggestions = [
+        *[{"file": "core.py", "start_line": i, "severity": "medium",
+           "header": f"h{i}", "rationale": "x" * 60, "label": "potential bug"} for i in range(8)],
+        *[{"file": "config.py", "start_line": i, "severity": "medium",
+           "header": f"c{i}", "rationale": "x" * 60, "label": "potential bug"} for i in range(8)],
+    ]
+    priorities = {"core.py": 5.0, "config.py": 1.0}
+    merged = ImproveCommand._merge_chunks(
+        [{"summary_md": "", "suggestions": suggestions}],
+        file_priorities=priorities,
+    )
+    files = [s["file"] for s in merged["suggestions"]]
+    assert files.count("core.py") == 5, f"高优先级 core.py 应拿 5 槽, got {files.count('core.py')}"
+    assert files.count("config.py") == 3, f"低优先级 config.py 应拿 3 槽, got {files.count('config.py')}"
+
+
+def test_v9_store_file_review_state_roundtrip(tmp_path):
+    """V9: store 侧 reviewed_file_state upsert/get 往返 + 更新覆盖."""
+    from reviewagent.telemetry.store import Store
+    store = Store(tmp_path / "t.db")
+    store.upsert_file_review_state(
+        project_id=1, mr_iid=2, file_path="a.py",
+        blob_sha="blob1", head_sha="h1", suggestion_count=3,
+    )
+    states = store.get_file_review_states(1, 2)
+    assert states["a.py"]["blob_sha"] == "blob1"
+    assert states["a.py"]["head_sha"] == "h1"
+    assert states["a.py"]["suggestion_count"] == 3
+    # upsert 覆盖 (同主键)
+    store.upsert_file_review_state(
+        project_id=1, mr_iid=2, file_path="a.py",
+        blob_sha="blob2", head_sha="h2", suggestion_count=0,
+    )
+    states = store.get_file_review_states(1, 2)
+    assert states["a.py"]["blob_sha"] == "blob2"
+    assert states["a.py"]["suggestion_count"] == 0
+    # 未记录的文件不在结果中
+    assert "b.py" not in states
+
+
 def test_patch_only_block_has_context(tmp_path):
     """V7: patch 模式带 ±N 行最小 context, 不再纯行号"""
     from types import SimpleNamespace
@@ -552,15 +652,23 @@ def test_incremental_reuse_skips_unchanged_files(tmp_path, monkeypatch):
     # mock head_sha
     monkeypatch.setattr(cmd, "_get_mr_head_sha", lambda: "abc123")
 
-    # mock store: a.py 上轮也是 abc123 (未变), b.py 上轮是 old_sha (变了)
+    # V9: mock 文件内容指纹 — a.py 内容未变 (复用), b.py 内容变了 (重检)
+    monkeypatch.setattr(cmd, "_file_blob_sha", lambda fp, w: {
+        "services/a.py": "blob_a_same",
+        "services/b.py": "blob_b_new",
+    }.get(fp, "blob_unknown"))
+
+    # mock store: V9 get_file_review_states (每文件上轮 blob+head)
     from reviewagent.telemetry.store import Store as _Store
     mock_store = type("MockStore", (), {
-        "get_reviewed_file_shas": lambda self, pid, mid: {
-            "services/a.py": "abc123",  # 同 sha → 复用
-            "services/b.py": "old_sha",  # 不同 sha → 重检
+        "get_file_review_states": lambda self, pid, mid: {
+            "services/a.py": {"blob_sha": "blob_a_same", "head_sha": "abc123", "suggestion_count": 1},
+            "services/b.py": {"blob_sha": "blob_b_old", "head_sha": "old_sha", "suggestion_count": 0},
         },
+        "upsert_file_review_state": lambda self, **kw: None,
         "list_suggestions": lambda self, **kw: [
             {"file_path": "services/a.py", "head_sha": "abc123", "target_line": 1,
+             "state": "open",
              "severity": "high", "label": "potential bug", "header": "test", "one_sentence_summary": "test"},
         ],
     })()
@@ -613,13 +721,16 @@ def test_incremental_cross_impact_forces_recheck(tmp_path, monkeypatch):
         fp: [] for fp in files
     })
     monkeypatch.setattr(cmd, "_get_mr_head_sha", lambda: "same_sha")
+    # V9: 两文件 blob 相同 → 全复用, 0 LLM
+    monkeypatch.setattr(cmd, "_file_blob_sha", lambda fp, w: "blob_same")
 
     from reviewagent.telemetry.store import Store as _Store
     mock_store = type("MockStore", (), {
-        "get_reviewed_file_shas": lambda self, pid, mid: {
-            "a.py": "same_sha",  # 同 sha
-            "b.py": "same_sha",  # 同 sha
+        "get_file_review_states": lambda self, pid, mid: {
+            "a.py": {"blob_sha": "blob_same", "head_sha": "same_sha", "suggestion_count": 0},
+            "b.py": {"blob_sha": "blob_same", "head_sha": "same_sha", "suggestion_count": 0},
         },
+        "upsert_file_review_state": lambda self, **kw: None,
         "list_suggestions": lambda self, **kw: [],
     })()
     monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: mock_store)

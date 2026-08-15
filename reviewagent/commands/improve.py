@@ -326,28 +326,38 @@ class ImproveCommand(BaseCommand):
         # 按文件拆分 diff
         diff_by_file = self._split_diff_by_file(ws.diff_file, files)
 
-        # V8 增量检视: 同 head_sha + 同 file 的 diff 没变 → 跳过 LLM, 复用上轮 suggestions
+        # V9 增量复用: 按文件内容指纹 (blob sha) 复用, 取代整 MR head_sha.
+        # 原因: apply 到文件 A → push 新 commit → 整 MR head 变 → head_sha 复用对 ALL 文件
+        # 失效 (每轮全检, 在 apply 循环里收益=0). blob sha 只在文件内容真变时才变
+        # → 仅重检 A, 复用 B/C/D. shallow fetch 不靠 git 历史, 直接读 worktree 算 sha1.
         _publish_head_sha = self._get_mr_head_sha() or ""
         files_to_review: list[str] = []
         files_reuse: list[str] = []
+        file_states: dict[str, dict] = {}
+        # 当前每文件 blob (从 worktree 读 raw bytes + sha1; 始终算, 供末尾 upsert)
+        cur_blobs: dict[str, str | None] = {fp: self._file_blob_sha(fp, ws) for fp in files}
         if _publish_head_sha:
             from reviewagent.telemetry.store import get_store
             try:
-                last_reviewed = get_store().get_reviewed_file_shas(self.project_id, self.mr_iid)
+                file_states = get_store().get_file_review_states(self.project_id, self.mr_iid)
             except Exception as e:
                 logger.warning("improve.incremental_lookup_failed (non-fatal, full review): {}", e)
-                last_reviewed = {}
+                file_states = {}
 
-            if last_reviewed:
-                # changed 文件的 diff 内容 (用于检测 unchanged 文件的标识符是否被 changed diff 影响)
-                changed_diffs = {fp: diff_by_file.get(fp, "") for fp in files
-                                 if last_reviewed.get(fp) != _publish_head_sha}
+            if file_states:
+                # 内容变了的文件的 diff (跨文件影响检测: unchanged 文件标识符出现在
+                # changed diff → 强制重检, 防 "B 没变但被 A 牵动" 漏检)
+                changed_diffs = {
+                    fp: diff_by_file.get(fp, "") for fp in files
+                    if cur_blobs.get(fp) != (file_states.get(fp) or {}).get("blob_sha")
+                }
                 changed_text = "\n".join(changed_diffs.values())
 
                 for fp in files:
-                    if last_reviewed.get(fp) == _publish_head_sha:
-                        # 同 head_sha: 检查其标识符是否出现在 changed 文件的 diff 里
-                        # (跨文件影响检测: 文件A没变, 但文件B的改动可能影响A里的函数)
+                    prev = file_states.get(fp)
+                    prev_blob = (prev or {}).get("blob_sha") if prev else None
+                    if prev_blob and cur_blobs.get(fp) == prev_blob:
+                        # 内容未变 → 跨文件影响检测
                         idents = set(self._extract_identifiers(diff_by_file.get(fp, "")))
                         cross_impact = any(
                             ident in changed_text for ident in idents if len(ident) >= 3
@@ -357,12 +367,12 @@ class ImproveCommand(BaseCommand):
                         else:
                             files_reuse.append(fp)  # 复用上轮
                     else:
-                        files_to_review.append(fp)  # head_sha 变了, 必须重检
+                        files_to_review.append(fp)  # 内容变了 / 首次 / blob 未知 → 重检
 
                 if files_reuse:
                     logger.info(
-                        "improve.incremental project={} mr={} sha={} total={} review={} reuse={}",
-                        self.project_id, self.mr_iid, _publish_head_sha[:8],
+                        "improve.incremental project={} mr={} total={} review={} reuse={}",
+                        self.project_id, self.mr_iid,
                         len(files), len(files_to_review), len(files_reuse),
                     )
                     from reviewagent.metrics import inc as _metric_inc
@@ -381,18 +391,23 @@ class ImproveCommand(BaseCommand):
         wt = str(ws.worktree)
         cross_file_refs_by_file = self._collect_cross_file_refs_for_mr(files_to_review, diff_by_file, wt)
 
-        # 从 store 取复用文件的上轮 suggestions
+        # V9: 从 store 取复用文件上轮的 open suggestions (blob 相同 → 仍有效)
+        # 只取 state=open (applied/dismissed 不重显); head_sha 用该文件上次检视的 head
+        # (blob 相同 → 内容字节相同 → 行号必然仍有效)
         reuse_suggestions: list[dict[str, Any]] = []
         if files_reuse:
             from reviewagent.telemetry.store import get_store
             try:
                 _store = get_store()
+                rows = _store.list_suggestions(
+                    project_id=self.project_id, mr_iid=self.mr_iid, limit=500,
+                )
                 for fp in files_reuse:
-                    rows = _store.list_suggestions(
-                        project_id=self.project_id, mr_iid=self.mr_iid, limit=200,
-                    )
+                    last_head = (file_states.get(fp) or {}).get("head_sha") or ""
                     for r in rows:
-                        if r.get("file_path") == fp and r.get("head_sha") == _publish_head_sha:
+                        if (r.get("file_path") == fp
+                                and r.get("head_sha") == last_head
+                                and (r.get("state") or "open") == "open"):
                             reuse_suggestions.append({
                                 "file": r["file_path"],
                                 "start_line": r.get("target_line", 0),
@@ -411,13 +426,24 @@ class ImproveCommand(BaseCommand):
                 files_to_review = list(files)
                 files_reuse = []
 
+        # V9: 计算各文件 priority, 透传给 _merge_chunks 做建议预算加权 (高优先级文件更多槽位)
+        _file_priorities = {fp: _priority(fp) for fp in files}
+
         # 并行调用 (只调需重检的文件)
-        # V8: files_to_review 为空 + files_reuse 非空 → 全复用, 不兜底
+        # V9: files_to_review 为空 + files_reuse 非空 → 全复用, 不兜底
         if not files_to_review and files_reuse:
             logger.info("improve.all_reused project={} mr={} — skip LLM entirely", self.project_id, self.mr_iid)
+            # V9: 记录本轮各文件状态 (全复用, blob 不变, count=复用建议数)
+            _counts = {}
+            for s in reuse_suggestions:
+                fp = s.get("file", "")
+                if fp:
+                    _counts[fp] = _counts.get(fp, 0) + 1
+            self._upsert_file_review_states(files, ws, _publish_head_sha, _counts)
             return self._merge_chunks(
                 [{"summary_md": "", "suggestions": reuse_suggestions}],
                 skipped_files=skipped_files,
+                file_priorities=_file_priorities,
             )
         files_llm = files_to_review if files_to_review else list(files)  # 兜底: 拿不到sha或首次
         workers = min(len(files_llm), config.improve_parallel_workers)
@@ -469,11 +495,21 @@ class ImproveCommand(BaseCommand):
         if reuse_suggestions:
             chunk_results.append({"summary_md": "", "suggestions": reuse_suggestions})
 
+        # V9: 记录本轮各文件状态 (LLM 产出 + 复用), 供下一轮按文件粒度复用
+        _counts: dict[str, int] = {}
+        for cr in chunk_results:
+            for s in (cr.get("suggestions") or []):
+                fp = s.get("file", "")
+                if fp:
+                    _counts[fp] = _counts.get(fp, 0) + 1
+        self._upsert_file_review_states(files, ws, _publish_head_sha, _counts)
+
         # skipped_files 已含 test_skipped (上文 skipped_files = list(test_skipped))
         # V6 软阈值化后不再有"限额 overflow 丢弃"——overflow 文件降级为 patch 仍进 LLM
         return self._merge_chunks(
             chunk_results,
             skipped_files=skipped_files,
+            file_priorities=_file_priorities,
         )
 
     def _call_chunk(self, prompt: str, ws, file_path: str) -> dict[str, Any]:
@@ -811,8 +847,11 @@ class ImproveCommand(BaseCommand):
         )
 
     @staticmethod
-    def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None) -> dict[str, Any]:
-        """合并多个 chunk 的结果."""
+    def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None, file_priorities: dict[str, float] | None = None) -> dict[str, Any]:
+        """合并多个 chunk 的结果.
+
+        V9 选优: file_priorities 用于 per-file 预算加权 (高优先级文件更多槽位).
+        """
         all_suggestions: list[dict[str, Any]] = []
         summaries: list[str] = []
 
@@ -886,47 +925,86 @@ class ImproveCommand(BaseCommand):
                     )
             merged_suggestions = kept
 
-        # V7 per-file 建议上限: 每个文件最多保留 N 条 (按 severity), 防噪音文件吃光全局槽位
-        # 在全局截断之前做 — 保证覆盖面, 一个文件再吵也最多占 N 个位置
-        max_per_file = config.improve_max_suggestions_per_file
-        per_file_truncated = 0
-        if max_per_file > 0:
-            sev_rank = {"high": 3, "medium": 2, "low": 1}
-            by_file: dict[str, list[dict[str, Any]]] = {}
-            for s in merged_suggestions:
-                fp = s.get("file", "") or "_unknown"
-                by_file.setdefault(fp, []).append(s)
-            kept_list: list[dict[str, Any]] = []
-            for fp, suggs in by_file.items():
-                if len(suggs) > max_per_file:
-                    suggs.sort(
-                        key=lambda s: sev_rank.get((s.get("severity") or "medium").lower(), 2),
-                        reverse=True,
-                    )
-                    per_file_truncated += len(suggs) - max_per_file
-                    suggs = suggs[:max_per_file]
-                kept_list.extend(suggs)
-            if per_file_truncated > 0:
-                logger.info(
-                    "improve.per_file_limit max_per_file={} truncated={} (降为总览文字)",
-                    max_per_file, per_file_truncated,
-                )
-            merged_suggestions = kept_list
+        # V9 选优: (severity, score) 复合键 + priority 加权 per-file 预算 + 全局两遍填充(覆盖优先)
+        # 修复: 原来只按 severity 3 档排序, 同档内随机(稳定排序=处理序) → 50文件时 top15
+        # 全落前3个文件, 47文件零覆盖. 改为 score 区分同档 + 每文件先取1条保证覆盖.
+        sev_rank = {"high": 3, "medium": 2, "low": 1}
 
-        # 建议数限流: 按 severity 排序，保留前 N 条，超出只写总览
+        def _key(s):
+            # severity 为主键 (遵循 high/medium/low 严格分级), score 为同档内区分器
+            return (sev_rank.get((s.get("severity") or "medium").lower(), 2),
+                    ImproveCommand._score_suggestion(s))
+
+        # per-file 预算: 按 priority 加权 (高优先级文件更多槽位, 低优先级少占, 下限 min_per_file)
+        max_per_file = config.improve_max_suggestions_per_file
+        min_per_file = config.improve_min_suggestions_per_file
+        _max_prio = max((file_priorities or {}).values()) if file_priorities else 0.0
+
+        def _budget(fp: str) -> int:
+            if max_per_file <= 0:
+                return 10 ** 9  # 不限
+            if not file_priorities or _max_prio <= 0:
+                return max_per_file
+            norm = (file_priorities.get(fp, 0.0) or 0.0) / _max_prio
+            b = min_per_file + round((max_per_file - min_per_file) * norm)
+            return max(min_per_file, min(max_per_file, b))
+
+        by_file: dict[str, list[dict[str, Any]]] = {}
+        for s in merged_suggestions:
+            fp = s.get("file", "") or "_unknown"
+            by_file.setdefault(fp, []).append(s)
+
+        # 每文件按复合键留 top budget(fp), 其余计入 per_file_truncated
+        per_file_truncated = 0
+        kept_list: list[dict[str, Any]] = []
+        for fp, suggs in by_file.items():
+            suggs.sort(key=_key, reverse=True)
+            b = _budget(fp)
+            if len(suggs) > b:
+                per_file_truncated += len(suggs) - b
+                suggs = suggs[:b]
+            kept_list.extend(suggs)
+        if per_file_truncated > 0:
+            logger.info(
+                "improve.per_file_limit max_per_file={} min={} truncated={} (降为总览文字)",
+                max_per_file, min_per_file, per_file_truncated,
+            )
+        merged_suggestions = kept_list
+
+        # 全局限流: 两遍填充 — 第1遍每文件1条(覆盖优先), 第2遍按复合键填剩余(质量优先)
         max_suggestions = config.improve_max_suggestions
         truncated_count = 0
         if max_suggestions > 0 and len(merged_suggestions) > max_suggestions:
-            sev_rank = {"high": 3, "medium": 2, "low": 1}
-            merged_suggestions.sort(
-                key=lambda s: sev_rank.get((s.get("severity") or "medium").lower(), 2),
-                reverse=True,
-            )
-            truncated_count = len(merged_suggestions) - max_suggestions
-            merged_suggestions = merged_suggestions[:max_suggestions]
+            by_file2: dict[str, list[dict[str, Any]]] = {}
+            for s in merged_suggestions:
+                fp = s.get("file", "") or "_unknown"
+                by_file2.setdefault(fp, []).append(s)
+            # 文件按其最佳建议的复合键降序 (高价值文件先占覆盖槽)
+            file_order = sorted(by_file2.keys(),
+                                key=lambda fp: _key(by_file2[fp][0]), reverse=True)
+            phase1: list[dict[str, Any]] = []
+            used: dict[str, int] = {}
+            for fp in file_order:
+                if len(phase1) >= max_suggestions:
+                    break
+                phase1.append(by_file2[fp][0])  # 每文件1条 → 覆盖最大化
+                used[fp] = 1
+            # 第2遍: 剩余候选按复合键降序填, 受 budget 约束
+            remaining = [s for fp in by_file2 for s in by_file2[fp][1:]]
+            remaining.sort(key=_key, reverse=True)
+            for s in remaining:
+                if len(phase1) >= max_suggestions:
+                    break
+                fp = s.get("file", "") or "_unknown"
+                if used.get(fp, 0) < _budget(fp):
+                    phase1.append(s)
+                    used[fp] = used.get(fp, 0) + 1
+            truncated_count = len(merged_suggestions) - len(phase1)
+            merged_suggestions = phase1
             logger.info(
-                "improve.suggestion_limit kept={} truncated={}",
+                "improve.suggestion_limit kept={} truncated={} files_covered={}",
                 max_suggestions, truncated_count,
+                len({s.get("file") for s in phase1}),
             )
 
         # summary: 从 suggestions 列表生成概览
@@ -995,6 +1073,48 @@ class ImproveCommand(BaseCommand):
         except Exception as e:
             logger.warning("improve.get_mr_head_sha failed: {}", e)
             return None
+
+    def _file_blob_sha(self, file_path: str, ws) -> str | None:
+        """V9: 文件内容指纹 (sha1 of raw bytes at worktree head).
+
+        相同 blob = 文件字节相同 = 上轮 LLM(无状态)的建议必然仍成立 → 可安全复用.
+        不依赖 git 历史 (workspace 是 shallow fetch, 旧 head 可能已裁剪).
+        """
+        import hashlib
+        try:
+            ws_root = Path(ws.worktree)
+            p = ws_root / file_path
+            if not p.is_file():
+                try:
+                    p = (ws_root / file_path).resolve()
+                except OSError:
+                    return None
+            if not p.is_file():
+                return None
+            return hashlib.sha1(p.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    def _upsert_file_review_states(
+        self, files: list[str], ws, head_sha: str,
+        per_file_counts: dict[str, int],
+    ) -> None:
+        """V9: 记录本轮每个文件的 blob + 建议数, 供下一轮按文件粒度复用.
+
+        所有文件都 upsert (含复用文件 — 其 blob 不变但 reviewed_at 刷新).
+        失败不阻塞发布流程 (non-fatal).
+        """
+        try:
+            from reviewagent.telemetry.store import get_store
+            _store = get_store()
+            for fp in files:
+                _store.upsert_file_review_state(
+                    project_id=self.project_id, mr_iid=self.mr_iid,
+                    file_path=fp, blob_sha=self._file_blob_sha(fp, ws),
+                    head_sha=head_sha, suggestion_count=per_file_counts.get(fp, 0),
+                )
+        except Exception as e:
+            logger.warning("improve.upsert_file_state_failed (non-fatal): {}", e)
 
     def _diff_line_map(self) -> dict[str, set[int]]:
         """读 self.ws.diff_file 解析每个文件的 valid new_line 集合."""

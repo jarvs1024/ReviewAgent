@@ -105,6 +105,7 @@ class Config:
     improve_patch_context_lines: int = 3    # patch 模式 diff 行 ±N 行最小 context (V7: 不再纯行号)
     improve_max_suggestions: int = 15        # 单次最大 inline 建议数 (0=不限, 超出只写总览)
     improve_max_suggestions_per_file: int = 5  # 单文件最大建议数 (V7: 防噪音文件吃光槽位, 0=不限)
+    improve_min_suggestions_per_file: int = 2  # V9: 单文件最少建议数 (priority 加权预算的下限, 保证高优先级文件不被饿死)
     improve_min_score: int = 0               # 改进建议最低分数 (0=不过滤, 建议值 20~40)
     improve_min_severity: str = ""           # 最低严重度过滤 (空=不过滤, 可选: critical/high/medium/low)
 
@@ -200,6 +201,7 @@ class Config:
             improve_patch_context_lines=int(_env("IMPROVE_PATCH_CONTEXT_LINES", "3")),
             improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
             improve_max_suggestions_per_file=int(_env("IMPROVE_MAX_SUGGESTIONS_PER_FILE", "5")),
+            improve_min_suggestions_per_file=int(_env("IMPROVE_MIN_SUGGESTIONS_PER_FILE", "2")),
             improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
             improve_min_severity=_env("IMPROVE_MIN_SEVERITY", "").lower(),
             improve_review_mode=_env("IMPROVE_REVIEW_MODE", "auto").lower(),
