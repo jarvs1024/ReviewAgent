@@ -579,6 +579,117 @@ class Store:
                     (now, pid, mid, pid, mid, pid, mid, pid, mid, pid, mid),
                 )
 
+    # ---------- 孤儿 running 清理 (进程外, 根治 work-horse 强杀残留) ----------
+    def _recover_orphan_run(
+        self,
+        conn,
+        rid: int,
+        started_at,
+        now_iso: str,
+        mark_status: str,
+        reason: str,
+    ) -> None:
+        """把单条 running 记录标为终态 (原子 UPDATE, 仅当仍 running)."""
+        dur = 0
+        if started_at:
+            try:
+                dur = int(
+                    (_utcnow() - datetime.fromisoformat(started_at)).total_seconds() * 1000
+                )
+            except Exception:
+                dur = 0
+        conn.execute(
+            """
+            UPDATE review_runs
+            SET finished_at = ?, status = ?, error = ?, duration_ms = ?
+            WHERE id = ? AND status = 'running'
+            """,
+            (now_iso, mark_status, reason, dur, rid),
+        )
+
+    def sweep_orphaned_runs(
+        self, *, threshold_seconds: int, mark_status: str = "failed",
+    ) -> int:
+        """进程外清理全局孤儿 running 记录 (兜底网).
+
+        用于 worker 启动 / 单命令入口等无法利用 per-MR 链锁精确判定的场景.
+        凡是 started_at 早于 (now - threshold_seconds) 仍 running 的, 一律视为
+        work-horse 被强杀 (SIGKILL/OOM/RQ 硬 SIGTERM) 后的孤儿, 标为终态.
+
+        为何必须进程外: 命令内 `_common.py` 的 finally 安全网在 work-horse 被
+        强杀时不执行 (信号直接终止进程, 不跑 finally), 导致 review_runs 永久
+        停在 running. 只能由下一个存活进程 (本函数) 清理.
+
+        Args:
+            threshold_seconds: 超过该时长仍 running 即视为孤儿.
+                建议 = rq_worker_timeout + buffer (如 1200 + 300).
+            mark_status: 终态, 默认 failed (与 _common finally 一致, UI 兼容).
+
+        Returns: 处理的记录数.
+        """
+        from datetime import timedelta
+
+        cutoff = _utcnow() - timedelta(seconds=threshold_seconds)
+        cutoff_iso = _fmt_dt(cutoff)
+        now_iso = _fmt_dt(_utcnow())
+        handled = 0
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, started_at FROM review_runs
+                WHERE status = 'running' AND started_at < ?
+                ORDER BY started_at
+                """,
+                (cutoff_iso,),
+            ).fetchall()
+            for r in rows:
+                self._recover_orphan_run(
+                    conn, r["id"], r["started_at"], now_iso, mark_status,
+                    "orphaned: work-horse likely killed (SIGKILL/OOM/term), "
+                    "auto-recovered by sweep",
+                )
+                handled += 1
+        if handled:
+            logger.warning("sweep_orphaned_runs: recovered %d orphan running runs", handled)
+        return handled
+
+    def sweep_orphaned_runs_for_mr(
+        self, *, project_id: int, mr_iid: int, mark_status: str = "failed",
+    ) -> int:
+        """精确清理某 MR 的孤儿 running 记录 (链式主防线).
+
+        调用时机: run_mr_chain 拿到 per-MR 链锁之后. 由于链锁排他,
+        此刻该 MR 不可能有其它 chain 在跑, 任何遗留的 running 记录都必定是
+        之前 work-horse 被强杀留下的孤儿 —— 无需时间阈值即可精确判定,
+        因此"再次触发即立即清除", 没有阈值误判窗口.
+
+        Returns: 处理的记录数.
+        """
+        now_iso = _fmt_dt(_utcnow())
+        handled = 0
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, started_at FROM review_runs
+                WHERE project_id = ? AND mr_iid = ? AND status = 'running'
+                ORDER BY started_at
+                """,
+                (project_id, mr_iid),
+            ).fetchall()
+            for r in rows:
+                self._recover_orphan_run(
+                    conn, r["id"], r["started_at"], now_iso, mark_status,
+                    "orphaned: stale running cleared after per-MR lock acquired "
+                    "(prior work-horse killed); auto-recovered by sweep",
+                )
+                handled += 1
+        if handled:
+            logger.warning(
+                "sweep_orphaned_runs_for_mr: recovered %d orphan runs "
+                "project=%s mr=%s", handled, project_id, mr_iid,
+            )
+        return handled
+
     def save_agent_output_fail(self, text: str, agent: str) -> None:
         """保存 agent 失败时的输出前 500 字符到 agent_failures 表（用于调试）."""
         with self._conn() as conn:

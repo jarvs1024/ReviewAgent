@@ -20,6 +20,7 @@ from rq import Queue, Retry
 
 from reviewagent.config import config
 from reviewagent.logging_setup import logger, setup_logging
+from reviewagent.telemetry.store import get_store
 from reviewagent.webhook.locks import locks
 
 # RQ worker 进程启动时配置日志 (文件轮转 + stderr)
@@ -279,6 +280,12 @@ def _run_command(
     actor_username: str,
 ) -> dict[str, Any]:
     """共用的 RQ job 体，按 command 字符串 import + invoke."""
+    # 兜底: 清理全局超时孤儿 running (精确 per-MR sweep 在 run_mr_chain 锁后已处理主路径).
+    # 用时间阈值 (rq_worker_timeout + buffer) 兜底单命令/无锁场景, 不会误清刚启动的 run.
+    try:
+        get_store().sweep_orphaned_runs(threshold_seconds=config.rq_worker_timeout + 300)
+    except Exception as e:
+        logger.warning("sweep_orphaned_runs failed (non-fatal): {}", e)
     if command == "describe":
         from reviewagent.commands.describe import DescribeCommand, DescribeError
         CommandCls, ErrCls = DescribeCommand, DescribeError
@@ -395,6 +402,13 @@ def run_mr_chain(
         )
         return [{"command": "lock", "status": "failed", "error": "lock_timeout"}]
     try:
+        # 进程外根治假 running: 拿到 per-MR 链锁 ⇒ 此刻该 MR 绝无存活 chain,
+        # 任何遗留 running 都是上次 work-horse 被强杀的孤儿, 精确清掉 (无时间阈值误判).
+        try:
+            get_store().sweep_orphaned_runs_for_mr(project_id=project_id, mr_iid=mr_iid)
+        except Exception as e:
+            logger.warning("sweep_orphaned_runs_for_mr failed (non-fatal): {}", e)
+
         parallel = len(commands) > 1
         logger.info(
             "chain.lock_acquired project={} mr={} commands={} mode={}",
