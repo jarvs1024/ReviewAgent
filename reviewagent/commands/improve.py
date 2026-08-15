@@ -394,37 +394,58 @@ class ImproveCommand(BaseCommand):
         # V9: 从 store 取复用文件上轮的 open suggestions (blob 相同 → 仍有效)
         # 只取 state=open (applied/dismissed 不重显); head_sha 用该文件上次检视的 head
         # (blob 相同 → 内容字节相同 → 行号必然仍有效)
+        # L4: 同时取待重检文件 (blob 变了) 的 prior open issues 作 prompt 锚点
+        # → LLM 确认而非从零重推, 省 output token + 跨轮连续; 行号已偏移, 让 LLM 重定位
         reuse_suggestions: list[dict[str, Any]] = []
-        if files_reuse:
+        prior_issues_by_file: dict[str, list[dict[str, Any]]] = {}
+        _need_load = bool(files_reuse) or (bool(files_to_review) and bool(file_states))
+        if _need_load:
             from reviewagent.telemetry.store import get_store
             try:
                 _store = get_store()
                 rows = _store.list_suggestions(
                     project_id=self.project_id, mr_iid=self.mr_iid, limit=500,
                 )
-                for fp in files_reuse:
+                reuse_set = set(files_reuse)
+                review_set = set(files_to_review)
+                for r in rows:
+                    fp = r.get("file_path", "")
+                    if not fp:
+                        continue
                     last_head = (file_states.get(fp) or {}).get("head_sha") or ""
-                    for r in rows:
-                        if (r.get("file_path") == fp
-                                and r.get("head_sha") == last_head
-                                and (r.get("state") or "open") == "open"):
-                            reuse_suggestions.append({
-                                "file": r["file_path"],
-                                "start_line": r.get("target_line", 0),
-                                "severity": r.get("severity", "medium"),
-                                "label": r.get("label", ""),
-                                "header": r.get("header", ""),
-                                "rationale": r.get("one_sentence_summary", "") or r.get("header", ""),
-                            })
-                logger.info(
-                    "improve.incremental_reuse_loaded project={} mr={} reuse_files={} suggestions={}",
-                    self.project_id, self.mr_iid, len(files_reuse), len(reuse_suggestions),
-                )
+                    if (r.get("head_sha") != last_head
+                            or (r.get("state") or "open") != "open"):
+                        continue
+                    item = {
+                        "file": fp,
+                        "start_line": r.get("target_line", 0),
+                        "severity": r.get("severity", "medium"),
+                        "label": r.get("label", ""),
+                        "header": r.get("header", ""),
+                        "rationale": r.get("one_sentence_summary", "") or r.get("header", ""),
+                    }
+                    if fp in reuse_set:
+                        reuse_suggestions.append(item)
+                    elif fp in review_set:
+                        prior_issues_by_file.setdefault(fp, []).append(item)
+                if files_reuse:
+                    logger.info(
+                        "improve.incremental_reuse_loaded project={} mr={} reuse_files={} suggestions={}",
+                        self.project_id, self.mr_iid, len(files_reuse), len(reuse_suggestions),
+                    )
+                if prior_issues_by_file:
+                    logger.info(
+                        "improve.prior_anchors project={} mr={} files={} anchors={}",
+                        self.project_id, self.mr_iid,
+                        len(prior_issues_by_file),
+                        sum(len(v) for v in prior_issues_by_file.values()),
+                    )
             except Exception as e:
                 logger.warning("improve.reuse_load_failed (non-fatal): {}", e)
-                # 复用失败 → 降级为全检
-                files_to_review = list(files)
-                files_reuse = []
+                # 复用失败 → 降级为全检; 锚点失败 → 跳过锚点 (LLM 自行重推, 无害)
+                if files_reuse:
+                    files_to_review = list(files)
+                    files_reuse = []
 
         # V9: 计算各文件 priority, 透传给 _merge_chunks 做建议预算加权 (高优先级文件更多槽位)
         _file_priorities = {fp: _priority(fp) for fp in files}
@@ -466,6 +487,7 @@ class ImproveCommand(BaseCommand):
                     fp, file_diff, valid_lines, ws,
                     cross_file_refs=cross_file_refs_by_file.get(fp, []),
                     strategy=strategy.get(fp, "full"),  # V6: 4 档 strategy 透传
+                    prior_issues=prior_issues_by_file.get(fp),  # L4 锚点
                 )
                 fut = pool.submit(self._call_chunk, prompt, ws, fp)
                 futures[fut] = fp
@@ -783,6 +805,7 @@ class ImproveCommand(BaseCommand):
         self, file_path: str, file_diff: str, valid_lines: set[int], ws,
         cross_file_refs: list[dict] | None = None,
         *, strategy: str = "full",
+        prior_issues: list[dict] | None = None,
     ) -> str:
         """构建单文件的精简 prompt.
 
@@ -792,6 +815,9 @@ class ImproveCommand(BaseCommand):
                        full   = 完整源码 (≤5000 行)
                        partial = diff 行 ±N 行 context (overflow 文件兜底)
                        patch  = 仅 diff + 行号 (最弱, 行内识别 only)
+        prior_issues (L4): 上一轮该文件的 open suggestions 锚点, 让 LLM 确认而非
+                           从零重推, 省 output token + 跨轮连续 (无 flicker).
+                           行号已因改动偏移, 仅作语义锚点, 由 LLM 重定位.
         """
         wt = str(ws.worktree)
 
@@ -834,9 +860,27 @@ class ImproveCommand(BaseCommand):
             cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
         cross_file_section = self._render_cross_file_section(cross_file_refs)
 
+        # L4: 已知问题锚点 — 让 LLM 确认而非重推, 聚焦新问题
+        prior_section = ""
+        if prior_issues:
+            _anchors = []
+            for i, pi in enumerate(prior_issues, 1):
+                sev = (pi.get("severity") or "medium").lower()
+                hdr = (pi.get("header") or pi.get("rationale") or "").strip()
+                lbl = (pi.get("label") or "").strip()
+                _anchors.append(f"{i}. [{sev}] {hdr}" + (f" (label={lbl})" if lbl else ""))
+            prior_section = (
+                "## 已知问题锚点（上一轮已发现且仍 open；行号可能因改动偏移）\n\n"
+                "以下问题在上轮检视中已发现。请：\n"
+                "- 逐条核对在 **当前代码** 中是否仍成立：成立 → 保留并重新定位 start_line；不成立 → 不报\n"
+                "- **不要仅限于此清单** — 继续主动发现清单之外的新问题\n\n"
+                + "\n".join(_anchors) + "\n\n---\n\n"
+            )
+
         return (
             f"{cross_file_section}"
             f"{rules_block}"
+            f"{prior_section}"
             f"## 本次检视文件: `{file_path}`\n\n"
             f"### diff\n```diff\n{file_diff}\n```\n\n"
             f"{source_block}\n\n"

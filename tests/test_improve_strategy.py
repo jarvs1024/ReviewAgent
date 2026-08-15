@@ -750,6 +750,122 @@ def test_incremental_cross_impact_forces_recheck(tmp_path, monkeypatch):
     assert len(called_files) == 0, "所有文件同sha且无changed → 应全复用, 0次LLM调用"
 
 
+# ============ L4 prior issues 锚点测试 ============
+
+def test_l4_prior_issues_injected_as_anchors(tmp_path, monkeypatch):
+    """L4: blob 变化的文件重检时, 上轮 open suggestions 作为锚点注入 prompt."""
+    from types import SimpleNamespace
+    from reviewagent.llm.base import LLMResult
+    from reviewagent.commands.improve import ImproveCommand
+
+    (tmp_path / "services").mkdir()
+    (tmp_path / "services" / "a.py").write_text("def a():\n    return 1\n")
+    (tmp_path / "services" / "b.py").write_text("def b():\n    return 2\n")
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 289
+    cmd.ws = ws
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {
+        "services/a.py": {1}, "services/b.py": {1},
+    })
+    monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 2)
+    monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["def x():", "    return 1"])
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+        fp: f"diff --git a/{fp} b/{fp}\n+new\n" for fp in files
+    })
+    monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+        fp: [] for fp in files
+    })
+    monkeypatch.setattr(cmd, "_get_mr_head_sha", lambda: "new_head")
+    # a.py blob 变了 (重检, 有 prior issues → 锚点); b.py blob 未变 (复用, 0 调用)
+    monkeypatch.setattr(cmd, "_file_blob_sha", lambda fp, w: {
+        "services/a.py": "blob_a_new",
+        "services/b.py": "blob_b_same",
+    }.get(fp, "blob_unknown"))
+
+    from reviewagent.telemetry.store import Store as _Store
+    mock_store = type("MockStore", (), {
+        "get_file_review_states": lambda self, pid, mid: {
+            "services/a.py": {"blob_sha": "blob_a_old", "head_sha": "old_head", "suggestion_count": 2},
+            "services/b.py": {"blob_sha": "blob_b_same", "head_sha": "old_head", "suggestion_count": 0},
+        },
+        "upsert_file_review_state": lambda self, **kw: None,
+        "list_suggestions": lambda self, **kw: [
+            {"file_path": "services/a.py", "head_sha": "old_head", "target_line": 1,
+             "state": "open", "severity": "high", "label": "potential bug",
+             "header": "missing null check", "one_sentence_summary": "should guard None"},
+        ],
+    })()
+    monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: mock_store)
+
+    captured_prompt = []
+    def _fake_chunk(prompt, w, fp):
+        captured_prompt.append((fp, prompt))
+        return LLMResult(data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t")
+    monkeypatch.setattr(cmd, "_call_chunk", _fake_chunk)
+
+    cmd._call_agent(ws)
+
+    # 只有 a.py 调了 LLM (b.py 复用)
+    assert len(captured_prompt) == 1, f"应只调 1 次 LLM (a.py), 实际: {len(captured_prompt)}"
+    fp, p = captured_prompt[0]
+    assert fp == "services/a.py"
+    assert "已知问题锚点" in p, "prompt 应包含已知问题锚点段"
+    assert "missing null check" in p, "prior issue header 应出现在锚点段"
+    assert "[high]" in p, "prior issue severity 应出现在锚点段"
+    assert "不要仅限于此清单" in p, "应包含防偷懒约束 (也要找新问题)"
+
+
+def test_l4_no_anchors_on_first_review(tmp_path, monkeypatch):
+    """L4: 首次检视 (无 prior states) → prompt 不含锚点段."""
+    from types import SimpleNamespace
+    from reviewagent.llm.base import LLMResult
+    from reviewagent.commands.improve import ImproveCommand
+
+    (tmp_path / "services").mkdir()
+    (tmp_path / "services" / "a.py").write_text("def a():\n    return 1\n")
+    (tmp_path / "services" / "b.py").write_text("def b():\n    return 2\n")
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 289
+    cmd.ws = ws
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {
+        "services/a.py": {1}, "services/b.py": {1},
+    })
+    monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 2)
+    monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["def x():", "    return 1"])
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+        fp: f"diff --git a/{fp} b/{fp}\n+new\n" for fp in files
+    })
+    monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+        fp: [] for fp in files
+    })
+    # 首次检视: 拿不到 head_sha → 无 file_states → 无锚点
+    monkeypatch.setattr(cmd, "_get_mr_head_sha", lambda: None)
+
+    captured_prompt = []
+    def _fake_chunk(prompt, w, fp):
+        captured_prompt.append(prompt)
+        return LLMResult(data={"summary_md": "", "suggestions": []}, prompt_tokens=10, completion_tokens=5, model="t")
+    monkeypatch.setattr(cmd, "_call_chunk", _fake_chunk)
+
+    cmd._call_agent(ws)
+
+    assert len(captured_prompt) == 2, "首次检视 2 文件 → 2 次 LLM"
+    for p in captured_prompt:
+        assert "已知问题锚点" not in p, "首次检视不应有锚点段"
+
+
 # ============ V9 架构审查修复回归测试 ============
 
 def test_list_suggestion_headers_uses_state_not_status(tmp_path):
