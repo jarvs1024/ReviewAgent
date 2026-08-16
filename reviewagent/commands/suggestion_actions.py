@@ -223,24 +223,48 @@ def _late_detect_single(
             return "error"
     changed = exact_match or token_hit
 
+    # 删除型 suggestion: improved_code 为空 + existing_code 非空.
+    # 典型场景: LLM 表达"删除该行/段"但 improved_code 字段解析时落库为空
+    # (例: MR307 1072 api/r10_search_v1.py L11 — 删 L8 import 行,
+    # improved_code 解析时落空, target_line 11 也超出了 posted 4 行文件范围,
+    # _target_region_changed 直接 return False).
+    # 此时 token_fallback 因 sug_improved 空已跳过, 唯一可用证据是:
+    # "existing_code 在 current 文件中消失" = 用户删了这段 = 采纳.
+    # 比 _target_region_changed 更稳健, 不依赖 line 在 posted 范围内有效.
+    is_deletion_kind = (not sug_improved) and bool((existing_code or "").strip())
+    deletion_evicted = False
+    if not changed and is_deletion_kind:
+        existing_stripped = (existing_code or "").strip()
+        deletion_evicted = existing_stripped and (existing_stripped not in (current_content or ""))
+
     if not changed:
-        # region_changed 单独不再算采纳 — 仅用于审计/日志.
-        try:
-            region_changed = _target_region_changed(
-                posted_content if posted_content is not None else existing_code,
-                current_content,
-                line=target_line,
-                line_end=target_line_end,
-            )
-        except Exception:  # noqa: BLE001
-            region_changed = False
-        if region_changed:
+        if is_deletion_kind and deletion_evicted:
+            # 删除型: existing_code 在 current 文件中消失 = 用户已采纳
             logger.info(
-                "auto_detect_applied late_detect region_only note={} file={} line={} "
-                "(region_changed 但 exact/token 都不命中 → 保持 resolved)",
-                note_id[:8], file_path, target_line,
+                "auto_detect_applied late_detect deletion_evicted_flip "
+                "project={} mr={} note={} file={} line={}",
+                project_id, mr_iid, note_id[:8], file_path, target_line,
             )
-        return "unchanged"
+            changed = True
+        else:
+            # 非删除型: region_changed 单独不再算采纳 — 仅用于审计/日志.
+            try:
+                region_changed = _target_region_changed(
+                    posted_content if posted_content is not None else existing_code,
+                    current_content,
+                    line=target_line,
+                    line_end=target_line_end,
+                )
+            except Exception:  # noqa: BLE001
+                region_changed = False
+            if region_changed:
+                logger.info(
+                    "auto_detect_applied late_detect region_only note={} file={} line={} "
+                    "(region_changed 但 exact/token 都不命中 → 保持 resolved)",
+                    note_id[:8], file_path, target_line,
+                )
+            if not changed:
+                return "unchanged"
 
     # 命中 → 翻 applied + 记 action (state 二次校验: 用户可能中途 /adopt)
     current = store.get_suggestion_by_note_id(note_id)

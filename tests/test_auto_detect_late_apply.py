@@ -202,6 +202,115 @@ def test_resolved_region_only_stays_resolved(tmp_telemetry):
     assert final["state"] == "resolved", f"应保持 resolved, got {final['state']}"
 
 
+# ---------- Direction A: 删除型 suggestion (improved_code 空 + existing_code 非空) ----------
+def test_deletion_kind_region_changed_flips_to_applied(tmp_telemetry):
+    """MR307 1072 案例: improved_code 为空 + existing_code 非空 (删除型),
+    region_changed 命中 → 升格为采纳证据, 翻 applied.
+
+    Why: LLM 表达"删除该行/段"但 improved_code 字段解析时落库为空
+    (例: 1072 api/r10_search_v1.py L11 — 用户 Apply suggestion 删 L8 import 行,
+    improved_code 在 LLM 输出解析时未捕获, 落库为空字符串).
+    此时 token_fallback 因 sug_improved 空已跳过, region_changed 是唯一可用证据.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        target_line=11, target_line_end=11,
+        existing_code="from services.r10_order_v1 import parse_query_v2  # ImportError\n",
+        improved_code="",  # 关键: 删除型落库为空
+    )
+
+    gl = MagicMock()
+    # posted: L8 有 import 行
+    # current: 用户 Apply suggestion 后 import 行已被删除
+    posted = "def parse_query(raw):\n    from services.r10_order_v1 import parse_query_v2\n    return parse_query_v2(raw)\n"
+    current = "def parse_query(raw):\n    return parse_query_v2(raw)\n"
+    gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
+        posted if sha.startswith("0a9043b0") else current
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 1, f"删除型 + region_changed 应翻 applied, got {result}"
+    final = s.get_suggestion_by_note_id("resolved-note-1")
+    assert final["state"] == "applied", f"应翻 applied, got {final['state']}"
+    assert final["adoption_source"] == "late_detect"
+
+
+def test_deletion_kind_no_change_stays_resolved(tmp_telemetry):
+    """删除型但 region 没变 → 保持 resolved (用户没改).
+    保证方向 A 不会假阳性把没改的 suggestion 也翻 applied.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        target_line=11, target_line_end=11,
+        existing_code="from foo import bar  # broken\n",
+        improved_code="",
+    )
+
+    gl = MagicMock()
+    # current 文件: 原行还在 (用户没改)
+    content = "def f():\n    from foo import bar  # broken\n    return bar(x)\n"
+    gl.get_file_at_sha.return_value = content
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 0, f"删除型但 region 没变不应翻 applied, got {result}"
+    final = s.get_suggestion_by_note_id("resolved-note-1")
+    assert final["state"] == "resolved", f"应保持 resolved, got {final['state']}"
+
+
+def test_deletion_kind_records_two_actions(tmp_telemetry):
+    """删除型翻 applied 后, suggestion_actions 表里应有 resolved (原) + adopted (新) 两条.
+    adopted 那条 adoption_source='late_detect', validation_status='late-detect-apply'.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    head_sha = "8b7e58a3" + "0" * 32
+    _seed_resolved_suggestion(
+        s, head_sha=head_sha,
+        target_line=11, target_line_end=11,
+        existing_code="from foo import bar  # broken\n",
+        improved_code="",
+    )
+
+    gl = MagicMock()
+    posted = "def f():\n    from foo import bar  # broken\n    return bar(x)\n"
+    current = "def f():\n    return bar(x)\n"
+    gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
+        posted if sha.startswith("0a9043b0") else current
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    actions = s.list_suggestion_actions(project_id=34, mr_iid=247)
+    by_action = {}
+    for a in actions:
+        by_action.setdefault(a["action"], []).append(a)
+    assert "resolved" in by_action, f"应保留原 resolved action, got {by_action}"
+    assert "adopted" in by_action, f"应新增 adopted action, got {by_action}"
+    assert "late_detect" in by_action["adopted"][0]["reason"]
+    assert by_action["adopted"][0]["adoption_source"] == "late_detect"
+    assert by_action["adopted"][0]["validation_status"] == "late-detect-apply"
+
+
 def test_resolved_strict_token_match_flips_to_applied(tmp_telemetry):
     """Batch1: 严格 token 匹配 (新 token 占比>=0.8, 旧 token 残余<30%) 翻 applied."""
     from reviewagent.commands.suggestion_actions import auto_detect_applied
