@@ -16,6 +16,7 @@ from typing import Any
 
 from reviewagent.commands._common import publish_overview
 from reviewagent.commands.suggestion_actions import _scan_and_mark_resolved_silent
+from reviewagent.config import config
 from reviewagent.gitlab.client import GitLabClient
 from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
@@ -72,6 +73,8 @@ def reconcile_open_mrs(
 ) -> dict[str, Any]:
     """扫描 bot 跟踪的所有 open MR, 对每个调 reconcile_single_mr.
 
+    同时清理孤儿 running 记录 (work-horse 被 SIGTERM/SIGKILL 杀死后残留).
+
     Args:
         project_id: 限定单个 project (None = 所有 bot 跟踪的 project).
             默认 None; 周报 / 测试可以传具体 project.
@@ -82,12 +85,24 @@ def reconcile_open_mrs(
             "total_updated": int,       # 所有 MR 一共更新了多少 suggestion
             "mrs_updated": list[dict],  # 实际有更新的 MR 列表
                                      # 每项: {"project_id", "mr_iid", "scanned", "updated", "note_ids"}
+            "orphan_runs_recovered": int,  # 清理的孤儿 running 记录数
             "duration_s": float,
         }
     """
     import time
     start = time.monotonic()
     store = get_store()
+
+    # 0. 清理孤儿 running 记录 (work-horse 被杀后残留)
+    # Why: SIGTERM/SIGKILL 直接终止进程, finally 块不执行, running 永远不更新.
+    #      这里用 rq_worker_timeout + 300s buffer 作为阈值, 避免误杀正在跑的.
+    orphan_runs_recovered = 0
+    try:
+        orphan_runs_recovered = store.sweep_orphaned_runs(
+            threshold_seconds=config.rq_worker_timeout + 300,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("reconcile_open_mrs.sweep_orphaned_runs failed (non-fatal): {}", e)
 
     # 找 bot 跟踪过的 open MR. mr_activity 表存的是 bot 已经处理过的 MR.
     # 新 MR 没有记录会被 GitLab webhook 自然 cover (push 时会入队 describe+improve).
@@ -125,13 +140,14 @@ def reconcile_open_mrs(
 
     duration_s = round(time.monotonic() - start, 3)
     logger.info(
-        "reconcile_open_mrs summary scanned_mrs={} total_updated={} duration_s={}",
-        len(rows), total_updated, duration_s,
+        "reconcile_open_mrs summary scanned_mrs={} total_updated={} orphan_recovered={} duration_s={}",
+        len(rows), total_updated, orphan_runs_recovered, duration_s,
     )
     return {
         "total_mrs": len(rows),
         "total_updated": total_updated,
         "mrs_updated": mrs_updated,
+        "orphan_runs_recovered": orphan_runs_recovered,
         "duration_s": duration_s,
     }
 
