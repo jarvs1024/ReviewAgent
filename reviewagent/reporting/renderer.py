@@ -356,17 +356,17 @@ def _render_telemetry(d: dict[str, Any], *, dashboard_url: str = "") -> str:
         return f"{arrow}{abs(delta)}"
 
     rows = [
-        ("📥 本周 MR 数",        str(mr_count),          _fmt_trend(deltas.get("mr_count"))),
-        ("📂 累计 MR 数",        str(mr_total),          _fmt_trend(deltas.get("mr_total"))),
-        ("💡 本周建议数",        str(suggestion_count),  _fmt_trend(deltas.get("suggestion_count"))),
-        ("📊 累计建议数",        str(suggestion_total),  _fmt_trend(deltas.get("suggestion_total"))),
-        ("✅ 累计采纳率",        f"{adoption_rate}%",    _fmt_trend(deltas.get("adoption_rate_pct"))),
+        ("本周 MR 数",           str(mr_count),          _fmt_trend(deltas.get("mr_count"))),
+        ("累计 MR 数",           str(mr_total),          _fmt_trend(deltas.get("mr_total"))),
+        ("本周建议数",           str(suggestion_count),  _fmt_trend(deltas.get("suggestion_count"))),
+        ("累计建议数",           str(suggestion_total),  _fmt_trend(deltas.get("suggestion_total"))),
+        ("累计采纳率",           f"{adoption_rate}%",    _fmt_trend(deltas.get("adoption_rate_pct"))),
     ]
     # adoption_rate_pct 的 delta 是 pp 单位; 箭头后补 pp 让语义清楚
     if deltas.get("adoption_rate_pct") not in (None, 0):
         d = deltas["adoption_rate_pct"]
         rows[-1] = (
-            "✅ 累计采纳率",
+            "累计采纳率",
             f"{adoption_rate}%",
             f"{'↑' if d > 0 else '↓'}{abs(round(float(d), 1))} pp",
         )
