@@ -94,12 +94,18 @@ class Config:
     improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
     improve_full_files: int = 20            # full source 桶文件配额, 超出降级 partial/patch (0=不限)
     improve_keyword_paths: tuple[str, ...] = (  # 文件优先级 — 关键路径加分 (排序权重)
+        # 业务核心 (web 通用)
         "/services/", "/api/", "/core/", "/main.",
         "/models/", "/handlers/", "/routers/",
+        # 自动化测试项目特有 (页面对象 / 选择器 / 共享 fixture / 工具)
+        "/pages/", "/locators/", "/fixtures/", "/utils/",
     )
     improve_skip_test_paths: tuple[str, ...] = (  # 测试/配置文件路径跳过 (不进 LLM)
-        "tests/", "/tests/", "test_", "_test.", ".test.",
+        # pytest 共享配置 (跨文件引用, 改动影响大但 LLM 提不出具体建议)
         "conftest.py",
+        # 字节码 / 测试快照 / 测试数据 / 自动化 test 路径 (低信号)
+        "__pycache__/", "__snapshots__/", "testdata/", "tests_loc/",
+        # 注: tests/ 本身 + test_*.py 不跳 — 自动化测试项目里测试代码即业务
     )
     improve_partial_context_lines: int = 20  # partial 模式 ±N 行 (overflow 文件 context 兜底)
     improve_patch_context_lines: int = 3    # patch 模式 diff 行 ±N 行最小 context (V7: 不再纯行号)
@@ -110,11 +116,11 @@ class Config:
     improve_min_severity: str = ""           # 最低严重度过滤 (空=不过滤, 可选: critical/high/medium/low)
 
     # ---- V7 检视模式 + priority 权重 (可配, 适配业务/测试项目) ----
-    improve_review_mode: str = "auto"        # "auto"/"business"/"test": auto 按 diff 测试占比自动切
-    improve_priority_weight_diff: float = 20.0       # log1p(diff_size) 系数 (改动大小主信号)
-    improve_priority_weight_keyword: float = 25.0    # 关键路径加分
+    improve_review_mode: str = "test"        # "auto"/"business"/"test": 默认 test (适配自动化测试项目, 测试代码即业务)
+    improve_priority_weight_diff: float = 15.0       # log1p(diff_size) 系数 (自动化测试文件常小, 降权)
+    improve_priority_weight_keyword: float = 30.0    # 关键路径加分 (业务核心 + UI 自动化路径, 提权)
     improve_priority_weight_density: float = 20.0    # 高密度改动加分 (改动占比>30%)
-    improve_priority_weight_test_feature: float = 15.0  # 测试特征密度加分 (test 模式生效, business=0)
+    improve_priority_weight_test_feature: float = 20.0  # 测试特征密度加分 (test 模式, 提权: 自动化项目测试特征即信号)
     improve_test_feature_keywords: tuple[str, ...] = (  # 测试特征关键字 (命中→高风险测试文件)
         "pytest.fixture", "fixture(", "@fixture",
         "mock.patch", "MagicMock", "patch(",
