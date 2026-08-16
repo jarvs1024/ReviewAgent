@@ -31,6 +31,7 @@ def emit_run_finished(
     completion_tokens: int = 0,
     cost_credits: float = 0.0,
     duration_ms: int = 0,
+    llm_provider: str | None = None,
 ) -> None:
     try:
         get_store().finish_run(
@@ -42,6 +43,7 @@ def emit_run_finished(
             completion_tokens=completion_tokens,
             cost_credits=cost_credits,
             duration_ms=duration_ms,
+            llm_provider=llm_provider,
         )
     except Exception as e:
         logger.warning("telemetry.emit_run_finished failed: {}", e)

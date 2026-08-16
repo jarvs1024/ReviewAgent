@@ -115,7 +115,20 @@ async def mr_detail(project_id: int, mr_iid: int) -> dict[str, Any]:
     if not mr:
         raise HTTPException(404, f"MR not found: {project_id}/{mr_iid}")
     runs = s.list_runs(project_id=project_id, mr_iid=mr_iid, limit=50)
-    return {"mr": mr, "recent_runs": runs}
+    # 当前进程配置的 LLM provider (opencode/qodercli), 给 dashboard 一眼看到当前用的哪家
+    from reviewagent.config import config as _app_config
+    current_llm_provider = getattr(_app_config, "llm_provider", None)
+    # 历史 run 上最近的 provider (按 finished_at desc, 跳过 llm_provider IS NULL 的旧记录)
+    last_provider = next(
+        (r.get("llm_provider") for r in runs if r.get("llm_provider")),
+        None,
+    )
+    return {
+        "mr": mr,
+        "recent_runs": runs,
+        "current_llm_provider": current_llm_provider,
+        "last_llm_provider": last_provider,
+    }
 
 
 @router.get("/mr/{project_id}/{mr_iid}/suggestions")

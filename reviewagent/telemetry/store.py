@@ -220,6 +220,8 @@ class Store:
                 "rule_keys_cited": "ALTER TABLE review_runs ADD COLUMN rule_keys_cited TEXT",
                 "suggestion_count": "ALTER TABLE review_runs ADD COLUMN suggestion_count INTEGER DEFAULT 0",
                 "cost_credits": "ALTER TABLE review_runs ADD COLUMN cost_credits REAL DEFAULT 0",
+                # Batch: 记录 LLM provider (opencode / qodercli), 给 MR detail API 用
+                "llm_provider": "ALTER TABLE review_runs ADD COLUMN llm_provider TEXT",
             }.items():
                 if column not in run_columns:
                     conn.execute(sql)
@@ -533,6 +535,7 @@ class Store:
         completion_tokens: int = 0,
         cost_credits: float = 0.0,
         duration_ms: int = 0,
+        llm_provider: str | None = None,
     ) -> None:
         with self._conn() as conn:
             now = _fmt_dt(_utcnow())
@@ -540,13 +543,13 @@ class Store:
                 """
                 UPDATE review_runs
                 SET finished_at = ?, status = ?, error = ?, model = ?,
-                    prompt_tokens = ?, completion_tokens = ?,
+                    prompt_tokens = ?, completion_tokens = ?, llm_provider = ?,
                     total_tokens = ?, cost_credits = ?, duration_ms = ?
                 WHERE id = ?
                 """,
                 (
                     now, status, error, model,
-                    prompt_tokens, completion_tokens,
+                    prompt_tokens, completion_tokens, llm_provider,
                     prompt_tokens + completion_tokens, cost_credits, duration_ms,
                     run_id,
                 ),

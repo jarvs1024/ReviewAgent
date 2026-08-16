@@ -208,6 +208,7 @@ class BaseCommand:
                 _mark_finished(
                     run_id, status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
+                    llm_provider=provider_name,
                     duration_ms=duration_ms,
                 )
                 return {"status": "skipped", "reason": f"mr_state={mr_state}"}
@@ -224,6 +225,7 @@ class BaseCommand:
                 _mark_finished(
                     run_id, status="skipped", model=model_used,
                     prompt_tokens=0, completion_tokens=0,
+                    llm_provider=provider_name,
                     duration_ms=duration_ms,
                 )
                 skip_summary.setdefault("status", "skipped")
@@ -313,6 +315,7 @@ class BaseCommand:
                 run_id, status="success", model=model_used,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
+                llm_provider=provider_name,
                 duration_ms=duration_ms,
             )
             result_summary.setdefault("status", "success")
@@ -334,6 +337,7 @@ class BaseCommand:
                 run_id, status="failed", error=f"{provider_name}: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
+                llm_provider=provider_name,
                 duration_ms=duration_ms,
             )
             raise BaseCommandError(f"{provider_name} error: {e}") from e
@@ -343,6 +347,7 @@ class BaseCommand:
                 run_id, status="failed", error=f"infra: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
+                llm_provider=provider_name,
                 duration_ms=duration_ms,
             )
             raise BaseCommandError(f"infra error: {e}") from e
@@ -352,6 +357,7 @@ class BaseCommand:
                 run_id, status="failed", error=f"unexpected: {e}",
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
+                llm_provider=provider_name,
                 duration_ms=duration_ms,
             )
             raise
@@ -365,6 +371,7 @@ class BaseCommand:
                         run_id, status="failed",
                         error="process terminated unexpectedly",
                         duration_ms=duration_ms,
+                        llm_provider=provider_name,
                     )
                 except Exception:
                     pass

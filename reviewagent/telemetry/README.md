@@ -57,6 +57,7 @@
 | `status` | str | `running` / `success` / `failed` / `timeout` / `skipped` |
 | `error` | str \| None | 失败时错误摘要 |
 | `model` | str \| None | LLM 模型名 |
+| `llm_provider` | str \| None | LLM provider 标识 (`opencode` / `qodercli`), `finish_run` 时由 worker 写入, 给 MR detail API 返回 `current_llm_provider` 用 |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | int | LLM token 统计; `total_tokens` 在 finish_run 中由 `prompt + completion` 计算 |
 | `cost_credits` | float | 真实成本信号 (qodercli `total_credits`); token 不可得时 (qodercli CLI 路径不返回 token) 的可信计量, 默认 `0.0` |
 | `duration_ms` | int | 实际执行时长 |
@@ -69,7 +70,7 @@
 |---|---|
 | `emit_mr_activity(mr: MRRecord)` | 写入或更新 `mr_activity` 行 (保留已有 `author_sticky`) |
 | `emit_run_started(run: ReviewRun) -> int` | 插入 `review_runs` 行, 返回 `run_id` (失败返回 `-1`) |
-| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli 路径专用) |
+| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0, llm_provider=None)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli 路径专用); `llm_provider` 透传给 store (记录当前 run 用的 opencode/qodercli) |
 | `emit_description_generated(project_id, mr_iid)` | 标记 `description_generated=1` + 同步 touch `last_activity_at` |
 
 调用点 (`reviewagent/commands/_common.py`):
@@ -102,7 +103,7 @@
 | 方法 | 用途 |
 |---|---|
 | `insert_run(run: ReviewRun) -> int` | INSERT, 返回 `run_id` |
-| `finish_run(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0)` | UPDATE 收尾; 自动写 `finished_at` / `total_tokens = prompt + completion` / `cost_credits`; 同步 touch `mr_activity.last_activity_at` (MAX 语义) |
+| `finish_run(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0, llm_provider=None)` | UPDATE 收尾; 自动写 `finished_at` / `total_tokens = prompt + completion` / `cost_credits` / `llm_provider`; 同步 touch `mr_activity.last_activity_at` (MAX 语义) |
 | `list_runs(*, project_id, mr_iid, since, until, command, status, limit=100, offset=0) -> list[dict]` | 多条件过滤 (started_at DESC), 给周报 / dashboard |
 
 ### Suggestion (`suggestions`)
