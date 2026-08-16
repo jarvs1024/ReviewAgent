@@ -58,6 +58,7 @@
 | `error` | str \| None | 失败时错误摘要 |
 | `model` | str \| None | LLM 模型名 |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | int | LLM token 统计; `total_tokens` 在 finish_run 中由 `prompt + completion` 计算 |
+| `cost_credits` | float | 真实成本信号 (qodercli `total_credits`); token 不可得时 (qodercli CLI 路径不返回 token) 的可信计量, 默认 `0.0` |
 | `duration_ms` | int | 实际执行时长 |
 
 ## Emit API (`events.py`)
@@ -68,7 +69,7 @@
 |---|---|
 | `emit_mr_activity(mr: MRRecord)` | 写入或更新 `mr_activity` 行 (保留已有 `author_sticky`) |
 | `emit_run_started(run: ReviewRun) -> int` | 插入 `review_runs` 行, 返回 `run_id` (失败返回 `-1`) |
-| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, duration_ms=0)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` |
+| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli 路径专用) |
 | `emit_description_generated(project_id, mr_iid)` | 标记 `description_generated=1` + 同步 touch `last_activity_at` |
 
 调用点 (`reviewagent/commands/_common.py`):
@@ -101,7 +102,7 @@
 | 方法 | 用途 |
 |---|---|
 | `insert_run(run: ReviewRun) -> int` | INSERT, 返回 `run_id` |
-| `finish_run(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, duration_ms=0)` | UPDATE 收尾; 自动写 `finished_at` / `total_tokens = prompt + completion`; 同步 touch `mr_activity.last_activity_at` |
+| `finish_run(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0)` | UPDATE 收尾; 自动写 `finished_at` / `total_tokens = prompt + completion` / `cost_credits`; 同步 touch `mr_activity.last_activity_at` (MAX 语义) |
 | `list_runs(*, project_id, mr_iid, since, until, command, status, limit=100, offset=0) -> list[dict]` | 多条件过滤 (started_at DESC), 给周报 / dashboard |
 
 ### Suggestion (`suggestions`)
@@ -121,6 +122,8 @@
 | `update_suggestion_note_id(suggestion_id, new_note_id)` | webhook /adopt 兜底命中后回写真实 GitLab note_id |
 | `list_suggestions(*, project_id, mr_iid, state, since, until, limit=100, offset=0) -> list[dict]` | 多条件分页 (created_at DESC, id DESC) |
 | `get_reviewed_file_shas(project_id, mr_iid) -> dict[str, str]` | V8 增量检视: 返回 `{file_path: head_sha}` ——每个文件最近一次被检视时的 head_sha (不区分 state, dismissed/applied 的文件复用)。无 suggestion 的文件不在结果中 → 调用方视为首次检视 (commit 7708877) |
+| `upsert_file_review_state(*, project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count=0) -> None` | V9 UPSERT 单文件检视状态 (主键 `(project_id, mr_iid, file_path)` 冲突则覆盖)。即使本轮 0 建议也写, 避免下一轮对"上次 0 产出"文件空跑 LLM |
+| `get_file_review_states(project_id, mr_iid) -> dict[str, dict]` | V9 拉取该 MR 所有文件检视状态 `{file_path: {blob_sha, head_sha, suggestion_count}}`, 给 improve 顶部做"内容未变 → 复用上次"决策 |
 | `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比) |
 | `suggestion_metrics(*, project_id, since, until) -> dict` | 周报 / 仪表盘维度: `state_counts` / `severity_counts` / `action_counts` / `adoption_rate` (0~1 小数) / `adoption_pct` |
 | `supersede_stale_in_cohort(*, project_id, mr_iid, cohort_key, keep_note_id) -> list[str]` | 同 cohort 内除 keep_note_id 外所有 open/resolved/dismissed 标 superseded（cohort 归并兜底；process_adopt / mark_suggestion_applied_by_diff 末尾调一次） |
@@ -145,7 +148,7 @@
 | 方法 | 用途 |
 |---|---|
 | `save_agent_output_fail(text, agent)` | 写 `agent_failures` 表前 500 字符 (调试用, 无 API 端点) |
-| `summary(*, since, until) -> dict` | 周报 / 仪表盘聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens}}` / `by_status` / `by_day` / `top_mrs` (前 10) |
+| `summary(*, since, until) -> dict` | 周报 / 仪表盘聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens,cost_credits}}` / `by_status` / `by_day` / `top_mrs` (前 10) — `cost_credits` 由 `SUM(cost_credits) as credits` 给出, 仅 qodercli 路径非零 |
 
 ## 状态 / 来源标签映射 (`router.py`)
 
@@ -200,13 +203,14 @@
 | `error` | text | 失败摘要 |
 | `model` | text | LLM 模型名 |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | int | token 统计; total_tokens 在 `finish_run` 中由 `prompt + completion` 计算 |
+| `cost_credits` | real | qodercli 路径真实成本 (`total_credits`); default 0, 仅 qodercli CLI 调用写非零 |
 | `duration_ms` | int | 实际执行时长 |
 | `rule_keys_cited` | text | comma-joined rule_keys (improve 后回填) |
 | `suggestion_count` | int | improve 命中 suggestion 数 |
 
 索引: `idx_runs_project_mr` on `(project_id, mr_iid)`, `idx_runs_started` on `started_at`
 
-注: `triggered_by` (防御性补老库) / `rule_keys_cited` / `suggestion_count` 是通过 ALTER TABLE 在线迁移加的列 (旧库自动加)。
+注: `triggered_by` (防御性补老库) / `rule_keys_cited` / `suggestion_count` / `cost_credits` 是通过 ALTER TABLE 在线迁移加的列 (旧库自动加)。
 
 ### `suggestions` — improve 发布的 inline suggestion
 
@@ -225,7 +229,7 @@
 | `head_sha` | text | 发布时的 MR head_sha (supersede 判定用) |
 | `state` | text | `open` / `applied` / `dismissed` / `resolved` / `superseded` (5 个值) |
 | `applied_at` / `dismissed_at` / `resolved_at` | timestamp | 状态变更时间 |
-| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `publish_overview_reconcile` (4 → 7, MR289 + c9760b2 扩展) |
+| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `periodic_reconcile` / `publish_overview_reconcile` / `improve_pre_publish` (4 → 9, MR289 + c9760b2; improve.py 顶部 pre-publish 路径写 `improve_pre_publish`) |
 | `dismissed_by` / `resolved_by` | text | 操作者 |
 | `dismissed_reason` | text | 用户提供的 dismiss 原因 (dashboard 聚合用) |
 | `resolution_source` | text | resolved 时的来源 (`gitlab_resolve` 等) |
@@ -256,6 +260,23 @@
 - `adoption_evidence` — Batch2 采纳证据等级
 - `applied_commit_sha` — Batch4 Apply suggestion 关联 commit
 
+### `reviewed_file_state` — V9 增量复用 (每文件上次检视时的内容指纹)
+
+主键: `(project_id, mr_iid, file_path)`。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `project_id` / `mr_iid` | int | 归属 MR |
+| `file_path` | text | PK 联合键 |
+| `blob_sha` | text \| NULL | 文件内容指纹 (sha1 of raw bytes at head); NULL=未知, 表示未拿到内容 |
+| `head_sha` | text | 记录时的 MR head_sha |
+| `suggestion_count` | int | 该文件本轮产出的建议数; 0=无建议也记录, 避免下一轮对"上次 0 产出"文件重跑 LLM |
+| `reviewed_at` | timestamp | 上次检视时间 |
+
+用途: improve 顶部比对 `file_path → blob_sha`, 当前 blob 一致 → 视为内容未变 → 跳过 LLM 直接复用上次产出 (跨文件影响检测后)。
+
+索引: 主键自带; 无独立索引 (按 MR 拉取走 `(project_id, mr_iid)` 扫描 + 主键定位 file_path)。
+
 ### `suggestion_actions` — /adopt /dismiss 事件流
 
 | 字段 | 类型 | 说明 |
@@ -268,8 +289,8 @@
 | `action` | text | `adopted` / `dismissed` |
 | `actor_username` | text | 操作人 |
 | `reason` | text | 原因 (dismiss 时用户填, adopt 走 `validation_status`) |
-| `validation_status` | text | `/adopt` 路径：`ok` / `target-unchanged` / `content-unavailable` / `gitlab-ui-apply` / `ui-apply`；其他：`gitlab-resolve` (GitLab 直接解决主题) / `late-detect-apply` (late_detect 兜底翻 applied) / `same-head` (head_sha 一致但行号偏移) / `already-{state}` (重复 /adopt /dismiss 已记录) / `publish_overview_reconcile` (顶部 pre-reconcile) / `periodic_reconcile` (周期 reconciler) |
-| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `periodic_reconcile` / `publish_overview_reconcile` (按 `validation_status` 反推 + c9760b2 扩展) |
+| `validation_status` | text | `/adopt` 路径：`ok` / `target-unchanged` / `content-unavailable` / `gitlab-ui-apply` / `ui-apply`；其他：`gitlab-resolve` (GitLab 直接解决主题) / `late-detect-apply` (late_detect 兜底翻 applied) / `same-head` (head_sha 一致但行号偏移) / `already-{state}` (重复 /adopt /dismiss 已记录) / `publish_overview_reconcile` (顶部 pre-reconcile) / `periodic_reconcile` (周期 reconciler) / `improve_pre_publish_reconcile` (improve 顶部 pre-publish reconcile) |
+| `adoption_source` | text | `ui_apply` / `manual_change` / `adopt_command` / `unknown` / `gitlab_resolve` / `late_detect` / `periodic_reconcile` / `publish_overview_reconcile` / `improve_pre_publish` (按 `validation_status` 反推 + c9760b2 扩展 + improve.py pre-publish 路径写 `improve_pre_publish`) |
 | `head_sha_posted` | text | `/adopt` 校验: suggestion 发布时的 head_sha |
 | `head_sha_current` | text | `/adopt` 校验: 当前 head_sha |
 | `created_at` | timestamp | 事件时间 |
@@ -516,6 +537,7 @@ result = reconcile_open_mrs(project_id=None)  # None = 所有 bot 跟踪的 proj
 #   "total_mrs": int,
 #   "total_updated": int,
 #   "mrs_updated": [{"project_id", "mr_iid", "scanned", "updated", "note_ids"}, ...],
+#   "orphan_runs_recovered": int,   # 清理 SIGKILL/SIGTERM 残留 running 记录数 (sweep_orphaned_runs)
 #   "duration_s": float
 # }
 ```

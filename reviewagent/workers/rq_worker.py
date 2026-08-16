@@ -1,12 +1,87 @@
 """RQ worker classes used by ReviewAgent launchers."""
 from __future__ import annotations
 
+import os
 import struct
+import sys
+import time
 from typing import Any
 
 from rq.worker import SpawnWorker
+from rq.worker.worker_classes import get_connection_kwargs
 
 from reviewagent.logging_setup import logger
+
+
+
+def _fork_work_horse_setsid(worker: Any, job: Any, queue: Any) -> Any:
+    """Fork work-horse with os.setsid() in child to detach from controlling tty.
+
+    macOS TTY inheritance fix:
+    RQ SpawnWorker.fork_work_horse 在 child 脚本里只调 os.setpgrp(),
+    没 os.setsid(). work-horse inherit RQ worker 的 controlling tty,
+    attach 到 SCREEN/terminal 的 foreground pgrp.
+    macOS Tahoe 内核在某些条件下会主动 SIGSTOP 整个 attach 到 tty 的
+    进程组, 4+ 分钟不响应. work-horse 的 finally block 跑不到,
+    review_runs 永久 stuck 在 running.
+
+    修法: 在 child 脚本 setpgrp 之后追加 os.setsid(), 创建新 session,
+    detach from controlling tty. macOS TTY 层的 SIGTSTP/SIGSTOP 不再
+    传到 work-horse.
+
+    实现: 复制 rq/worker/worker_classes.py:165-209 SpawnWorker.fork_work_horse
+    的逻辑, 在 child 命令字符串里 setpgrp 后加 setsid. 不能直接 patch rq 源
+    (会被 pip install 覆盖). 重写一次性函数, 保留 himport_registry cleanup.
+    """
+    os.environ["RQ_WORKER_ID"] = worker.name
+    os.environ["RQ_EXECUTION_ID"] = worker.execution.id  # type: ignore
+
+    redis_kwargs = get_connection_kwargs(worker.connection)
+    if redis_kwargs.get("retry"):
+        del redis_kwargs["retry"]
+    if redis_kwargs.get("driver_info"):
+        del redis_kwargs["driver_info"]
+
+    child_pid = os.spawnv(
+        os.P_NOWAIT,
+        sys.executable,
+        [
+            sys.executable,
+            "-c",
+            f"""
+import os
+import sys
+from redis import Redis
+from rq import Worker, Queue
+from rq.job import Job
+from rq.executions import Execution
+
+# Recreate worker instance
+redis = Redis(**{redis_kwargs!r})
+worker = Worker.find_by_key({worker.key!r}, connection=redis, serializer={worker._serializer_arg!r})
+if not worker:
+    sys.exit(1)
+
+# Reconstruct job, queue and execution objects
+job = Job.fetch({job.id!r}, connection=worker.connection, serializer=worker.serializer)
+queue = Queue({queue.name!r}, connection=worker.connection, serializer=worker.serializer)
+execution_id = os.environ["RQ_EXECUTION_ID"]
+worker.execution = Execution.fetch(execution_id, job.id, connection=worker.connection)
+
+# Set up work horse
+# macOS Tahoe fix: os.setsid() 同时创建新 session + 新 pgrp, detach from
+# controlling tty. 替代 RQ 默认的 os.setpgrp() (后者只换 pgrp, 仍 inherit
+# tty, 导致 macOS kernel 主动 SIGSTOP 整个 attach 到 tty 的进程组).
+os.setsid()
+worker._is_horse = True
+worker.main_work_horse(job, queue)
+""",
+        ],
+    )
+
+    worker._horse_pid = child_pid
+    worker.procline(f"Spawned {child_pid} at {time.time()}")
+    return child_pid
 
 
 class ReviewAgentSpawnWorker(SpawnWorker):
@@ -23,7 +98,7 @@ class ReviewAgentSpawnWorker(SpawnWorker):
         missing = object()
         himport_registry = connection_kwargs.pop("himport_registry", missing)
         try:
-            return super().fork_work_horse(job, queue)
+            return _fork_work_horse_setsid(self, job, queue)
         finally:
             if himport_registry is not missing:
                 connection_kwargs["himport_registry"] = himport_registry
