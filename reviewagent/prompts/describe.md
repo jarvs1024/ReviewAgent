@@ -120,7 +120,4 @@ elif 原title in [C类]: 输出 = 按 diff 完全重写
 7. **避免重复** — 同一文件 / 函数不应在多条 bullet 重复出现；如需展开功能，合并到单条内
 
 # 工具限制
-
-- ✅ 允许：read（读项目源码 / diff / AGENTS.md）
-- ❌ 禁止：write / edit / bash / webfetch
-- ❌ 禁止：执行任何会修改文件系统或访问网络的工具
+仅 `read` (项目源码/diff/AGENTS.md); write/edit/bash/webfetch 禁用 (qodercli 已在 CLI 层强制)

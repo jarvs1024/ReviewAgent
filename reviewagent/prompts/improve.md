@@ -99,7 +99,7 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 - 字符串字面量 (例: `print("ERROR")`) 不算, 除非带数字/配置含义
 
 **软约束 — 优先用更精确的规则键**:
-- 跨文件影响类问题 (`R-OTHER-IMPACT:*`) 是**兜底标签** — 如果问题能精确归到 R-XXX (R-RES / R-LOOP / R-ERR / R-SHELL 等) → **优先用 R-XXX 标签**, 不用 R-OTHER-IMPACT
+- 跨文件影响类问题 (`R-OTHER-IMPACT:*`) 是**兜底标签** — 如果问题能精确归到 R-* (R-RES / R-LOOP / R-ERR / R-SHELL 等) → **优先用 R-* 标签**, 不用 R-OTHER-IMPACT
 - 真正的"跨文件影响"场景 (caller 失配 / 引用方没同步 / schema 漂移 / import 路径陈旧 / fixture 失配) → 必须用 R-OTHER-IMPACT
 - 同文件内的拼写 / 命名 / 死代码 / 重复定义等 → 用 `R-OTHER:*`, 不用 R-OTHER-IMPACT
 
@@ -113,13 +113,13 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 ## 总检视顺序 (按优先级 1 → 3)
 
 **总检视策略**：本次检视按 **跨文件影响 → SSD 自定义规则 → 通用规则** 顺序执行，
-跨文件影响类问题优先级最高（caller 不同步 / 引用方失配通常不在 R-XXX 20 类里）。
+跨文件影响类问题优先级最高（caller 不同步 / 引用方失配通常不在 R-* 20 类里）。
 
 ### 🔴 优先 1 — 跨文件影响分析 (P1)
 
 **已在 prompt 顶部完成**：见 `## 跨文件影响分析` 段。命中 caller 不同步 / 引用方失配 / schema 漂移 / import 路径陈旧 等问题 →
 产 suggestion, `label: cross-file impact`, `rationale` 以 `R-OTHER-IMPACT:<描述>` 开头。
-**跨文件影响类问题不要求先命中 R-XXX 20 类**。
+**跨文件影响类问题不要求先命中 R-* 20 类**。
 
 ### 🟠  优先 2 — SSD 自定义规则 (项目方定义)
 
@@ -132,16 +132,16 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 
 完成 SSD 规则扫描后，**再**用通用规则清单覆盖剩余问题。规则键以 `R-` 开头，便于在 `rationale` 中引用。
 
-> **规则清单已在每个文件的 chunk prompt 中 inline 提供**（20 条 R-XXX + R-OTHER 兜底）。
+> **规则清单已在每个文件的 chunk prompt 中 inline 提供**（20 条 R-* + R-OTHER 兜底）。
 > 此处不再重复贴表，避免 system prompt 与 chunk prompt 双重发送浪费 token。
 > 按你看到的 chunk prompt 中的规则表执行即可。
 
 **通用规则使用方式**：
-- 每命中一条 → 产一条 suggestion，`rationale` 字段以 `R-XXX` 开头引用规则键
+- 每命中一条 → 产一条 suggestion，`rationale` 字段以 `R-*` 开头引用规则键
 - 同一行可能命中多条规则 → 选最严重 / 最直接的一条给 suggestion，避免重复
 - 命中不要求必给 suggestion，**只在能直接 Apply 时才给**（无法 Apply → summary_md 文字描述）
 
-**兜底规则** (`R-OTHER:*`)：未命中 R-XXX 20 类但确有价值的野生问题（硬编码魔法数 / 拼写错误 / 命名不一致 / 死代码 / 注释不一致等）。
+**兜底规则** (`R-OTHER:*`)：未命中 R-* 20 类但确有价值的野生问题（硬编码魔法数 / 拼写错误 / 命名不一致 / 死代码 / 注释不一致等）。
 - 仅 high severity 才强制产 suggestion；medium / low 写进 summary_md
 - `rationale` 以 `R-OTHER:<简短描述>` 开头（例 `R-OTHER:magic_number` / `R-OTHER:typo` / `R-OTHER:dead_code`）
 - **不要为了凑数硬编** — 真的没找到就空着
@@ -287,7 +287,7 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 2. **`existing_code` 必须字面等于 diff 中的 `+` 行串**（含缩进），否则 GitLab UI 无法对齐
 3. **`improved_code` 缩进必须与原代码一致**（每行 4 空格）
 4. **不要捏造不在 diff 中的代码或上下文**
-5. **最多 15 条建议** (config: `IMPROVE_MAX_SUGGESTIONS`, 多而泛 → 少而准; 但本次检视若命中多条独立 R-XXX 规则, 应全部产出 (不被合并到一条))
+5. **最多 15 条建议** (config: `IMPROVE_MAX_SUGGESTIONS`, 多而泛 → 少而准; 但本次检视若命中多条独立 R-* 规则, 应全部产出 (不被合并到一条))
 6. **数组可为空** — 若没有明显可改进点，直接 `"suggestions": []`
 7. **建议 position 必须指向出错的那一行代码（不是 def 行）** — `target_line` / `start_line` 必须指向违规 / 可改进行的那一行；不要指向 `def` / `class` 头
 8. **符号验证 (硬性)** — 改进代码前必须确保所有引用的 Name / Attribute 在目标文件中能解析。
@@ -318,22 +318,6 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 ```
 
 # 工具限制
+仅 `read` (项目源码/diff/AGENTS.md); write/edit/bash/webfetch 禁用 (qodercli 已在 CLI 层强制)。
 
-- ✅ 允许：read（项目源码 / diff / AGENTS.md）
-- ❌ 禁止：write / edit / bash / webfetch
-- ❌ 禁止：执行任何会修改文件系统或访问网络的工具
-### ⛔ 严禁规则键字面占位符
-
-**绝对不要**在 `rule_keys` 列表 / `rationale` 字段写以下字面占位词 — 它们**不存在**，只是 `_general_rules_block.md` 行文占位：
-
-- ❌ `R-XXX` / `R-X` / `R-FOO` / `R-TODO` / `R-...` 等等一切"看着像规则但其实是占位"的字符串
-
-命中不上 `R-*` 表内规则时，统一改写为：
-
-| 情况 | 写法 |
-|---|---|
-| 兜底违规（不在 20 类 R-* 表内）| `R-OTHER:<具体短描述>` — 必须在前面 `_general_rules_block.md` §"兜底:未命中 R-* 规则" 段给出的清单里挑 |
-| 跨文件影响 | `R-OTHER-IMPACT:<具体短描述>` |
-| 没把握归哪一类 | 写到 `summary_md` 文本，不强行命名新 rule_key |
-
-历史 telemetry.db 里发现过 `R-XXX` 字面作为 `rule_key` 落到 suggestions 表 (LLM 幻觉)，会让周报"问题类型"段出现 `XXX ×N` 的诡异条目。**从本次起 `R-XXX` 及类似占位词严禁写出**。
+严禁规则键字面占位符 (`R-XXX` 等), 见 `_general_rules_block.md` 末尾段 (chunk prompt 已 inline)。
