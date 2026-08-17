@@ -80,8 +80,8 @@ def _check_daemon_health() -> None:
     if now < _DAEMON_COOLDOWN_UNTIL:
         # Still in cooldown — daemon was recently unreachable.
         raise QoderCLIDaemonError(
-            "opencode daemon unreachable (cached); "
-            "daemon was down within last {:.0f}s — skipping probe".format(
+            "qodercli daemon unreachable (cached); "
+            "opencode acp was down within last {:.0f}s — skipping probe".format(
                 _DAEMON_COOLDOWN_SECS
             )
         )
@@ -101,8 +101,9 @@ def _check_daemon_health() -> None:
     except (socket.timeout, socket.error, OSError) as e:
         _DAEMON_COOLDOWN_UNTIL = time.monotonic() + _DAEMON_COOLDOWN_SECS
         raise QoderCLIDaemonError(
-            "opencode daemon unreachable at {}:{} ({}). "
-            "Is `opencode acp` running? Cooldown {:.0f}s.".format(
+            "qodercli daemon unreachable at {}:{} ({}). "
+            "qodercli connects to `opencode acp` daemon — is it running? "
+            "Cooldown {:.0f}s.".format(
                 host, port, e, _DAEMON_COOLDOWN_SECS
             )
         ) from e
@@ -413,7 +414,7 @@ def run_subprocess(
         node / script / model: per-call overrides; empty falls back to `config`.
 
     Raises:
-        QoderCLIDaemonError: opencode daemon unreachable (health-check failed).
+        QoderCLIDaemonError: qodercli daemon (opencode acp) unreachable.
         QoderCLITimeoutError: subprocess.TimeoutExpired or `timeout` exceeded.
         QoderCLIError: non-zero exit code, missing binary, or unexpected failure.
         QoderCLIOutputError: stdout empty, malformed JSON, or agent JSON missing.
