@@ -135,6 +135,12 @@ class Config:
     # ---- 检视文件过滤 ----
     review_exclude_extensions: tuple[str, ...] = (".md", ".doc", ".docx", ".txt", ".rst", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")
 
+    # ---- 文件筛选 / 抽样护栏 (2026-08-17) ----
+    improve_max_files_to_review: int = 60  # D: 送 LLM 的文件数硬上限 (必保新增+关键路径, tail 截断)
+    improve_new_file_full: bool = True  # A: 新增文件优先 (加分+必保+建议截断豁免)
+    improve_test_sample_paths: tuple[str, ...] = ()  # C: 抽样目标路径模式 (空=不抽样)
+    improve_test_sample_max: int = 0  # C: 抽样上限 (0=不抽样, 正整数=确定性抽样 N 个)
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:
@@ -217,6 +223,15 @@ class Config:
             improve_priority_weight_test_feature=float(_env("IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE", "15")),
             improve_test_feature_keywords=_env_tuple("IMPROVE_TEST_FEATURE_KEYWORDS",
                 "pytest.fixture,fixture(,@fixture,mock.patch,MagicMock,patch(,parametrize,@pytest.mark,setup_module,teardown_module,setup_class,teardown_class,setUp,tearDown,assert ,yield fixture,pytest.raises,contextmanager,tmp_path,caplog,monkeypatch"),
+            # --- 文件筛选 / 抽样护栏 (2026-08-17) ---
+            # D: 文件数硬上限 — files_to_review(送 LLM 的集合)超过此值时, 必保(新增+关键路径)外的低优先级 tail 截断
+            improve_max_files_to_review=int(_env("IMPROVE_MAX_FILES_TO_REVIEW", "60")),
+            # A: 新增文件优先 — 优先级加分(自然吃满 IMPROVE_FULL_FILES 配额) + 必保(豁免 D 截断) + 建议截断豁免
+            improve_new_file_full=_env("IMPROVE_NEW_FILE_FULL", "1").strip().lower() in ("1", "true", "yes", "y"),
+            # C: 自动 case / 测试文件抽样 — 命中路径模式的文件超过 max 时确定性抽样 N 个进 LLM, 其余跳过
+            # max=0 表示不抽样(保持现状: 全检); 设为正整数启用
+            improve_test_sample_paths=_env_tuple("IMPROVE_TEST_SAMPLE_PATHS", ""),
+            improve_test_sample_max=int(_env("IMPROVE_TEST_SAMPLE_MAX", "0")),
             review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",
                 ".md,.doc,.docx,.txt,.rst,.csv,.png,.jpg,.jpeg,.gif,.svg,.ico"),
         )

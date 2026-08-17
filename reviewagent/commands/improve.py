@@ -192,6 +192,7 @@ class ImproveCommand(BaseCommand):
         overflow_set: set[str] = set(overflow_files or [])
         line_map = self._diff_line_map()
         all_files = sorted(line_map.keys())
+        new_files = self._new_files_from_diff(ws.diff_file) if getattr(ws, "diff_file", None) else set()
         self._review_mode = "business"  # 默认值, 后续 auto 判断可能覆盖
 
         # 文件扩展名过滤: 跳过 .md/.doc/.png 等非代码文件
@@ -245,6 +246,18 @@ class ImproveCommand(BaseCommand):
                 )
             all_files = filtered
 
+        # C: 自动 case / 测试文件抽样检视 (IMPROVE_TEST_SAMPLE_MAX>0 启用)
+        _sample_paths = config.improve_test_sample_paths
+        _sample_max = config.improve_test_sample_max
+        if _sample_paths and _sample_max > 0:
+            all_files, _unsampled = self._sample_case_files(all_files, _sample_paths, _sample_max)
+            if _unsampled:
+                test_skipped.extend(_unsampled)
+                logger.info(
+                    "improve.test_file_sampling project={} mr={} total_case={} sampled={} skipped={}",
+                    self.project_id, self.mr_iid, len(_unsampled) + _sample_max, _sample_max, len(_unsampled),
+                )
+
         if not all_files:
             return {
                 "summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。" if not test_skipped
@@ -280,6 +293,9 @@ class ImproveCommand(BaseCommand):
             # 测试特征密度: test 模式生效, business 模式权重=0
             if config.improve_priority_weight_test_feature > 0:
                 score += test_feature_cache.get(fp, 0.0) * config.improve_priority_weight_test_feature
+            # A: 新增文件优先级加分 (自然吃满 IMPROVE_FULL_FILES 配额 → full 源码)
+            if config.improve_new_file_full and fp in new_files:
+                score += config.improve_priority_weight_keyword
             return score
 
         sorted_files = sorted(all_files, key=_priority, reverse=True)
@@ -289,6 +305,7 @@ class ImproveCommand(BaseCommand):
 
         files = list(sorted_files)  # 所有文件都进 LLM (策略降级但不丢)
         skipped_files = list(test_skipped)  # 测试/配置文件不进 LLM
+        cap_truncated: list[str] = []  # D: 文件数硬上限截断的低优先级文件 (与 test_skipped 分开记)
 
         # 记录 strategy 分布 (metrics + log)
         from reviewagent.metrics import inc as _metric_inc
@@ -386,6 +403,19 @@ class ImproveCommand(BaseCommand):
         else:
             files_to_review = list(files)  # 拿不到 head_sha, 全检
 
+        # D: 文件数硬上限 (IMPROVE_MAX_FILES_TO_REVIEW) — 只截断送 LLM 的集合, 复用文件不计数
+        _max_files = config.improve_max_files_to_review
+        if _max_files > 0 and len(files_to_review) > _max_files:
+            files_to_review, _truncated = self._apply_file_count_cap(
+                files_to_review, new_files, config.improve_keyword_paths, _max_files,
+            )
+            if _truncated:
+                cap_truncated.extend(_truncated)
+                logger.info(
+                    "improve.file_count_cap project={} mr={} max={} kept={} truncated={}",
+                    self.project_id, self.mr_iid, _max_files, len(files_to_review), len(_truncated),
+                )
+
         # 全局一次 rg 找所有 diff 文件的跨文件 caller 引用 (替代 per-file 重复 rg)
         # V8: 只对需重检的文件做 rg (reuse 文件不调 LLM, 不需要)
         wt = str(ws.worktree)
@@ -465,6 +495,8 @@ class ImproveCommand(BaseCommand):
                 [{"summary_md": "", "suggestions": reuse_suggestions}],
                 skipped_files=skipped_files,
                 file_priorities=_file_priorities,
+                new_files=new_files,
+                cap_truncated=cap_truncated,
             )
         files_llm = files_to_review if files_to_review else list(files)  # 兜底: 拿不到sha或首次
         workers = min(len(files_llm), config.improve_parallel_workers)
@@ -534,6 +566,8 @@ class ImproveCommand(BaseCommand):
             chunk_results,
             skipped_files=skipped_files,
             file_priorities=_file_priorities,
+            new_files=new_files,
+            cap_truncated=cap_truncated,
         )
 
     def _call_chunk(self, prompt: str, ws, file_path: str) -> dict[str, Any]:
@@ -893,7 +927,7 @@ class ImproveCommand(BaseCommand):
         )
 
     @staticmethod
-    def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None, file_priorities: dict[str, float] | None = None) -> dict[str, Any]:
+    def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None, file_priorities: dict[str, float] | None = None, new_files: set[str] | None = None, cap_truncated: list[str] | None = None) -> dict[str, Any]:
         """合并多个 chunk 的结果.
 
         V9 选优: file_priorities 用于 per-file 预算加权 (高优先级文件更多槽位).
@@ -989,6 +1023,9 @@ class ImproveCommand(BaseCommand):
         def _budget(fp: str) -> int:
             if max_per_file <= 0:
                 return 10 ** 9  # 不限
+            # A: 新增文件给满额, 不被低优先级压缩 + 豁免单文件截断
+            if new_files and fp in new_files:
+                return max_per_file
             if not file_priorities or _max_prio <= 0:
                 return max_per_file
             norm = (file_priorities.get(fp, 0.0) or 0.0) / _max_prio
@@ -1025,9 +1062,11 @@ class ImproveCommand(BaseCommand):
             for s in merged_suggestions:
                 fp = s.get("file", "") or "_unknown"
                 by_file2.setdefault(fp, []).append(s)
-            # 文件按其最佳建议的复合键降序 (高价值文件先占覆盖槽)
+            # 文件按其最佳建议的复合键降序 (高价值文件先占覆盖槽); 新增文件优先 (A: 豁免截断)
             file_order = sorted(by_file2.keys(),
-                                key=lambda fp: _key(by_file2[fp][0]), reverse=True)
+                                key=lambda fp: (1 if (new_files and fp in new_files) else 0,
+                                               _key(by_file2[fp][0])),
+                                reverse=True)
             phase1: list[dict[str, Any]] = []
             used: dict[str, int] = {}
             for fp in file_order:
@@ -1095,6 +1134,16 @@ class ImproveCommand(BaseCommand):
                     f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视: "
                     f"{', '.join(display)}{suffix}"
                 )
+
+        # D: 文件数硬上限截断的低优先级文件 (与 test_skipped 分开提示)
+        if cap_truncated:
+            _display = cap_truncated[:10]
+            _suffix = f" 等 {len(cap_truncated)} 个" if len(cap_truncated) > 10 else ""
+            merged_summary += (
+                f"\n\n> ✂️ 另有 {len(cap_truncated)} 个低优先级文件因超出文件数上限"
+                f"（IMPROVE_MAX_FILES_TO_REVIEW={config.improve_max_files_to_review}）未检视: "
+                f"{', '.join(_display)}{_suffix}"
+            )
 
         return {
             "summary_md": merged_summary,
@@ -1171,6 +1220,77 @@ class ImproveCommand(BaseCommand):
         except OSError:
             return {}
         return parse_diff_line_map(diff_text)
+
+    # ---------- 文件筛选 / 抽样护栏 (2026-08-17) ----------
+
+    @staticmethod
+    def _new_files_from_diff(diff_file) -> set[str]:
+        """从 unified diff 解析新增文件集合 (new file mode / --- /dev/null)."""
+        try:
+            text = diff_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return set()
+        new_files: set[str] = set()
+        cur: str | None = None
+        for line in text.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.split()
+                cur = parts[-1].removeprefix("b/") if len(parts) >= 4 else None
+            elif line.startswith("new file mode") and cur:
+                new_files.add(cur)
+            elif line.startswith("--- "):
+                p = line.removeprefix("--- ").split("\t", 1)[0].strip()
+                if p == "/dev/null" and cur:
+                    new_files.add(cur)
+        return new_files
+
+    @staticmethod
+    def _sample_case_files(
+        all_files: list[str], patterns: tuple[str, ...], max_n: int,
+    ) -> tuple[list[str], list[str]]:
+        """确定性抽样: 命中 patterns 的文件超过 max_n 时, 按路径 md5 排序取前 max_n.
+
+        Returns: (kept_all_files, unsampled_list)
+            - kept_all_files: 抽样后剩余的 all_files (顺序不变, 仅移除未抽中者)
+            - unsampled_list: 被抽样剔除的文件 (已排序)
+        """
+        import hashlib
+        from pathlib import Path as _P
+        case_files = [
+            fp for fp in all_files
+            if any(pat in fp or _P(fp).name.startswith(pat.rstrip("/")) for pat in patterns)
+        ]
+        if len(case_files) <= max_n:
+            return list(all_files), []
+        sampled = sorted(case_files, key=lambda p: hashlib.md5(p.encode("utf-8")).hexdigest())[:max_n]
+        sampled_set = set(sampled)
+        unsampled = [fp for fp in case_files if fp not in sampled_set]
+        kept = [fp for fp in all_files if fp not in set(unsampled)]
+        return kept, sorted(unsampled)
+
+    @staticmethod
+    def _apply_file_count_cap(
+        files_to_review: list[str], new_files: set[str], keyword_paths: tuple[str, ...],
+        max_files: int,
+    ) -> tuple[list[str], list[str]]:
+        """文件数硬上限: 必保(新增+关键路径)外的低优先级 tail 截断.
+
+        files_to_review 须已按优先级降序.
+        Returns: (kept, truncated)
+        """
+        if max_files <= 0 or len(files_to_review) <= max_files:
+            return list(files_to_review), []
+        must: list[str] = []
+        optional: list[str] = []
+        for fp in files_to_review:
+            is_must = (fp in new_files) or any(
+                kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in keyword_paths
+            )
+            (must if is_must else optional).append(fp)
+        budget = max(0, max_files - len(must))
+        kept_optional = optional[:budget]
+        truncated = optional[budget:]
+        return must + kept_optional, truncated
 
     def _read_file_line_count(self, file_path: str, ws) -> int:
         """读 worktree 文件行数, 用于 priority 排序 + strategy 分配.
