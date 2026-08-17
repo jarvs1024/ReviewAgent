@@ -157,6 +157,7 @@ def _extract_inner_json(text: str) -> object:
     Real-world DeepSeek-V4-Flash (and similar) frequently emits:
 
     * Trailing prose after the JSON object (``{"ok": true}\nJSON generated.``).
+    * Leading prose before the JSON (``Confirmed. {"title": ...}``).
     * Literal newline characters inside JSON string values
       (``{"title": "x", "description_md": "line 1\nline 2"}``) where
       Python 3.12 ``strict=True`` (the default since 3.12) rejects the
@@ -166,9 +167,11 @@ def _extract_inner_json(text: str) -> object:
 
       1. ``json.JSONDecoder(strict=False).raw_decode(text)`` — handles both
          trailing prose AND literal control chars inside string values.
-      2. Whole-document ``json.loads(text, strict=False)`` as a second
+      2. If raw_decode fails and text contains ``{``, find first ``{`` and
+         retry raw_decode from there — handles leading prose.
+      3. Whole-document ``json.loads(text, strict=False)`` as a second
          safety net when the LLM appends whitespace before prose.
-      3. Re-raise ``JSONDecodeError`` so the caller can choose their own
+      4. Re-raise ``JSONDecodeError`` so the caller can choose their own
          fallback (typically ``tolerant_markdown`` or hard-fail).
 
     Returns a dict/list when parsing succeeds; raises ``JSONDecodeError``
@@ -185,6 +188,15 @@ def _extract_inner_json(text: str) -> object:
             return obj
     except json.JSONDecodeError:
         pass
+    # Handle leading prose: find first '{' and retry from there
+    first_brace = text.find("{")
+    if first_brace > 0:
+        try:
+            obj, _end = decoder.raw_decode(text[first_brace:])
+            if isinstance(obj, (dict, list)):
+                return obj
+        except json.JSONDecodeError:
+            pass
     try:
         obj = json.loads(text, strict=False)
         if isinstance(obj, (dict, list)):
