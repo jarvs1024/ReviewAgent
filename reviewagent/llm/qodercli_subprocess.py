@@ -34,20 +34,78 @@ import json
 import re
 import os
 import shutil
+import socket
 import subprocess
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from reviewagent.config import config
 from reviewagent.llm.base import LLMResult, _strip_fence
 from reviewagent.llm.qodercli_errors import (
     QoderCLIError,
+    QoderCLIDaemonError,
     QoderCLIOutputError,
     QoderCLITimeoutError,
 )
 from reviewagent.logging_setup import logger
 from reviewagent.prompts import loader
+
+# ---------------------------------------------------------------------------
+# Daemon health-check + circuit breaker
+# ---------------------------------------------------------------------------
+# qodercli 依赖 opencode acp daemon (OPENCODE_URL, 默认 127.0.0.1:4096).
+# daemon 挂了时, node 子进程会无限挂起 (connect 无 timeout), 导致每个 chunk
+# 占满 QODERCLI_TIMEOUT (600s), 23+ 文件直接打爆 job_timeout.
+#
+# 防御: 在 spawn node 前做一次 TCP probe (2s), 不通立刻报错.
+# 断路器: 失败后 30s 内不再重复探测, 避免 80 个文件各等 2s.
+# ---------------------------------------------------------------------------
+_DAEMON_COOLDOWN_UNTIL: float = 0.0
+_DAEMON_COOLDOWN_SECS: float = 30.0
+_DAEMON_PROBE_TIMEOUT: float = 2.0
+
+
+def _check_daemon_health() -> None:
+    """TCP-probe the opencode daemon; raise QoderCLIDaemonError if unreachable.
+
+    Uses a circuit-breaker pattern: after a failure, skip probes for
+    ``_DAEMON_COOLDOWN_SECS`` seconds to avoid N * probe_timeout latency
+    when processing many files (e.g. 80 files × 2s = 160s wasted).
+    """
+    global _DAEMON_COOLDOWN_UNTIL
+
+    now = time.monotonic()
+    if now < _DAEMON_COOLDOWN_UNTIL:
+        # Still in cooldown — daemon was recently unreachable.
+        raise QoderCLIDaemonError(
+            "opencode daemon unreachable (cached); "
+            "daemon was down within last {:.0f}s — skipping probe".format(
+                _DAEMON_COOLDOWN_SECS
+            )
+        )
+
+    daemon_url = os.environ.get("OPENCODE_URL") or config.opencode_url
+    parsed = urlparse(daemon_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 4096
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(_DAEMON_PROBE_TIMEOUT)
+        s.connect((host, port))
+        s.close()
+        logger.debug("qodercli daemon health OK {}:{}", host, port)
+        return
+    except (socket.timeout, socket.error, OSError) as e:
+        _DAEMON_COOLDOWN_UNTIL = time.monotonic() + _DAEMON_COOLDOWN_SECS
+        raise QoderCLIDaemonError(
+            "opencode daemon unreachable at {}:{} ({}). "
+            "Is `opencode acp` running? Cooldown {:.0f}s.".format(
+                host, port, e, _DAEMON_COOLDOWN_SECS
+            )
+        ) from e
 
 
 def _resolve_script_path() -> str:
@@ -355,6 +413,7 @@ def run_subprocess(
         node / script / model: per-call overrides; empty falls back to `config`.
 
     Raises:
+        QoderCLIDaemonError: opencode daemon unreachable (health-check failed).
         QoderCLITimeoutError: subprocess.TimeoutExpired or `timeout` exceeded.
         QoderCLIError: non-zero exit code, missing binary, or unexpected failure.
         QoderCLIOutputError: stdout empty, malformed JSON, or agent JSON missing.
@@ -374,6 +433,9 @@ def run_subprocess(
         permission_mode=config.qodercli_permission_mode,
         max_turns=config.qodercli_max_turns,
     )
+
+    # Fast-fail: TCP-probe daemon before spawning node (2s vs 600s subprocess hang).
+    _check_daemon_health()
 
     started = time.monotonic()
     actual_timeout = timeout or config.qodercli_timeout

@@ -24,6 +24,7 @@ from reviewagent.llm.base import BaseLLMProvider, LLMResult
 from reviewagent.llm.client import get_client, reset_client
 from reviewagent.llm.qodercli_errors import (  # noqa: F401  (re-exported for tests / external callers)
     QoderCLIError,
+    QoderCLIDaemonError,
     QoderCLITimeoutError,
     QoderCLIOutputError,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "OpencodeOutputError",
     "OpencodeTimeoutError",
     "QoderCLIError",
+    "QoderCLIDaemonError",
     "QoderCLIOutputError",
     "QoderCLITimeoutError",
     "get_client",
