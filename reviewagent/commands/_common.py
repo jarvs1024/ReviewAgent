@@ -36,12 +36,10 @@ from reviewagent.llm import (
     OpencodeOutputError,
     OpencodeTimeoutError,
     QoderCLIError,
-    QoderCLIDaemonError,
     QoderCLIOutputError,
     QoderCLITimeoutError,
     get_client,
 )
-from reviewagent.llm.qodercli_subprocess import _check_daemon_health
 from reviewagent.repo_context import build_repo_context
 from reviewagent.telemetry import events
 from reviewagent.telemetry.models import MRRecord, ReviewRun
@@ -184,13 +182,7 @@ class BaseCommand:
             events.emit_run_finished(_run_id, **kw)
             _run_finished = True
         # 在 try 块前初始化 provider_name, except 块 + finally 都能访问
-        client = get_client()
-        provider_name = getattr(client, "provider_name", "unknown")
-
-        # Fast-fail: 如果 LLM provider 是 qodercli, 先检查 daemon 是否存活.
-        # 避免 daemon 挂了时每个 chunk 都等满 QODERCLI_TIMEOUT (600s).
-        if provider_name == "qodercli":
-            _check_daemon_health()
+        provider_name = getattr(get_client(), "provider_name", "unknown")
 
         try:
             # 1. MR 元信息

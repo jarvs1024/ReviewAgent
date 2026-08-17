@@ -76,7 +76,6 @@ from reviewagent.git.diff_lines import (
 from reviewagent.gitlab.client import GitLabError
 from reviewagent.logging_setup import logger
 from reviewagent.llm import OpencodeOutputError, get_client
-from reviewagent.llm.qodercli_errors import QoderCLIDaemonError
 
 
 # Backward-compat re-exports
@@ -503,15 +502,6 @@ class ImproveCommand(BaseCommand):
                     total_cost_credits += oc_result.cost_credits
                     if oc_result.model:
                         last_model = oc_result.model
-                except QoderCLIDaemonError as e:
-                    # Daemon down: abort entire run, don't try remaining chunks.
-                    # The circuit breaker already prevents N * 2s probe latency,
-                    # but we still want to fail fast with a clear error message.
-                    logger.error(
-                        "improve.daemon_down project={} mr={} err={} — aborting",
-                        self.project_id, self.mr_iid, e,
-                    )
-                    raise
                 except Exception as e:
                     logger.error(
                         "improve.chunk_failed project={} mr={} file={} err={}",

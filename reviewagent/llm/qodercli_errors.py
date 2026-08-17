@@ -21,13 +21,4 @@ class QoderCLIOutputError(QoderCLIError):
     """qodercli stdout could not be parsed as the expected JSON shape."""
 
 
-class QoderCLIDaemonError(QoderCLIError):
-    """opencode/qodercli daemon is unreachable (health-check failed)."""
-
-
-__all__ = [
-    "QoderCLIError",
-    "QoderCLITimeoutError",
-    "QoderCLIOutputError",
-    "QoderCLIDaemonError",
-]
+__all__ = ["QoderCLIError", "QoderCLITimeoutError", "QoderCLIOutputError"]
