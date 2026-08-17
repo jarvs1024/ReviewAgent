@@ -116,7 +116,12 @@ def run_weekly_job(
         logger.info("reporting.run skipped (REVIEWAGENT_WEEKLY_ENABLED=false)")
         return {"skipped": True, "reason": "disabled"}
 
-    output_dir = output_dir or Path("data/weekly_reports")
+    # 使用 config.weekly_reports_dir 保证与 API 读取路径一致
+    # 之前用 Path("data/weekly_reports") 相对路径，systemd CWD 下会写到
+    # /home/workflow/ReviewAgent/data/weekly_reports/，而 API 读的是
+    # config.data_dir / "weekly_reports" = /home/workflow/data/weekly_reports/
+    from reviewagent.config import config as _main_config
+    output_dir = output_dir or _main_config.weekly_reports_dir
 
     tz = timezone(timedelta(hours=8))  # Asia/Shanghai
     week_start, week_end = _week_bounds(now=now, tz=tz, week_offset=week_offset)
