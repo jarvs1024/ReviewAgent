@@ -142,3 +142,27 @@ def test_apply_file_count_cap_disabled_when_zero():
     )
     assert kept == files
     assert truncated == []
+
+
+# ---------- _extract_guardrail_markers (V1.1 配套) ----------
+
+def test_extract_guardrail_markers_picks_c_and_d():
+    sm = (
+        "## 改进总览\n\n- file1 L1 — x\n- file2 L2 — y\n\n"
+        "> ⏭️ 以下 12 个测试/配置文件跳过检视: tests_loc/test_filter_00.py 等 12 个\n\n"
+        "> ✂️ 另有 2 个低优先级文件因超出文件数上限（IMPROVE_MAX_FILES_TO_REVIEW=8）未检视: a, b"
+    )
+    markers = ImproveCommand._extract_guardrail_markers(sm)
+    assert len(markers) == 2
+    assert markers[0].startswith("> ⏭️ 以下 12 个")
+    assert markers[1].startswith("> ✂️ 另有 2 个")
+
+
+def test_extract_guardrail_markers_empty_input():
+    assert ImproveCommand._extract_guardrail_markers("") == []
+    assert ImproveCommand._extract_guardrail_markers("## 改进总览\n\nno markers here") == []
+
+
+def test_extract_guardrail_markers_ignores_unrelated_quotes():
+    sm = "## 改进总览\n\n- foo\n\n> ℹ️ 另有 1 条已发过 (重复 issue 跳过)"
+    assert ImproveCommand._extract_guardrail_markers(sm) == []

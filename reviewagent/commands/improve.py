@@ -1122,7 +1122,7 @@ class ImproveCommand(BaseCommand):
                 display = skipped_files[:10]
                 suffix = f" 等 {len(skipped_files)} 个" if len(skipped_files) > 10 else ""
                 merged_summary += (
-                    f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视 (配置 IMPROVE_SKIP_TEST_PATHS 调整): "
+                    f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视 (含 IMPROVE_SKIP_TEST_PATHS 配置跳过 + IMPROVE_TEST_SAMPLE_PATHS 抽样跳过): "
                     f"{', '.join(display)}{suffix}"
                 )
         else:
@@ -2553,6 +2553,16 @@ class ImproveCommand(BaseCommand):
         # 4. edit placeholder 为完整 summary (含实际 inline_posted 列表).
         #    placeholder 已在循环前创建 (见顶部 step 0), 此处只更新正文.
         summary_md = self._build_summary_v2(inline_posted, inline_skipped, len(suggestions))
+        # V1.1: 把 _merge_chunks 生成的 guardrail_markers (⏭️ C 跳过 / ✂️ D 截断)
+        #      追加到重建的 summary 后. _build_summary_v2 只看 inline_posted/inline_skipped,
+        #      不会知道文件筛选护栏丢掉了哪些文件, 需从 agent_result["summary_md"] 抽 marker 行.
+        if summary_md:
+            _guardrail_markers = self._extract_guardrail_markers(
+                (agent_result.get("summary_md") or "")
+            )
+            for _marker in _guardrail_markers:
+                if _marker and _marker not in summary_md:
+                    summary_md += f"\n\n{_marker}"
         if top_comment_id and summary_md:
             try:
                 self.gitlab.update_mr_comment(
@@ -2570,6 +2580,28 @@ class ImproveCommand(BaseCommand):
             "inline_posted": len(inline_posted),
             "inline_skipped": len(inline_skipped),
         }
+
+
+    @staticmethod
+    def _extract_guardrail_markers(summary_md: str) -> list[str]:
+        """从 _merge_chunks 生成的 summary_md 中抽取文件筛选护栏的提示行.
+
+        V1.1 配套: _publish 重建 summary 时, 把这些行追加到尾部,
+        让 GitLab note 显示 C 抽样跳过 / D 文件数截断的提示.
+        匹配行首 `> ⏭️ ... 跳过检视` 与 `> ✂️ ... 因超出文件数上限` 开头的一段 (含 IMPROVE_MAX_FILES_TO_REVIEW 配置名).
+        """
+        if not summary_md:
+            return []
+        markers: list[str] = []
+        # 按 \n\n 切块, 每块开头是 `> ⏭️` 或 `> ✂️` 才保留
+        for chunk in re.split(r"\n\n+", summary_md):
+            stripped = chunk.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("> ⏭️") or stripped.startswith("> ✂️"):
+                markers.append(stripped)
+        return markers
+
 
     def _validate_suggestion(
         self,
