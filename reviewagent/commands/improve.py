@@ -499,11 +499,30 @@ class ImproveCommand(BaseCommand):
                 cap_truncated=cap_truncated,
             )
         files_llm = files_to_review if files_to_review else list(files)  # 兜底: 拿不到sha或首次
-        workers = min(len(files_llm), config.improve_parallel_workers)
+
+        # V10: 小 diff 文件合并批次 (full 策略文件独享 chunk, 减少 LLM 调用次数)
+        groups: list[list[str]] = [[fp] for fp in files_llm]
+        if config.improve_batch_enabled and len(files_llm) > 1:
+            groups = self._group_files_for_batching(
+                files_llm, diff_by_file, strategy,
+                max_diff_lines=config.improve_batch_max_diff_lines,
+                max_files=config.improve_batch_max_files,
+                max_total_lines=config.improve_batch_max_total_lines,
+            )
+            _batched = sum(1 for g in groups if len(g) > 1)
+            _merged_files = sum(len(g) for g in groups if len(g) > 1)
+            if _batched:
+                logger.info(
+                    "improve.batch project={} mr={} files={} llm_calls={} batched_groups={} merged_files={}",
+                    self.project_id, self.mr_iid, len(files_llm),
+                    len(groups), _batched, _merged_files,
+                )
+
+        workers = min(len(groups), config.improve_parallel_workers)
 
         logger.info(
-            "improve.parallel project={} mr={} files_to_review={} reuse={} workers={}",
-            self.project_id, self.mr_iid, len(files_llm), len(files_reuse), workers,
+            "improve.parallel project={} mr={} files_to_review={} reuse={} groups={} workers={}",
+            self.project_id, self.mr_iid, len(files_llm), len(files_reuse), len(groups), workers,
         )
 
         chunk_results: list[dict[str, Any]] = []
@@ -513,22 +532,42 @@ class ImproveCommand(BaseCommand):
         last_model = ""
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
-            for fp in files_llm:
-                file_diff = diff_by_file.get(fp, "")
-                valid_lines = line_map.get(fp, set())
-                prompt = self._build_chunk_prompt(
-                    fp, file_diff, valid_lines, ws,
-                    cross_file_refs=cross_file_refs_by_file.get(fp, []),
-                    strategy=strategy.get(fp, "full"),  # V6: 4 档 strategy 透传
-                    prior_issues=prior_issues_by_file.get(fp),  # L4 锚点
-                )
-                fut = pool.submit(self._call_chunk, prompt, ws, fp)
-                futures[fut] = fp
+            for group in groups:
+                if len(group) == 1:
+                    fp = group[0]
+                    prompt = self._build_chunk_prompt(
+                        fp, diff_by_file.get(fp, ""), line_map.get(fp, set()), ws,
+                        cross_file_refs=cross_file_refs_by_file.get(fp, []),
+                        strategy=strategy.get(fp, "full"),  # V6: 4 档 strategy 透传
+                        prior_issues=prior_issues_by_file.get(fp),  # L4 锚点
+                    )
+                    fut = pool.submit(self._call_chunk, prompt, ws, fp)
+                else:
+                    prompt = self._build_batch_prompt(
+                        group, diff_by_file, line_map, ws,
+                        cross_file_refs_by_file, strategy, prior_issues_by_file,
+                    )
+                    fut = pool.submit(self._call_chunk, prompt, ws, f"batch({len(group)}f)")
+                futures[fut] = group
             for fut in as_completed(futures):
-                fp = futures[fut]
+                group = futures[fut]
+                label = group[0] if len(group) == 1 else f"batch({len(group)}f)"
                 try:
                     oc_result = fut.result()
-                    chunk_results.append(oc_result.data)
+                    data = oc_result.data
+                    # V10: 批次防御 — 丢弃 file 不在组内的 suggestions (防归属混淆)
+                    if len(group) > 1 and isinstance(data, dict):
+                        gs = set(group)
+                        suggs = data.get("suggestions") or []
+                        valid = [s for s in suggs if isinstance(s, dict) and s.get("file") in gs]
+                        dropped = len(suggs) - len(valid)
+                        if dropped:
+                            logger.warning(
+                                "improve.batch_dropped project={} mr={} group={} dropped={} (file 字段不在组内)",
+                                self.project_id, self.mr_iid, label, dropped,
+                            )
+                        data["suggestions"] = valid
+                    chunk_results.append(data)
                     total_prompt_tokens += oc_result.prompt_tokens
                     total_completion_tokens += oc_result.completion_tokens
                     total_cost_credits += oc_result.cost_credits
@@ -537,9 +576,9 @@ class ImproveCommand(BaseCommand):
                 except Exception as e:
                     logger.error(
                         "improve.chunk_failed project={} mr={} file={} err={}",
-                        self.project_id, self.mr_iid, fp, e,
+                        self.project_id, self.mr_iid, label, e,
                     )
-                    # 单个 chunk 失败不影响其他
+                    # 单个 chunk 失败不影响其他 (batch 失败 = 全组空结果, 不拆分重试)
                     chunk_results.append({"summary_md": "", "suggestions": []})
 
         # 汇总 token 统计到 _last_oc_result (主线程安全写入)
@@ -856,6 +895,16 @@ class ImproveCommand(BaseCommand):
                            行号已因改动偏移, 仅作语义锚点, 由 LLM 重定位.
         """
         wt = str(ws.worktree)
+
+        # V10: 大 diff 截断 (clip) — 防单文件巨型 diff 撑爆 prompt (截断处有显式标记行)
+        _clip_n = config.improve_clip_diff_lines
+        if _clip_n > 0:
+            file_diff, _was_clipped = self._clip_diff(file_diff, _clip_n)
+            if _was_clipped:
+                logger.info(
+                    "improve.diff_clipped project={} mr={} file={} max_lines={}",
+                    self.project_id, self.mr_iid, file_path, _clip_n,
+                )
 
         if strategy == "full":
             source_block = self._build_full_source_block(file_path)
@@ -1303,6 +1352,160 @@ class ImproveCommand(BaseCommand):
                 return sum(1 for _ in f)
         except (OSError, UnicodeDecodeError):
             return -1
+
+    # ---------- V10 批次合并 + 大 diff 截断 (2026-08-18) ----------
+
+    @staticmethod
+    def _clip_diff(file_diff: str, max_lines: int) -> tuple[str, bool]:
+        """截断 diff 到 max_lines 行 (防单文件巨型 diff 撑爆 prompt).
+
+        截断处加显式标记行, 让 LLM 知道后文已省略 (不幻觉行号).
+        Returns: (clipped_diff, was_clipped)
+        """
+        if max_lines <= 0:
+            return file_diff, False
+        lines = file_diff.splitlines()
+        if len(lines) <= max_lines:
+            return file_diff, False
+        kept = lines[:max_lines]
+        kept.append(f"... (diff truncated: {len(lines) - max_lines} more lines omitted)")
+        return "\n".join(kept) + "\n", True
+
+    @staticmethod
+    def _group_files_for_batching(
+        files: list[str],
+        diff_by_file: dict[str, str],
+        strategy: dict[str, str],
+        *,
+        max_diff_lines: int,
+        max_files: int,
+        max_total_lines: int,
+    ) -> list[list[str]]:
+        """V10: 小 diff 文件合并批次分组.
+
+        规则 (借鉴 pr-agent 多 chunk 打包 + FFD 装箱):
+        - full 策略文件 → 独享 chunk (高优先级, 不降检视质量)
+        - partial/patch 策略且 0 < diff 行数 <= max_diff_lines → 参与合并
+          (按 diff 行数降序 FFD 装箱, 批次满 max_files 或累计 max_total_lines 即关)
+        - diff 行数超限 / diff 缺失的 partial/patch 文件 → 独立 chunk
+
+        全局 priority 序不动 (full 配额 / suggestion 预算依赖它);
+        FFD 只在装箱内部排序, 让大 diff 先占批次空间.
+
+        Returns: 文件分组列表 ([[f1], [f2,f3,f4], ...]) — 每组 = 1 次 LLM 调用
+        """
+        def _diff_lines(fp: str) -> int:
+            return len(diff_by_file.get(fp, "").splitlines())
+
+        singles: list[list[str]] = []
+        mergeable: list[str] = []
+        for fp in files:
+            if strategy.get(fp) == "full":
+                singles.append([fp])
+                continue
+            dl = _diff_lines(fp)
+            if 0 < dl <= max_diff_lines:
+                mergeable.append(fp)
+            else:
+                singles.append([fp])
+
+        if len(mergeable) <= 1:
+            return singles + [[fp] for fp in mergeable]
+
+        # FFD: 大 diff 先装箱 (减少批次浪费)
+        mergeable.sort(key=_diff_lines, reverse=True)
+        batches: list[list[str]] = []
+        cur: list[str] = []
+        cur_lines = 0
+        for fp in mergeable:
+            dl = _diff_lines(fp)
+            if cur and (len(cur) >= max_files or cur_lines + dl > max_total_lines):
+                batches.append(cur)
+                cur, cur_lines = [], 0
+            cur.append(fp)
+            cur_lines += dl
+        if cur:
+            batches.append(cur)
+
+        return singles + batches
+
+    def _build_batch_prompt(
+        self,
+        group: list[str],
+        diff_by_file: dict[str, str],
+        line_map: dict[str, set[int]],
+        ws,
+        cross_file_refs_by_file: dict[str, list[dict]],
+        strategy: dict[str, str],
+        prior_issues_by_file: dict[str, list[dict]],
+    ) -> str:
+        """V10: 多文件合并批次 prompt — rules 只发一次 + N 个文件 section.
+
+        组内保留各自 strategy 的 source block (partial 仍 partial, patch 仍 patch);
+        suggestions 必须带 file 字段, 解析侧会过滤 file 不在组内的建议 (防归属混淆).
+        """
+        from reviewagent.prompts.loader import load_block as _load_block
+        _general_rules_block = _load_block("_general_rules_block")
+        if self.repo_context:
+            rules_block = (
+                f"## 🔴 优先 2 — SSD 自定义规则 (项目方定义)\n\n"
+                f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
+                f"{self.repo_context}\n\n---\n\n{_general_rules_block}\n\n"
+            )
+        else:
+            rules_block = _general_rules_block + "\n\n"
+
+        n = len(group)
+        sections: list[str] = []
+        for idx, fp in enumerate(group, 1):
+            file_diff = diff_by_file.get(fp, "")
+            valid_lines = line_map.get(fp, set())
+            strat = strategy.get(fp, "patch")
+            if strat == "full":
+                source_block = self._build_full_source_block(fp)  # 理论不达 (full 不入批)
+            elif strat == "partial":
+                source_block = self._build_partial_context_block(fp, valid_lines, ws)
+            else:
+                source_block = self._build_patch_only_block(fp, valid_lines)
+
+            vl_str = f"{fp}: {sorted(valid_lines)}"
+            cross_section = self._render_cross_file_section(cross_file_refs_by_file.get(fp, []))
+
+            prior_section = ""
+            pis = prior_issues_by_file.get(fp)
+            if pis:
+                _anchors = []
+                for i, pi in enumerate(pis, 1):
+                    sev = (pi.get("severity") or "medium").lower()
+                    hdr = (pi.get("header") or pi.get("rationale") or "").strip()
+                    lbl = (pi.get("label") or "").strip()
+                    _anchors.append(f"{i}. [{sev}] {hdr}" + (f" (label={lbl})" if lbl else ""))
+                prior_section = (
+                    f"#### 已知问题锚点（上一轮 open；行号可能偏移）\n\n"
+                    + "\n".join(_anchors) + "\n\n"
+                )
+
+            sections.append(
+                f"### 文件 {idx}/{n}: `{fp}`\n\n"
+                f"{cross_section}"
+                f"{prior_section}"
+                f"#### diff\n```diff\n{file_diff}\n```\n\n"
+                f"{source_block}\n\n"
+                f"#### VALID NEW LINES（start_line 只能从此取）\n\n{vl_str}\n"
+            )
+
+        file_list = "\n".join(f"- `{fp}`" for fp in group)
+        return (
+            f"{rules_block}"
+            f"## 本次检视共 {n} 个文件 (小改动合并批次)\n\n"
+            f"**每条 suggestion 的 `file` 字段只能从以下路径中选:**\n{file_list}\n\n"
+            f"---\n\n"
+            + "\n\n---\n\n".join(sections)
+            + "\n\n## 输出\n\n"
+            f"按 system prompt 输出 JSON。**summary_md 输出空字符串 `\"\"`**。\n"
+            f"输出本批次全部文件的 suggestions 合并列表; 每条必须带正确的 `file` 字段 "
+            f"(file 不在上述清单中的 suggestion 会被丢弃)。"
+        )
 
     def _test_feature_density(self, file_path: str, file_size: int) -> float:
         """V7 测试特征密度 (0~1): 绝对命中数 + 密度组合.

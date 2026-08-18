@@ -141,6 +141,13 @@ class Config:
     improve_test_sample_paths: tuple[str, ...] = ()  # C: 抽样目标路径模式 (空=不抽样)
     improve_test_sample_max: int = 0  # C: 抽样上限 (0=不抽样, 正整数=确定性抽样 N 个)
 
+    # ---- V10 批次合并 + 大 diff 截断 (2026-08-18) ----
+    improve_batch_enabled: bool = True  # 小 diff 文件合并批次 (减少 LLM 调用次数)
+    improve_batch_max_diff_lines: int = 60  # 参与 合并的单文件 diff 行数上限 (超过则独立 chunk)
+    improve_batch_max_files: int = 5  # 单批次最多合并文件数
+    improve_batch_max_total_lines: int = 300  # 单批次累计 diff 行数上限
+    improve_clip_diff_lines: int = 800  # 单文件 diff 行数超过此值时截断 (0=不截断)
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:
@@ -232,6 +239,13 @@ class Config:
             # max=0 表示不抽样(保持现状: 全检); 设为正整数启用
             improve_test_sample_paths=_env_tuple("IMPROVE_TEST_SAMPLE_PATHS", ""),
             improve_test_sample_max=int(_env("IMPROVE_TEST_SAMPLE_MAX", "0")),
+            # --- V10 批次合并 + 大 diff 截断 (2026-08-18) ---
+            # 小 diff (partial/patch 策略) 文件合并进同一 prompt, 减少 LLM 调用次数; full 策略文件独享 chunk
+            improve_batch_enabled=_env("IMPROVE_BATCH_ENABLED", "1").strip().lower() in ("1", "true", "yes", "y"),
+            improve_batch_max_diff_lines=int(_env("IMPROVE_BATCH_MAX_DIFF_LINES", "60")),
+            improve_batch_max_files=int(_env("IMPROVE_BATCH_MAX_FILES", "5")),
+            improve_batch_max_total_lines=int(_env("IMPROVE_BATCH_MAX_TOTAL_LINES", "300")),
+            improve_clip_diff_lines=int(_env("IMPROVE_CLIP_DIFF_LINES", "800")),
             review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",
                 ".md,.doc,.docx,.txt,.rst,.csv,.png,.jpg,.jpeg,.gif,.svg,.ico"),
         )
