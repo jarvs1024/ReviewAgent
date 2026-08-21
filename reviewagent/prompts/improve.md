@@ -203,6 +203,41 @@ VALID NEW LINES: [7]  # 只有 L7 改了 TESTCASE_TITLE
 }
 ```
 
+### 🔴 start_line 必须指向实际包含问题的代码行
+
+**`start_line` 不是"相关代码块"的起始行，而是实际包含问题的代码行**：
+
+- ❌ 多行函数调用有 shell 注入 → 不要标在 `execute(` 行，标在 f-string 参数行
+- ❌ `if` 块内有 shell 注入 → 不要标在 `if` 行，标在实际 execute 行
+- ❌ 函数内有 shell 注入 → 不要标在 docstring 行，标在实际 execute 行
+- ✅ 问题在哪一行，`start_line` 就是哪一行
+
+#### 示例：多行函数调用的正确行号
+
+```python
+# 源码:
+# 278: stdout, _stderr = self._host.execute(
+# 279:     f"ls {mount_point}/{name}.* 2>/dev/null | head -n 1"
+# 280: )
+
+# ❌ 错误 — start_line=278 指向 execute( 行，但 existing_code 是 L279 的 f-string
+{
+  "start_line": 278,
+  "existing_code": "f\"ls {mount_point}/{name}.* 2>/dev/null | head -n 1\"",
+  "improved_code": "f\"ls {shlex.quote(mount_point)}/{shlex.quote(name)}.* 2>/dev/null | head -n 1\""
+}
+# 结果：GitLab 在 L278 显示 "删除 execute("，但 improved_code 是 f-string → 内容不匹配！
+
+# ✅ 正确 — start_line=279 指向实际包含问题的 f-string 行
+{
+  "start_line": 279,
+  "existing_code": "f\"ls {mount_point}/{name}.* 2>/dev/null | head -n 1\"",
+  "improved_code": "f\"ls {shlex.quote(mount_point)}/{shlex.quote(name)}.* 2>/dev/null | head -n 1\""
+}
+```
+
+**self-check**：写完每条 suggestion 后，确认 `existing_code` 第一行与 `start_line` 处的源码内容一致。
+
 ### 🔴 强制要求: 每个可疑 bug 都必须有一条 suggestion
 
 diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 inline suggestion (除非确实无法 Apply)：
