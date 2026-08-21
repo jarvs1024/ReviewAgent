@@ -2875,6 +2875,41 @@ class ImproveCommand(BaseCommand):
                 )
                 start_line = snapped
 
+        # 3.5 验证 existing_code 与目标行内容匹配 (防止 start_line 与 existing_code 错位)
+        #     场景: LLM 给 start_line=278 (execute 行) 但 existing_code 是 L279 的 f-string
+        #     结果: GitLab 在 L278 显示 "删除 execute(" 但 improved_code 是 f-string → 内容不匹配
+        if existing_code and existing_code.strip():
+            # 取 existing_code 第一行作为匹配基准
+            existing_first = existing_code.strip("\n").split("\n")[0].strip()
+            if existing_first:
+                target_line_content = file_lines[start_line - 1].strip() if start_line - 1 < len(file_lines) else ""
+                if target_line_content != existing_first:
+                    # existing_code 第一行与目标行不匹配 — 尝试在目标行附近搜索
+                    # 搜索范围: start_line ± 3 行
+                    search_start = max(0, start_line - 4)  # 0-based
+                    search_end = min(len(file_lines), start_line + 3)
+                    found_line = None
+                    for i in range(search_start, search_end):
+                        if file_lines[i].strip() == existing_first:
+                            found_line = i + 1  # 转 1-based
+                            break
+                    if found_line is not None and found_line != start_line:
+                        logger.info(
+                            "improve.fix_line_mismatch project={} mr={} file={} {} -> {} (existing_code first line)",
+                            self.project_id, self.mr_iid, file_path, start_line, found_line,
+                        )
+                        start_line = found_line
+                    else:
+                        # 找不到匹配 — drop 防止发布错误的 suggestion
+                        logger.warning(
+                            "improve.existing_code_line_mismatch project={} mr={} file={} "
+                            "start_line={} expected='{}' actual='{}'",
+                            self.project_id, self.mr_iid, file_path, start_line,
+                            existing_first[:60], target_line_content[:60],
+                        )
+                        return {"action": "drop", "new_line": start_line,
+                                "reason": "existing_code first line does not match target line content"}
+
         # 4. improved_code 第一行 vs file[start_line-1] 对齐检查
         if not file_lines or start_line - 1 >= len(file_lines):
             return {"action": "drop", "new_line": start_line,
