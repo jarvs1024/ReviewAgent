@@ -93,6 +93,7 @@ class Config:
     # ---- improve 并行 + 限流 ----
     improve_parallel_workers: int = 3        # 按文件分块并行调 opencode 的路数
     improve_full_files: int = 20            # full source 桶文件配额, 超出降级 partial/patch (0=不限)
+    improve_full_source_max_bytes: int = 0  # full 源码块字节预算 (E2BIG 防线): 0=自适应(128KB参数上限−repo_context−规则块−diff估算), >0=固定值, <0=关闭
     improve_keyword_paths: tuple[str, ...] = (  # 文件优先级 — 关键路径加分 (排序权重)
         # 业务核心 (web 通用)
         "/services/", "/api/", "/core/", "/main.",
@@ -212,6 +213,7 @@ class Config:
             repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "2000")),
             improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
             improve_full_files=int(_env("IMPROVE_FULL_FILES", "20")),
+            improve_full_source_max_bytes=int(_env("IMPROVE_FULL_SOURCE_MAX_BYTES", "0")),
             improve_keyword_paths=_env_tuple("IMPROVE_KEYWORD_PATHS",
                 "/services/,/api/,/core/,/main.,/models/,/handlers/,/routers/"),
             improve_skip_test_paths=_env_tuple("IMPROVE_SKIP_TEST_PATHS",

@@ -95,6 +95,12 @@ _RULE_EXEMPT_REGEX = re.compile(
     rf"\b{re.escape(config.rule_key_prefix)}-RULE-\w+\b"
 )
 
+# Linux MAX_ARG_STRLEN: 单个 argv 参数的字节上限 (32 pages × 4KB)。
+# qodercli 的 prompt 以位置参数传递, 编码后超此值即 OSError [Errno 7]
+# Argument list too long (MR 1136 E2BIG 根因 — 与总 ARG_MAX 2MB 无关,
+# 单参数就限 128KB)。full 策略的源码块预算以此为天花板。
+_MAX_ARG_STRLEN = 131_072
+
 
 
 
@@ -338,7 +344,11 @@ class ImproveCommand(BaseCommand):
         )
 
         if len(files) <= 1 and not skipped_files:
-            return super()._call_agent(ws)  # 单文件走原路径
+            # E2BIG 防线: 单文件源码块超预算时不走基类捷径 (基类
+            # _build_user_prompt 无条件内嵌全部源码, MR 1136 即此路径触发
+            # [Errno 7]), 落到下方 strategy 路径按预算降级 partial/patch
+            if not self._single_file_over_full_budget(files, file_meta):
+                return super()._call_agent(ws)  # 单文件走原路径
 
         # 按文件拆分 diff
         diff_by_file = self._split_diff_by_file(ws.diff_file, files)
@@ -1529,6 +1539,80 @@ class ImproveCommand(BaseCommand):
         density_score = min(density / 0.05, 1.0) * 0.5
         return abs_score + density_score
 
+    def _full_source_budget_bytes(self, diff_lines: int) -> int:
+        """full 源码块允许的最大字节数 (含行号前缀) — E2BIG 防线.
+
+        prompt 作为 qodercli 的单个位置参数传递, 受内核 MAX_ARG_STRLEN=128KB
+        约束 (MR 1136: [Errno 7] Argument list too long)。full 策略把整个文件
+        源码塞进 prompt, 是唯一可能撑爆该参数的变量, 分配策略阶段即按
+        ``上限 − 固定开销(repo_context/规则块/杂项) − 本文件 diff 估算`` 预算拦截。
+
+        config.improve_full_source_max_bytes: 0=自适应(默认), >0=固定值, <0=关闭。
+        """
+        if config.improve_full_source_max_bytes > 0:
+            return config.improve_full_source_max_bytes
+        if config.improve_full_source_max_bytes < 0:
+            return _MAX_ARG_STRLEN  # 关闭防线 (恢复旧行为)
+        fixed = 8_192  # 段标题 / VALID NEW LINES / 已发建议列表 / 输出指令等杂项
+        try:
+            from reviewagent.prompts.loader import load_block as _load_block
+            fixed += len(_load_block("_general_rules_block").encode("utf-8"))
+        except Exception:
+            pass  # 规则块缺失 → 按 0 计 (预算是安全网, 不是硬依赖)
+        fixed += len((getattr(self, "repo_context", "") or "").encode("utf-8"))
+        # diff 行均宽估算 (含上下文行/前缀); clip=0 (不截断) 时按实际行数
+        clip = config.improve_clip_diff_lines
+        est_diff = (diff_lines if clip <= 0 else min(max(diff_lines, 0), clip)) * 64
+        # 目标上限留 8% 安全余量 (估算是粗的)
+        return max(16_384, int(_MAX_ARG_STRLEN * 0.92) - fixed - est_diff)
+
+    def _stat_file_bytes(self, file_path: str) -> int:
+        """从 worktree 读文件字节数 (E2BIG 预算用); 读不到返回 -1 (不拦截, 维持旧行为)."""
+        ws = getattr(self, "ws", None)
+        if not ws:
+            return -1
+        ws_root = Path(ws.worktree)
+        candidates = [ws_root / file_path]
+        try:
+            candidates.append((ws_root / file_path).resolve())
+        except OSError:
+            pass
+        for p in candidates:
+            try:
+                if p.is_file():
+                    return p.stat().st_size
+            except OSError:
+                continue
+        return -1
+
+    def _single_file_over_full_budget(
+        self, files: list[str], file_meta: dict[str, tuple[int, int]],
+    ) -> bool:
+        """E2BIG 防线 (单文件早退路径): 唯一文件的 full 源码块超预算 → True.
+
+        单文件 MR 走 ``_call_agent`` 顶部的基类捷径 (``super()._call_agent``),
+        其 ``_build_user_prompt`` 无条件内嵌全部源码且不受 strategy 约束。
+        超预算时调用方不早退, 落到 strategy 路径 (partial/patch, prompt 尺寸受控)
+        — 与多文件 MR 走的是同一条已验证路径。
+        """
+        if len(files) != 1:
+            return False
+        fp = files[0]
+        diff_lines, file_lines = file_meta.get(fp, (0, 0))
+        file_bytes = self._stat_file_bytes(fp)
+        if file_bytes < 0:
+            return False  # 读不到文件大小 → 不拦截, 维持旧行为
+        budget = self._full_source_budget_bytes(diff_lines)
+        if file_bytes + file_lines * 7 <= budget:
+            return False
+        logger.info(
+            "improve.full_source_budget_downgrade project={} mr={} file={} "
+            "file_bytes={} est_source_bytes={} budget={} -> strategy path (single-file)",
+            self.project_id, self.mr_iid, fp, file_bytes,
+            file_bytes + file_lines * 7, budget,
+        )
+        return True
+
     def _assign_strategy(
         self, sorted_files: list[str], file_meta: dict[str, tuple[int, int]],
         overflow_set: set[str],
@@ -1546,8 +1630,20 @@ class ImproveCommand(BaseCommand):
                 strategy[fp] = "patch"  # MAX_DIFF_CHARS overflow → 强制 patch
                 continue
             if full_quota > 0 and sum(1 for s in strategy.values() if s == "full") < full_quota:
-                strategy[fp] = "full"
-                continue
+                # E2BIG 防线: full 源码块 (文件字节 + 行号前缀) 须在预算内,
+                # 超预算不给 full (落到下方 partial/patch, 不占 full 配额)
+                diff_lines, file_lines = file_meta[fp]
+                file_bytes = self._stat_file_bytes(fp)
+                budget = self._full_source_budget_bytes(diff_lines)
+                if file_bytes < 0 or file_bytes + file_lines * 7 <= budget:
+                    strategy[fp] = "full"
+                    continue
+                logger.info(
+                    "improve.full_source_budget_downgrade project={} mr={} file={} "
+                    "file_bytes={} est_source_bytes={} budget={} -> partial/patch",
+                    self.project_id, self.mr_iid, fp, file_bytes,
+                    file_bytes + file_lines * 7, budget,
+                )
             file_size = file_meta[fp][1]
             if file_size > 0 and file_size < 2000:
                 strategy[fp] = "partial"

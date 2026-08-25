@@ -904,3 +904,205 @@ def test_weekly_config_replace_preserves_all_fields():
     assert cfg2.report_emoji == cfg.report_emoji
     assert cfg2.dashboard_url == cfg.dashboard_url
     assert cfg2.target_project_id == 999
+
+
+# ============ E2BIG full 源码块预算防线 (MR 1136) ============
+#
+# 根因: prompt 作为 qodercli 的单个 argv 位置参数传递, 受内核
+# MAX_ARG_STRLEN=128KB 限制。full 策略/单文件捷径无条件内嵌全部源码,
+# 大文件 (81KB 源码 + 42KB repo_context) 即触发 [Errno 7]。
+# 防线: _full_source_budget_bytes 预算 + _assign_strategy 降级 +
+#       单文件早退拦截 (_single_file_over_full_budget)。
+
+def _budget_cmd(tmp_path):
+    """构造绕过 __init__ 的 ImproveCommand (E2BIG 预算测试用)."""
+    from types import SimpleNamespace
+    from reviewagent.commands.improve import ImproveCommand
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 999
+    cmd.ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+    return cmd
+
+
+def test_full_source_budget_three_modes(monkeypatch, tmp_path):
+    """IMPROVE_FULL_SOURCE_MAX_BYTES 三态: >0=固定值, <0=关闭, 0=自适应."""
+    import dataclasses
+    from reviewagent.commands.improve import _MAX_ARG_STRLEN
+    from reviewagent.config import config as _orig
+
+    cmd = _budget_cmd(tmp_path)
+
+    # >0 → 固定值, 不随 repo_context/diff 变化
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=40_000)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+    cmd.repo_context = "x" * 60_000
+    assert cmd._full_source_budget_bytes(800) == 40_000
+
+    # <0 → 关闭防线: 预算=上限本身 (任何 full 源码块都不拦截, 恢复旧行为)
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=-1)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+    assert cmd._full_source_budget_bytes(800) == _MAX_ARG_STRLEN
+
+    # 0 → 自适应: repo_context 越大预算越小, 且有 16KB 下限
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=0)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+    cmd.repo_context = ""
+    b_small_ctx = cmd._full_source_budget_bytes(10)
+    cmd.repo_context = "x" * 60_000
+    b_big_ctx = cmd._full_source_budget_bytes(10)
+    assert b_small_ctx > b_big_ctx, "repo_context 变大应压缩源码块预算"
+    assert b_big_ctx >= 16_384, "自适应预算有 16KB 下限 (不因规则上下文过大而失效)"
+
+
+def test_stat_file_bytes(tmp_path):
+    """从 worktree 读文件字节数; 读不到返回 -1 (不拦截, 维持旧行为)."""
+    cmd = _budget_cmd(tmp_path)
+
+    f = tmp_path / "serial.py"
+    f.write_bytes(b"x" * 81_060)
+    assert cmd._stat_file_bytes("serial.py") == 81_060
+    assert cmd._stat_file_bytes("missing.py") == -1
+
+    cmd.ws = None
+    assert cmd._stat_file_bytes("serial.py") == -1
+
+
+def test_assign_strategy_budget_downgrade(monkeypatch, tmp_path):
+    """E2BIG 防线: 超预算文件不给 full (降级 partial/patch) 且不占 full 配额."""
+    import dataclasses
+    from reviewagent.config import config as _orig
+
+    cmd = _budget_cmd(tmp_path)
+    big = tmp_path / "serial.py"
+    big.write_bytes(b"x" * 90_000)
+    small = tmp_path / "core.py"
+    small.write_bytes(b"x" * 100)
+
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=50_000)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+
+    # serial.py: 90,000 + 2100*7 行号前缀 ≈ 104.7KB > 50KB 预算 → 不给 full
+    file_meta = {"serial.py": (10, 2100), "core.py": (5, 5)}
+    strategy = cmd._assign_strategy(["serial.py", "core.py"], file_meta, set())
+    assert strategy["serial.py"] in ("partial", "patch"), \
+        f"超预算文件应降级, got {strategy['serial.py']}"
+    assert strategy["core.py"] == "full", "小文件仍应拿 full (降级文件不占配额)"
+
+
+def test_assign_strategy_budget_stat_fail_keeps_full(monkeypatch, tmp_path):
+    """_stat_file_bytes 读不到 (-1) → 不拦截, 维持旧行为 (给 full)."""
+    cmd = _budget_cmd(tmp_path)
+    monkeypatch.setattr(cmd, "_stat_file_bytes", lambda fp: -1)
+
+    strategy = cmd._assign_strategy(["a.py"], {"a.py": (5, 100)}, set())
+    assert strategy["a.py"] == "full"
+
+
+def test_assign_strategy_budget_disabled_restores_full(monkeypatch, tmp_path):
+    """IMPROVE_FULL_SOURCE_MAX_BYTES<0 关闭防线 → 大文件恢复 full (旧行为)."""
+    import dataclasses
+    from reviewagent.config import config as _orig
+
+    cmd = _budget_cmd(tmp_path)
+    big = tmp_path / "serial.py"
+    big.write_bytes(b"x" * 90_000)
+
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=-1)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+
+    strategy = cmd._assign_strategy(["serial.py"], {"serial.py": (10, 2100)}, set())
+    assert strategy["serial.py"] == "full"
+
+
+def test_single_file_over_full_budget(monkeypatch, tmp_path):
+    """单文件早退拦截: 唯一文件超预算 → True; 预算内/多文件/读不到大小 → False."""
+    import dataclasses
+    from reviewagent.config import config as _orig
+
+    cmd = _budget_cmd(tmp_path)
+    big = tmp_path / "serial9560.py"
+    big.write_bytes(b"x" * 90_000)
+    small = tmp_path / "core.py"
+    small.write_bytes(b"x" * 100)
+
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=50_000)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+
+    # MR 1136 场景: 单文件 90KB + 2100 行 → 超预算
+    assert cmd._single_file_over_full_budget(
+        ["serial9560.py"], {"serial9560.py": (70, 2100)}) is True
+    # 单文件在预算内 → 不拦截
+    assert cmd._single_file_over_full_budget(
+        ["core.py"], {"core.py": (5, 5)}) is False
+    # 多文件 → 不适用 (走 strategy 路径)
+    assert cmd._single_file_over_full_budget(["a.py", "b.py"], {}) is False
+    # 读不到文件大小 → 不拦截 (维持旧行为)
+    assert cmd._single_file_over_full_budget(
+        ["missing.py"], {"missing.py": (5, 100)}) is False
+
+
+def test_call_agent_single_file_over_budget_routes_to_strategy(tmp_path, monkeypatch):
+    """MR 1136 端到端: 单文件超预算 → 不走基类整源码捷径, 走 strategy 路径降级.
+
+    修复前: 单文件 MR 直接 `super()._call_agent(ws)`, 基类 `_build_user_prompt`
+    无条件内嵌全部源码 → prompt 超 128KB → [Errno 7] Argument list too long.
+    """
+    from types import SimpleNamespace
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.llm.base import LLMResult
+    import dataclasses
+    from reviewagent.config import config as _orig
+
+    big = tmp_path / "serial9560.py"
+    big.write_bytes(b"x" * 90_000)  # 真实字节数 (MR 1136: 81KB 量级)
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.mr_iid = 999
+    cmd.ws = ws
+    cmd._last_oc_result = None
+    cmd.repo_context = ""
+
+    _cfg = dataclasses.replace(_orig, improve_full_source_max_bytes=50_000)
+    monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)
+
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {"serial9560.py": {1, 2, 3}})
+    monkeypatch.setattr(cmd, "_read_file_line_count", lambda fp, w: 2100)
+    monkeypatch.setattr(cmd, "_read_file_lines", lambda fp: ["x"] * 2100)
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {
+        fp: f"diff --git a/{fp} b/{fp}\n+new\n" for fp in files
+    })
+    monkeypatch.setattr(cmd, "_collect_cross_file_refs_for_mr", lambda files, dbf, wt: {
+        fp: [] for fp in files
+    })
+
+    captured_prompt: list[str] = []
+
+    def _fake_chunk(prompt, w, fp):
+        captured_prompt.append(prompt)
+        return LLMResult(
+            data={"summary_md": "", "suggestions": []},
+            prompt_tokens=10, completion_tokens=5, model="test",
+        )
+
+    monkeypatch.setattr(cmd, "_call_chunk", _fake_chunk)
+
+    # 基类捷径的 prompt 构造不应被调 (调了说明早退未被拦截)
+    def _no_base_prompt():
+        raise AssertionError("超预算单文件不应走基类整源码路径")
+
+    monkeypatch.setattr(cmd, "_build_user_prompt", _no_base_prompt)
+
+    result = cmd._call_agent(ws)
+
+    # strategy 路径产出结构正常
+    assert "summary_md" in result
+    assert "suggestions" in result
+    # chunk prompt 已降级: 不含 full 模式的完整源码段
+    assert len(captured_prompt) == 1, "单文件 → 1 次 LLM 调用"
+    assert "完整源码" not in captured_prompt[0], "prompt 不应再内嵌完整源码"
