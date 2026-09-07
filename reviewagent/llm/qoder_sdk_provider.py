@@ -112,6 +112,15 @@ def _build_options(
         "disallowed_tools": list(disallowed_tools),
         "auth": access_token(token=pat),
     }
+    # 代理环境变量透传: 旧 subprocess 模式天然继承父进程 env, SDK 模式需显式传
+    # 避免 ci-runner 依赖代理出网时切 SDK 后连不上
+    import os
+    proxy_env = {}
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        if val := os.environ.get(key):
+            proxy_env[key] = val
+    if proxy_env:
+        kwargs["env"] = proxy_env
     if cli_path:
         kwargs["cli_path"] = cli_path
     if max_turns and max_turns > 0:
@@ -252,7 +261,11 @@ def _map_sdk_exception(e: QoderSDKError) -> QoderCLIError:
         UnsupportedCliCapabilityError,
     )
     # MessageParseError 未导出到顶层, 从 _errors 直接拿
-    from qoder_agent_sdk._errors import MessageParseError
+    # 防御性导入: 未来 SDK 版本可能移动/改名, 拿不到就跳过该分支
+    try:
+        from qoder_agent_sdk._errors import MessageParseError
+    except ImportError:
+        MessageParseError = None  # type: ignore[assignment,misc]
 
     # SDK 异常类的 .code 属性 (e.g. "auth_not_configured")
     sdk_machine_code = getattr(e, "code", None)
@@ -335,7 +348,7 @@ def _map_sdk_exception(e: QoderSDKError) -> QoderCLIError:
             capability=capability,
             retryable=False,  # 升级 qodercli 后才行
         )
-    if isinstance(e, MessageParseError):
+    if MessageParseError is not None and isinstance(e, MessageParseError):
         return QoderCLIOutputError(
             f"qoder-sdk message parse error: {e}",
             error_code="message_parse_error",
@@ -562,7 +575,7 @@ class QoderSDKProvider:
                 timeout=actual_timeout, tolerant_markdown=tolerant_markdown,
                 add_dirs=None, model_override=None,
             )
-        except QoderCLIOutputError as e:
+        except (QoderCLIOutputError, QoderCLITimeoutError) as e:
             # 主模型失败时尝试 fallback（与原 QoderCLIProvider 行为一致）
             if not self._fallback_model or self._fallback_model == self._model:
                 raise
