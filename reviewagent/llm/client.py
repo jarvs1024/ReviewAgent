@@ -33,12 +33,18 @@ def get_client() -> BaseLLMProvider:
         logger.info("llm.client init provider=opencode")
         _client = OpencodeProvider()
     elif name == "qodercli":
+        # 旧 subprocess 路径（保留兜底，建议尽快切到 qoder-sdk）
         from reviewagent.llm.qodercli_provider import QoderCLIProvider  # lazy import
-        logger.info("llm.client init provider=qodercli")
+        logger.info("llm.client init provider=qodercli (subprocess fallback)")
         _client = QoderCLIProvider()
+    elif name == "qoder-sdk":
+        # 推荐路径：qoder-agent-sdk 替换 subprocess
+        from reviewagent.llm.qoder_sdk_provider import QoderSDKProvider  # lazy import
+        logger.info("llm.client init provider=qoder-sdk")
+        _client = QoderSDKProvider()
     else:
         raise ValueError(
-            f"unknown LLM_PROVIDER={name!r}; expected 'opencode' or 'qodercli'"
+            f"unknown LLM_PROVIDER={name!r}; expected 'opencode' | 'qodercli' | 'qoder-sdk'"
         )
 
     # C3: provider init 计入 metric (用于对比 opencode vs qodercli 流量比例)

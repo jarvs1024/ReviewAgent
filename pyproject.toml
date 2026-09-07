@@ -21,6 +21,8 @@ dependencies = [
     "loguru>=0.7",
     # 提示词 frontmatter
     "python-frontmatter>=1.1",
+    # qoder-agent-sdk (LLM Provider 适配层，替代旧 qodercli subprocess)
+    "qoder-agent-sdk>=1.0.0",
     # 工具
 ]
 

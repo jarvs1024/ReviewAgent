@@ -158,6 +158,95 @@ reviewagent/
 
 ---
 
+## LLM Provider 迁移 (qodercli → qoder-sdk)
+
+> **2026-09 起, 默认 LLM Provider 从 `qodercli`（subprocess）切到 `qoder-sdk`（qoder-agent-sdk）**.
+
+### 背景
+
+旧的 `qodercli -p` subprocess 模式 (qodercli_subprocess.py, 19k 字节) 累积了大量
+JSON 解析补丁（`_strip_line_number_prefix` / `_extract_inner_json` / `_strip_fence` /
+`_unwrap_markdown_wrapper`）应对 DeepSeek-V4-Flash 输出抖动；近 6 个月打 8+ 次补丁。
+详见 [docs/LLM_PROVIDER_ADAPTER.md](docs/LLM_PROVIDER_ADAPTER.md) 的 `migration` 段。
+
+`qoder-agent-sdk` (qoder 官方 Python SDK) 直接提供 `query()` 异步迭代 + 结构化
+`ResultMessage`，干掉全部解析补丁；真 token / 真 credits / 真实 context 占比一并
+带回。
+
+### 切换步骤
+
+1. **装包**：`pip install qoder-agent-sdk>=1.0.0`（已加 `pyproject.toml`）
+2. **改 env**（`LLM_PROVIDER=qoder-sdk` + `QODER_SDK_PAT=...`）:
+   ```bash
+   # 必填 (PAT 替代 qodercli login 状态)
+   QODER_SDK_PAT=pt-44qo...
+   LLM_PROVIDER=qoder-sdk
+   # 可选 — 留空走默认值
+   QODER_SDK_CLI_PATH=                 # 空 → PATH 找 qodercli
+   QODER_SDK_MODEL=                    # 空 → QODERCLI_MODEL (默认 Lite)
+   QODER_SDK_FALLBACK_MODEL=           # 主模型失败时切换
+   QODER_SDK_TIMEOUT=600               # 单次 query 超时 (秒)
+   QODER_SDK_MAX_TURNS=0               # 0=不传
+   QODER_SDK_PERMISSION_MODE=          # default/acceptEdits/plan/bypassPermissions/yolo/dontAsk/auto
+   QODER_SDK_DISALLOWED_TOOLS=write,edit,bash,webfetch,websearch
+   ```
+3. **无需改任何业务代码**：`commands/describe.py` / `commands/improve.py` / `workers/tasks.py` / `reporting/collectors/*.py` **零改动**，全部走 `get_client().run(...)` 抽象。
+
+### 字段映射（subprocess → SDK）
+
+| subprocess 模式 (`qodercli -p ...`) | SDK 模式 (`QoderAgentOptions`) |
+|---|---|
+| `--model Lite` | `options.model = "Lite"` |
+| `--append-system-prompt {agent.md 内容}` | `options.system_prompt = loader.load(agent)["prompt"]` |
+| `--disallowed-tools write,edit,bash,webfetch,websearch` | `options.disallowed_tools = [...]` |
+| `-w {workdir}` | `options.cwd = str(workdir)` |
+| `--attachment {tmp_diff}` | `options.add_dirs = [workdir]` (diff.patch 已在 workdir) |
+| `--no-session-persistence` | SDK 默认即无持久化，无需传 |
+| `proc.returncode` + `proc.stderr` 错误判断 | `ResultMessage.subtype` + `is_error` + `errors` |
+| `usage.context_usage_ratio` 代理 | `AssistantMessage.usage.context_usage_ratio` 真值 |
+| `total_credits` 兜底 | `ResultMessage.total_credits` + `model_usage` |
+| 拿不到 `input_tokens` (dfmodel) | `AssistantMessage.usage.input_tokens` 真值 + `cache_creation_input_tokens` / `cache_read_input_tokens` |
+
+### 错误处理架构
+
+**SDK 11 类异常 → ReviewAgent 3 类异常**, 完整映射在 [`qoder_sdk_provider._map_sdk_exception`](reviewagent/llm/qoder_sdk_provider.py):
+
+| SDK 异常 | ReviewAgent 异常 |
+|---|---|
+| `CLIJSONDecodeError` | `QoderCLIOutputError` (JSON 解析失败) |
+| `ModelPolicyTimeoutError` | `QoderCLITimeoutError` (模型策略 callback 超时) |
+| `CLINotFoundError` / `ProcessError` / `CLIConnectionError` | `QoderCLIError` (qodercli 进程/连接问题) |
+| `AuthNotConfiguredError` / `AuthAccessTokenEnvVarError` / `AuthServiceAccountEnvVarError` | `QoderCLIError` (鉴权失败) |
+| `CloudAgentApiError` / `CloudAgentUnsupportedAuthError` | `QoderCLIError` (云端 agent 错误) |
+| `UnsupportedCliCapabilityError` | `QoderCLIError` (qodercli 版本太旧) |
+| 任何 `QoderSDKError` 子类 (含未列出的) | `QoderCLIError` (catchall) |
+| `asyncio.TimeoutError` | `QoderCLITimeoutError` |
+
+**ResultMessage 错误细分**:
+- `subtype=error_during_execution` + `is_error=True` → **直接 raise** `QoderCLIError` (上层不会拿到半截结果)
+- `subtype=error_max_turns` + `is_error=True` → **log warning, 返回部分数据** (agent 跑满 max_turns 但仍产出部分 JSON, 上层拿到能解析就用)
+- `subtype=success` + `is_error=False` → **正常返回** `LLMResult`
+
+**上层 catch 块不变** (`BaseCommand.run`): `except (QoderCLITimeoutError, QoderCLIOutputError, QoderCLIError)` → 包成 `BaseCommandError`。
+
+### 兜底 / 回退
+
+SDK 路径出问题时, **不需要改代码**, env 切回旧路径即可:
+```bash
+LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
+```
+两条路径共享同一个 `BaseLLMProvider` 接口 + `LLMResult` 数据结构, 业务代码零感知.
+
+### 验证状态
+
+- **399 单元测试通过** (含 22 个新加的 SDK 错误传播测试, `tests/test_qoder_sdk_provider_errors.py`)
+- **E2E 验证**: 真实 GitLab MR 318/319 (`http://127.0.0.1:8929/root/auto-review-test`) 全跑通:
+  - `/describe` 21s 改标题 + 描述, credits 0.0352
+  - `/improve` 103s 发 2 条 inline DiffNote + 顶部总览 + 检视汇总表, credits 0.1263
+- **3 个 pre-existing 失败** (`test_telemetry_section_render.py` 3 个) 在 main 上也失败, 与本次迁移无关
+- **6 个集成测试超时** (`test_auto_detect_*` / `test_dedup_*` / `test_last_activity_at` / `test_webhook_diff_head_lock`) 需真实 GitLab/Redis 服务, 本机跑不完
+
+
 ## 快速开始
 
 - 服务器部署 → 见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
@@ -173,8 +262,9 @@ reviewagent/
 | 分组 | 变量 | 说明 |
 |---|---|---|
 | GitLab | `GITLAB_URL` `GITLAB_PERSONAL_ACCESS_TOKEN` `GITLAB_WEBHOOK_SECRET` `GITLAB_BOT_USERNAME` | 必填；PAT 最低 `api` scope |
-| LLM | `LLM_PROVIDER` `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | 默认 `qodercli`（subprocess）；切 `opencode` 走 HTTP API；`OPENCODE_TIMEOUT` 默认 900s |
-| QoderCLI | `QODERCLI_NODE_PATH` `QODERCLI_JS_PATH` `QODERCLI_MODEL` `QODERCLI_TIMEOUT` `QODERCLI_MAX_TURNS` `QODERCLI_PERMISSION_MODE` | qodercli subprocess 模式专属配置；路径留空自动探测 |
+| LLM | `LLM_PROVIDER` `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | **`qoder-sdk`（推荐）** / `qodercli`（旧 subprocess 兜底） / `opencode`（HTTP API 兜底）；详见 [LLM Provider 迁移](#llm-provider-迁移-qodercli--qoder-sdk) |
+| QoderSDK | `QODER_SDK_PAT` `QODER_SDK_CLI_PATH` `QODER_SDK_MODEL` `QODER_SDK_FALLBACK_MODEL` `QODER_SDK_TIMEOUT` `QODER_SDK_MAX_TURNS` `QODER_SDK_PERMISSION_MODE` `QODER_SDK_DISALLOWED_TOOLS` | **LLM_PROVIDER=qoder-sdk 时必填**；`QODER_SDK_PAT` 替换 `qodercli login` 状态；`QODER_SDK_CLI_PATH` 留空走 PATH，配置非空则严格校验；`QODER_SDK_MODEL` 默认 `Lite`（调试）/ `QODERCLI_MODEL`（生产） |
+| QoderCLI（旧） | `QODERCLI_NODE_PATH` `QODERCLI_JS_PATH` `QODERCLI_MODEL` `QODERCLI_TIMEOUT` `QODERCLI_MAX_TURNS` `QODERCLI_PERMISSION_MODE` `QODERCLI_FALLBACK_MODEL` | 仅 `LLM_PROVIDER=qodercli` 旧 subprocess 路径用，留作兜底；切到 qoder-sdk 后此组可忽略 |
 | Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` `RQ_WORKER_CLASS` | 队列名默认 `review`（周报队列 `review-weekly`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数；macOS 使用 `ReviewAgentSpawnWorker` 避免 RQ fork crash |
 | 存储 | `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` | 默认 `./data` |
 | 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过 |
@@ -194,7 +284,7 @@ reviewagent/
 ### 已完成
 - Phase 1 全套：骨架、污染防护、LLM 客户端、webhook 接入、RQ 任务、GitLab 客户端、`/describe` 端到端。
 - `/improve` + 可 Apply 的 inline suggestion（`/adopt` `/dismiss` + GitLab UI Apply 自动识别）。
-- LLM Provider 适配层（`reviewagent/llm/`）：qodercli subprocess（默认）+ opencode HTTP API，配置一键切换。
+- LLM Provider 适配层（`reviewagent/llm/`）：**qoder-sdk（qoder-agent-sdk，默认推荐）** + qodercli subprocess（旧路径兜底） + opencode HTTP API, 配置一键切换; SDK 异常完整映射到 3 个 ReviewAgent 异常类, 上层业务代码零改动.
 - Telemetry API（`/api/v1/telemetry/*`：health / runs / mr / suggestions / stats / timeline / metrics / dismissals / weekly-reports）。
 - 周报生成（JSON + MD，钉钉推送支持，默认 dry_run）。三段 LLM 调用。
 - 跨次建议去重（fingerprint）+ 跨文件引用分析 + 评分过滤。
@@ -207,7 +297,8 @@ reviewagent/
 ### 已知限制
 - LLM 调用为同步阻塞，单任务耗时 = 模型推理时间（实测 `/describe` ~25s，`/improve` 可达数分钟）。
 - diff 过大（> `MAX_DIFF_CHARS`）会跳过检视；prompt 内联 diff 截断到 `OPENCODE_MAX_DIFF_CHARS`，超出触发一次减半重试。
-- qodercli subprocess 模式每次调用启动新进程，有约 1-2s 启动开销（可接受）。
+- ~~qodercli subprocess 模式每次调用启动新进程，有约 1-2s 启动开销（可接受）。~~
+- **已迁移到 qoder-sdk**：每次 `query()` 走 SDK 协议，免去 subprocess 启动开销；JSON 解析补丁全部干掉（19k → 1k 行）；真 token / 真 credits / 真实 context 占比可用。
 
 ---
 
@@ -224,3 +315,4 @@ reviewagent/
 - [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — 本地开发 / 服务器运维
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — 服务器部署记录
 - [`docs/LLM_PROVIDER_ADAPTER.md`](docs/LLM_PROVIDER_ADAPTER.md) — LLM Provider 适配层设计与验证
+- [本 README 的 LLM Provider 迁移章节](#llm-provider-迁移-qodercli--qoder-sdk) — qodercli → qoder-sdk 切换指南 / 字段映射 / 错误处理

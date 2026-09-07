@@ -396,3 +396,67 @@ v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。�
 如果上游修了 stdin hang，新接入应该另起独立模块（不要再 import 这套旧代码），并在复测前先用最小单 case 验证 `agent_message_chunk` 不会卡死。
 
 回溯阅读：本文档即为完整实施记录。
+
+---
+
+## 附录 A: qodercli subprocess → qoder-sdk 切换 (2026-09-06)
+
+### A.1 为什么切换
+
+`qodercli -p` subprocess 模式 (`qodercli_subprocess.py`, 19k 字节) 累积 4 段 JSON 解析 hack
+(`_strip_line_number_prefix` / `_extract_inner_json` / `_strip_fence` / `_unwrap_markdown_wrapper`)
+应对 DeepSeek-V4-Flash 输出抖动。近 6 个月打 8+ 次补丁（`git log` 数据），每一段都是 LLM
+输出形态变化的兜底。
+
+`qoder-agent-sdk` (qoder 官方 Python SDK) 直接给结构化 `ResultMessage`，干掉全部解析补丁。
+
+### A.2 字段映射（subprocess → SDK）
+
+| subprocess CLI flag | SDK `QoderAgentOptions` 字段 | 备注 |
+|---|---|---|
+| `--model Lite` | `model = "Lite"` | 完全相同 |
+| `--append-system-prompt {md 内容}` | `system_prompt = md 内容` | SDK 支持 string 或 `{"type": "file", "path": "..."}` |
+| `--disallowed-tools write,edit,bash,webfetch,websearch` | `disallowed_tools = [...]` | SDK 用 list 不用 csv string |
+| `-w {workdir}` | `cwd = str(workdir)` | 相同 |
+| `--attachment {tmp_diff}` | `add_dirs = [workdir]` | SDK 没有 attachment, 通过 workdir + Read 工具访问 |
+| `--no-session-persistence` | (无需传) | SDK 默认无持久化 |
+| `--permission-mode {mode}` | `permission_mode = "{mode}"` | 值集合: default/acceptEdits/plan/bypassPermissions/yolo/dontAsk/auto |
+| `--max-turns {N}` | `max_turns = N` | 0=不传 |
+
+### A.3 异常映射表 (SDK 11 类 → ReviewAgent 3 类)
+
+| SDK 异常 (`qoder_agent_sdk`) | ReviewAgent 异常 | 触发场景 |
+|---|---|---|
+| `CLIJSONDecodeError` | `QoderCLIOutputError` | qodercli stdout 不是 JSON |
+| `ModelPolicyTimeoutError` | `QoderCLITimeoutError` | `resolve_model` callback 超时 |
+| `CLINotFoundError` | `QoderCLIError` | qodercli binary 找不到 (PATH 上没有) |
+| `ProcessError` | `QoderCLIError` | qodercli 进程异常退出 / signal |
+| `CLIConnectionError` | `QoderCLIError` | 连接 qodercli 失败 |
+| `AuthNotConfiguredError` | `QoderCLIError` | 未配置鉴权 |
+| `AuthAccessTokenEnvVarError` | `QoderCLIError` | `QODER_PERSONAL_ACCESS_TOKEN` 未设 |
+| `AuthServiceAccountEnvVarError` | `QoderCLIError` | `QODER_SERVICE_ACCOUNT_KEY` 未设 |
+| `CloudAgentApiError` | `QoderCLIError` | 云端 agent API 5xx |
+| `CloudAgentUnsupportedAuthError` | `QoderCLIError` | 云端 agent 鉴权不支持 |
+| `UnsupportedCliCapabilityError` | `QoderCLIError` | qodercli 版本太老, 缺能力 |
+| 任何 `QoderSDKError` 子类 (含未列出的) | `QoderCLIError` (catchall) | 升级 SDK 引入新类时兜底 |
+| `asyncio.TimeoutError` | `QoderCLITimeoutError` | SDK query 超时 |
+
+`ResultMessage.is_error=True` 的两种细分:
+- `subtype=error_during_execution` → **直接 raise** `QoderCLIError`, 上层不会拿到半截结果
+- `subtype=error_max_turns` → **log warning + 返回部分数据** (agent 跑满 `max_turns` 但仍产出部分 JSON)
+
+### A.4 单元测试覆盖 (`tests/test_qoder_sdk_provider_errors.py`)
+
+- 12 个 `_map_sdk_exception` 单测 (每个 SDK 异常类一个, 含 catchall)
+- 1 个防回归护栏: 遍历 SDK 所有 `QoderSDKError` 子类, 确保每个都能映射到 3 个 ReviewAgent 异常类
+- 6 个 `_drive()` 路径覆盖: `error_during_execution` raise / `error_max_turns` 返回部分 / `success` 正常 / SDK 异常映射 / tolerant_markdown 兜底 / 非 JSON 严格模式 raise
+- 3 个 `_resolve_cli_path` 严格性测试: 显式路径不存在必须报错 (不静默 fallback PATH)
+
+### A.5 验证结果
+
+| 项 | 状态 |
+|---|---|
+| 22 个新单元测试 | 全过 |
+| 全套单元测试 | 399 过 / 3 失败 (pre-existing) / 6 超时 (集成测试) / 3 跳过 |
+| E2E MR 318 (空 diff) | describe 改标题, improve 跳过 (无 diff) |
+| E2E MR 319 (含 3 个 bug) | describe 21s 改标题+描述, improve 103s 发 2 条 inline + 顶部总览 + 检视汇总表 |
