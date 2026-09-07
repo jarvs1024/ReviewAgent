@@ -460,3 +460,99 @@ v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。�
 | 全套单元测试 | 399 过 / 3 失败 (pre-existing) / 6 超时 (集成测试) / 3 跳过 |
 | E2E MR 318 (空 diff) | describe 改标题, improve 跳过 (无 diff) |
 | E2E MR 319 (含 3 个 bug) | describe 21s 改标题+描述, improve 103s 发 2 条 inline + 顶部总览 + 检视汇总表 |
+
+### A.6 错误诊断字段 (since 2026-09-07)
+
+上层 (`BaseCommand.run` / `commands/_common.py`) 仍只 `except (QoderCLITimeoutError, QoderCLIOutputError, QoderCLIError)`，
+但每个异常实例现在带结构化诊断字段，方便：
+
+- Sentry / 报告层直接读字段，不解析 `str(exc)` 字符串
+- 上层根据 `retryable` 决定是否重试
+- 排障时按 `session_id` 去 qodercli 端拉日志
+- 按 `error_code` 路由（鉴权失败 / 配额 / 政策拒绝 / 瞬时不可用）
+
+#### 字段表
+
+| 字段 | 类型 | 来源 | 用途 |
+|---|---|---|---|
+| `error_code` | `str \| None` | 从 `ResultMessage.errors[0]` 解析 `"code: msg"` 前缀；或 SDK 异常类内置 | 机器可读错误码；上层路由 |
+| `machine_code` | `str \| None` | SDK 异常类 `.code` 属性 (e.g. `auth_not_configured`) | SDK 视角的语义 code |
+| `session_id` | `str \| None` | `ResultMessage.session_id` | qodercli 端日志关联 |
+| `subtype` | `str \| None` | `ResultMessage.subtype` (`success` / `error_max_turns` / `error_during_execution`) | 区分 partial vs hard failure |
+| `original_errors` | `tuple[str, ...] \| None` | `ResultMessage.errors` 原文 | 上层拼到 issue / 报告模板 |
+| `exit_code` | `int \| None` | `ProcessError.exit_code` | qodercli 进程退出码 |
+| `status_code` | `int \| None` | `CloudAgentApiError.status` | 云端 API HTTP 状态 |
+| `capability` | `str \| None` | `UnsupportedCliCapabilityError.capability` | 提示用户升级 qodercli |
+| `timeout_ms` | `int \| None` | `ModelPolicyTimeoutError.timeout_ms` / asyncio 超时 (秒 * 1000) | 超时相关 |
+| `retryable` | `bool \| None` | 按错误码分类 (见下表) | 上层是否自动重试 |
+| `extra` | `dict \| None` | 兜底 (e.g. `env_var` 名 / `data_keys`) | 调试用 |
+
+`QoderCLIError(message, **fields)` 构造时所有字段都用 keyword-only 默认 `None`，
+老的 `QoderCLIError("msg")` 调用方式（subprocess 路径仍用）完全兼容。
+
+#### `error_code` / `retryable` 决策表（qodercli wire protocol 层）
+
+| error_code | 含义 | retryable |
+|---|---|---|
+| `105` | 鉴权失败 / token 过期 | `False` |
+| `110`, `113`–`122` | 余额 / 配额 / 计费 | `False` |
+| `406`, `416`, `430` | 请求被拒 (policy) | `False` |
+| `500`, `10408`, `10500` | 服务暂时不可用 | `True` |
+| `47902` | 超过 `max_turns` | `False`（拉大 `max_turns` 才能恢复） |
+| `100400`–`100403` | 自定义模型相关 | `False` |
+| `auth_not_configured` / `auth_*_env_var_not_configured` | SDK 鉴权配置缺失 | `False` |
+| `cli_not_found` | qodercli binary 找不到 | `False`（用户手动装） |
+| `unsupported_cli_capability` | qodercli 版本太老 | `False`（升级 qodercli） |
+| `cloud_agent_5xx` (e.g. `cloud_agent_503`) | 云端 API 5xx | `True` |
+| `cloud_agent_4xx` (e.g. `cloud_agent_401`) | 云端 API 4xx | `False` |
+| `model_policy_timeout` | `resolve_model` callback 超时 | `True`（拉长 timeout） |
+| `sdk_timeout` | asyncio query 超时 | `True`（拉长 timeout） |
+| `output_not_json` | stdout 不是 JSON | `False`（重试不会变好） |
+| `message_parse_error` | SDK message 解析失败 | `False` |
+| `qoder_sdk_unknown` | 未列出的 SDK 异常 | `None`（让上层决策） |
+| `cli_process_error` (exit_code >= 1) | qodercli 主动返回错误 | `False` |
+| `cli_process_error` (exit_code < 0) | 子进程被信号杀 | `True`（环境瞬时） |
+| `cli_process_error` (exit_code is None) | 子进程没起来 | `True`（环境瞬时） |
+
+#### 错误日志格式
+
+每次 raise 前都会先调用 `qoder_sdk.error` 结构化日志（`logger.error` 而非 `exception`，避免双 stack trace），
+关键字段：`error_code` / `machine_code` / `session_id` / `subtype` / `exit_code` / `status_code` / `retryable` / SDK 版本号。
+上层 Sentry / Logtail 直接读这些字段做告警路由。
+
+```python
+# 上层使用示例:
+try:
+    result = client.run(...)
+except QoderCLITimeoutError as e:
+    if e.retryable:
+        schedule_retry()       # e.g. asyncio timeout, 5xx
+    else:
+        alert_ops(e.to_dict()) # e.g. max_turns 需要拉大配置
+except QoderCLIError as e:
+    if e.error_code == "auth_failed":
+        notify_user_token_expired(e.extra.get("env_var"))
+    elif e.retryable is True:
+        schedule_retry()
+    else:
+        alert_ops(e.to_dict())
+```
+
+#### 测试覆盖
+
+`tests/test_qoder_sdk_provider_errors.py` 现共 **61 个测试** (22 原有 + 39 新增)：
+
+- **TestDiagnosticFields (14 个)** — 每个 SDK 异常映射后字段填充 (`error_code` / `retryable` / `exit_code` / `status_code` / `capability` / `original_errors` / `extra`)
+- **TestParseResultErrorCode (5 个)** — `_parse_result_error_code` 数字 / 字母 / 无前缀 / 空 / 多 errors 解析
+- **TestClassifyResultRetryable (13 个)** — `_classify_result_retryable` 参数化覆盖 8 个 permanent + 3 个 retryable + max_turns + unknown
+- **TestDriveResultMessageErrorFields (7 个)** — `_drive` 收到 `is_error=True` 时 raise 异常带 `error_code=105` / `retryable=True` (500) / `retryable=None` (无前缀) / `subtype` / `session_id`；`error_max_turns` 不 raise；SDK 异常映射字段；asyncio 超时 `timeout_ms=timeout*1000`；非 JSON 输出带 `subtype + session_id`
+
+### A.7 验证结果 (after 错误处理完善)
+
+| 项 | 状态 |
+|---|---|
+| 61 个错误传播 + 字段测试 | 全过 |
+| 全套单元测试 (排除 pre-existing 7 失败) | 501 过 / 7 pre-existing 失败 |
+| `QoderCLIError("msg")` backward compat | 验证过 (subprocess 路径仍可用) |
+| `to_dict()` 不输出 None 字段 | 验证过 (payload 干净) |
+| 凭据 (PAT) 不进入 `to_dict()` 字段 | 验证过 (`extra` 不存 token 字面值) |
