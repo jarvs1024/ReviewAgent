@@ -290,7 +290,7 @@ async def list_weekly_reports(
                     continue
             except (json.JSONDecodeError, OSError):
                 continue
-        files.append({"name": p.name, "path": str(p), "size": p.stat().st_size,
+        files.append({"name": p.name, "path": str(p), "url": f"/api/v1/telemetry/weekly-reports/{p.name}", "size": p.stat().st_size,
                       "modified": p.stat().st_mtime})
     return {"total": len(files), "reports": files[:limit]}
 
