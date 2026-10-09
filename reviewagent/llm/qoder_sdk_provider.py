@@ -17,26 +17,24 @@ API (``query()`` + ``QoderAgentOptions``) 调用本地 qodercli CLI，但由 SDK
 Auth：``QODER_SDK_PAT``（Qoder Personal Access Token），由 ``qodercli login`` 迁出，
 不依赖本机 ``~/.qoder`` 目录登录态。
 
+Edition：``QODER_SDK_EDITION``（``intl``=国际版 ``qoder-agent-sdk``，``cn``=国内版
+``qodercn-agent-sdk``）。两包顶层模块名不同但 API 同名，可同时安装，import 期按配置
+选择（参考 QoderServer ``py/src/sdk.py`` 的双包方案）；CLI 查找（qodercli vs
+qoderclicn）与 token 环境变量名（``QODER_`` vs ``QODERCN_``）由各包 ``_brand`` 决定，
+宿主代码零分支。
+
 调试模型：默认 ``Lite``，与原 subprocess 模式 ``QODERCLI_MODEL=Lite`` 保持一致。
 """
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import re
 import shutil
 import time
 from pathlib import Path
 from typing import Any
-
-from qoder_agent_sdk import (
-    QoderAgentOptions,
-    QoderSDKError,
-    ResultMessage,
-    TextBlock,
-    access_token,
-    query,
-)
 
 from reviewagent.config import config
 from reviewagent.llm.base import LLMResult, _strip_fence
@@ -49,6 +47,42 @@ from reviewagent.logging_setup import logger
 from reviewagent.prompts import loader
 
 
+# ---------------------------------------------------------------------------
+# SDK 品牌（国际版 / 国内版）选择
+# ---------------------------------------------------------------------------
+
+
+# 国内版/国际版 SDK 包名不同但 API 同名，可同时安装，按 QODER_SDK_EDITION 在运行期选择
+# （参考 QoderServer py/src/sdk.py 的 _EDITIONS 方案）。
+_EDITIONS = {"cn": "qodercn_agent_sdk", "intl": "qoder_agent_sdk"}
+
+
+def load_sdk(edition: str):
+    """按 edition 加载对应品牌的 qoder agent SDK 模块；未知值抛 QoderCLIError."""
+    mod_name = _EDITIONS.get((edition or "").strip().lower())
+    if mod_name is None:
+        raise QoderCLIError(
+            f"unknown QODER_SDK_EDITION: {edition!r} (expected one of {sorted(_EDITIONS)})"
+        )
+    return importlib.import_module(mod_name)
+
+
+def _resolve_sdk_module():
+    return load_sdk(getattr(config, "qoder_sdk_edition", "") or "intl")
+
+
+# import 期解析一次：config 在模块顶部已加载，edition 配错则启动即报错。
+# 异常类/类型取自所选品牌模块 —— cn/intl 包的类互不 isinstance，不可混用。
+_sdk = _resolve_sdk_module()
+
+QoderAgentOptions = _sdk.QoderAgentOptions
+QoderSDKError = _sdk.QoderSDKError
+ResultMessage = _sdk.ResultMessage
+TextBlock = _sdk.TextBlock
+access_token = _sdk.access_token
+query = _sdk.query
+
+
 # 默认模型；与 .env.example QODERCLI_MODEL=Lite 保持一致，调试用 Lite。
 DEFAULT_MODEL = "Lite"
 
@@ -58,12 +92,14 @@ DEFAULT_MODEL = "Lite"
 # ---------------------------------------------------------------------------
 
 
-def _resolve_cli_path(cli_path: str) -> str:
-    """解析 qodercli 可执行文件路径.
+def _resolve_cli_path(cli_path: str, cli_commands: tuple[str, ...] = ("qodercli",)) -> str:
+    """解析 qoder CLI 可执行文件路径.
 
     优先级:
       1. 如果 QODER_SDK_CLI_PATH 非空 → 严格用该路径, 不存在则 raise (不静默 fallback)
-      2. 如果 QODER_SDK_CLI_PATH 为空 → shutil.which("qodercli")
+      2. 如果 QODER_SDK_CLI_PATH 为空 → shutil.which 逐个尝试 cli_commands
+         (intl 版是 ("qodercli", "qoder"), cn 版是 ("qoderclicn", "qodercn"),
+          取自所选 SDK 包 _brand.CLI_COMMANDS, 见 _brand_cli_commands)
       3. 都找不到 → 返回空, __init__ 负责报错
 
     为什么严格: 如果用户显式配了某个路径 (比如 staging 上是 /opt/qodercli/build/qodercli),
@@ -76,8 +112,17 @@ def _resolve_cli_path(cli_path: str) -> str:
                 f"explicit path must exist (no PATH fallback)"
             )
         return cli_path
-    found = shutil.which("qodercli")
-    return found or ""
+    for name in cli_commands:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
+def _brand_cli_commands() -> tuple[str, ...]:
+    """从所选品牌 SDK 的 _brand 取 CLI 命令名；拿不到时回退国际版名字."""
+    cmds = getattr(getattr(_sdk, "_brand", None), "CLI_COMMANDS", None)
+    return tuple(cmds) if cmds else ("qodercli",)
 
 
 def _build_options(
@@ -253,17 +298,22 @@ def _map_sdk_exception(e: QoderSDKError) -> QoderCLIError:
     详细子类信息（错误码 / CLI 退出码 / stderr 摘要）会附在异常消息 + 字段里，
     便于上层 (BaseCommand.run / logger / Sentry) 直接用, 不必再 str(exc).
     """
-    from qoder_agent_sdk import (  # local import
-        CLIJSONDecodeError, CLINotFoundError, ProcessError,
-        ModelPolicyTimeoutError,
-        AuthNotConfiguredError, AuthAccessTokenEnvVarError, AuthServiceAccountEnvVarError,
-        CloudAgentApiError, CloudAgentUnsupportedAuthError,
-        UnsupportedCliCapabilityError,
-    )
+    # 异常类全部取自当前品牌 SDK 模块 (cn/intl 包的异常类互不 isinstance, 不可混用)
+    CLIJSONDecodeError = _sdk.CLIJSONDecodeError
+    CLINotFoundError = _sdk.CLINotFoundError
+    ProcessError = _sdk.ProcessError
+    ModelPolicyTimeoutError = _sdk.ModelPolicyTimeoutError
+    AuthNotConfiguredError = _sdk.AuthNotConfiguredError
+    AuthAccessTokenEnvVarError = _sdk.AuthAccessTokenEnvVarError
+    AuthServiceAccountEnvVarError = _sdk.AuthServiceAccountEnvVarError
+    CloudAgentApiError = _sdk.CloudAgentApiError
+    CloudAgentUnsupportedAuthError = _sdk.CloudAgentUnsupportedAuthError
+    UnsupportedCliCapabilityError = _sdk.UnsupportedCliCapabilityError
     # MessageParseError 未导出到顶层, 从 _errors 直接拿
     # 防御性导入: 未来 SDK 版本可能移动/改名, 拿不到就跳过该分支
     try:
-        from qoder_agent_sdk._errors import MessageParseError
+        _errors_mod = importlib.import_module(f"{_sdk.__name__}._errors")
+        MessageParseError = getattr(_errors_mod, "MessageParseError", None)
     except ImportError:
         MessageParseError = None  # type: ignore[assignment,misc]
 
@@ -450,11 +500,7 @@ def _classify_result_retryable(error_code: str | None, subtype: str | None) -> b
 
 
 # qodercli / SDK 版本号, 给错误日志加上下文
-try:
-    import qoder_agent_sdk as _qas
-    _SDK_VERSION: str | None = getattr(_qas, "__version__", None)
-except Exception:  # noqa: BLE001
-    _SDK_VERSION = None
+_SDK_VERSION: str | None = getattr(_sdk, "__version__", None)
 
 
 def _log_sdk_error(
@@ -510,11 +556,15 @@ class QoderSDKProvider:
                 "(set QODER_SDK_PAT in .env)"
             )
         self._pat = config.qoder_sdk_pat
-        self._cli_path = _resolve_cli_path(config.qoder_sdk_cli_path)
+        self._cli_path = _resolve_cli_path(
+            config.qoder_sdk_cli_path, _brand_cli_commands()
+        )
         if not self._cli_path:
             raise QoderCLIError(
-                "qodercli executable not found on PATH "
-                "(set QODER_SDK_CLI_PATH or install qodercli)"
+                "qoder CLI executable not found on PATH "
+                f"(edition={config.qoder_sdk_edition!r}, "
+                f"tried {_brand_cli_commands()}; "
+                "set QODER_SDK_CLI_PATH or install the CLI)"
             )
         # model 优先级：QODER_SDK_MODEL > QODERCLI_MODEL > 默认 Lite
         self._model = (

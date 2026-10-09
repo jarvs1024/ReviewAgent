@@ -58,7 +58,8 @@ class Config:
     # SDK 通过 PAT (Qoder Personal Access Token) 鉴权，不再依赖本地 qodercli login 状态。
     # 通过 LLM_PROVIDER=qoder-sdk 切到 SDK；保留 qodercli 字段是为了旧路径兜底/灰度。
     qoder_sdk_pat: str = ""                    # PAT (QODER_SDK_PAT)；切换 LLM_PROVIDER=qoder-sdk 时必填
-    qoder_sdk_cli_path: str = ""              # qodercli 可执行文件绝对路径；空则 shutil.which("qodercli")
+    qoder_sdk_edition: str = "intl"            # SDK 品牌: intl=国际版(qoder-agent-sdk) / cn=国内版(qodercn-agent-sdk)
+    qoder_sdk_cli_path: str = ""              # qodercli 可执行文件绝对路径；空则按 edition 的 CLI 命令名查 PATH
     qoder_sdk_model: str = ""                  # 主模型；空则回落 qodercli_model
     qoder_sdk_fallback_model: str = ""         # 备用模型；主模型失败时自动切换
     qoder_sdk_timeout: int = 600               # 单次 query 超时（秒），与 asyncio.wait_for 配合
@@ -209,6 +210,7 @@ class Config:
             qodercli_max_turns=int(_env("QODERCLI_MAX_TURNS", "20")),
             qodercli_fallback_model=_env("QODERCLI_FALLBACK_MODEL", ""),
             qoder_sdk_pat=_env("QODER_SDK_PAT", ""),
+            qoder_sdk_edition=_env("QODER_SDK_EDITION", "intl").lower(),
             qoder_sdk_cli_path=_env("QODER_SDK_CLI_PATH", ""),
             qoder_sdk_model=_env("QODER_SDK_MODEL", ""),
             qoder_sdk_fallback_model=_env("QODER_SDK_FALLBACK_MODEL", ""),
