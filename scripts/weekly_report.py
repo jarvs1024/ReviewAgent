@@ -30,7 +30,24 @@ from reviewagent.logging_setup import setup_logging  # noqa: E402
 from reviewagent.reporting.config import WeeklyReportConfig  # noqa: E402
 from reviewagent.reporting.runner import run_weekly_job  # noqa: E402
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "weekly_reports"
+# ⚠️ 输出目录的**唯一事实源**是 config.weekly_reports_dir (= config.data_dir / "weekly_reports"),
+#    不是这个仓库里的 ./data/weekly_reports —— 两者在 systemd 部署下**不是同一个目录**:
+#      · API (reviewagent/api/router.py) 读的是 config.weekly_reports_dir
+#        = REVIEWAGENT_DATA_DIR (默认 /home/workflow/data) / "weekly_reports"
+#      · 之前这里硬编码 REPO_ROOT/"data"/"weekly_reports"
+#        = /home/workflow/ReviewAgent/data/weekly_reports  ← systemd CWD 下的相对路径
+#    结果: 定时器生成的周报写进了 A 目录, API 去 B 目录读 → 前端永远只看到旧周报
+#    (2026-11-06 实测: W39~W44 全落在 ReviewAgent/data/, API 只看得到 W37)
+#
+#    所以这里**不再**自己拼路径, 统一从 config 取 (config 读同一个 env,
+#    API 和 worker 因此指向同一个绝对路径)。
+def _default_output_dir() -> Path:
+    """默认输出目录 = config.weekly_reports_dir (与 API 读取路径一致)."""
+    from reviewagent.config import config as _config
+    return _config.weekly_reports_dir
+
+
+DEFAULT_OUTPUT_DIR = _default_output_dir()
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,11 +74,19 @@ def main() -> int:
         from reviewagent.workers.tasks import enqueue_weekly_report
         job_id = enqueue_weekly_report(
             week_offset=args.week_offset,
+            # ⚠️ 这里传 config 的绝对路径, **不要**传仓库内的相对路径:
+            #    worker 侧的 run_weekly_job 里是 `output_dir or _main_config.weekly_reports_dir`
+            #    —— 只要 output_dir 不是 None, 那个 config 分支就**永远走不到**,
+            #    于是写盘路径由**入队时**决定, 而不是由 worker 当时的 config 决定。
+            #    (2026-11-06 实测: 之前硬塞 REPO_ROOT/"data"/"weekly_reports",
+            #     job 落进 /home/workflow/ReviewAgent/data/, 而 API 读 /home/workflow/data/,
+            #     差了一整个目录 → 前端停在 W37, 实际最新是 W44)
             output_dir=str(DEFAULT_OUTPUT_DIR),
             push=args.push,
             project_id=args.project_id,
         )
         print(f"[ok] enqueued weekly_report job={job_id} (worker will run it)")
+        print(f"[ok] output_dir={DEFAULT_OUTPUT_DIR}")
         return 0
 
     cfg = WeeklyReportConfig.from_env()

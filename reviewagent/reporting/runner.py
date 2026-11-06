@@ -120,8 +120,39 @@ def run_weekly_job(
     # 之前用 Path("data/weekly_reports") 相对路径，systemd CWD 下会写到
     # /home/workflow/ReviewAgent/data/weekly_reports/，而 API 读的是
     # config.data_dir / "weekly_reports" = /home/workflow/data/weekly_reports/
+    #
+    # ⚠️ **注意** (2026-11-06): 调用方 (scripts/weekly_report.py 的 --enqueue 分支)
+    #    会把 output_dir 塞进 RQ job 参数, 一旦它不是 None, 下面这行 config 分支
+    #    就**走不到** —— 写盘路径由"入队时"决定, 而不是"worker 运行时"决定。
+    #    调用方传的是仓库内的相对路径 → 周报落进 ReviewAgent/data/, API 读
+    #    /home/workflow/data/ → 差一整个目录 → 前端永远停在旧周报 (实测停在 W37, 实际 W44)。
+    #    修法: 调用方改传 config 的绝对路径 (scripts/weekly_report.py 已改)。
     from reviewagent.config import config as _main_config
     output_dir = output_dir or _main_config.weekly_reports_dir
+    # 兜底: 若调用方传的是**相对路径**, 纠正成 config 的绝对路径 ——
+    # 否则写出来的文件 API 根本读不到, 而症状是"周报停在几周前", 极难查。
+    #
+    # ⚠️ 判据不能用 `Path.is_absolute()`: 在 Windows 上 Path("/tmp/x").is_absolute() 是
+    #    **False** (没有盘符), 于是"显式指定的绝对目录" (e2e 用的 /tmp/...) 会被误判成
+    #    相对路径而被覆盖 —— 那是另一个坑。
+    #    正确判据: 相对路径 = 不含盘符、且不以分隔符开头。
+    #    ⚠️ 分隔符要**两个平台都算**: Windows 上 Path("/tmp/x") 的 str 是 "\\tmp\\x"
+    #    (反斜杠开头), 只查 "/" 会漏判 → 显式绝对路径又被误纠正。
+    #    Unix 绝对路径 "/tmp/x" → 以 "/" 开头; Windows 绝对路径 "C:\\x" → 有盘符。
+    _od = Path(output_dir)
+    _s = str(output_dir)
+    _is_rel = (
+        (not _od.is_absolute())
+        and not _od.drive
+        and not _s.startswith("/")
+        and not _s.startswith("\\")
+    )
+    if _is_rel:
+        logger.warning(
+            "reporting.output_dir 是相对路径 ({}) —— 纠正为 config 的 {} (与 API 读取一致)",
+            output_dir, _main_config.weekly_reports_dir,
+        )
+        output_dir = _main_config.weekly_reports_dir
 
     tz = timezone(timedelta(hours=8))  # Asia/Shanghai
     week_start, week_end = _week_bounds(now=now, tz=tz, week_offset=week_offset)
