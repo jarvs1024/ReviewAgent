@@ -21,7 +21,10 @@ from pathlib import Path
 
 import frontmatter
 
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "reviewagent" / "prompts"
+from reviewagent.scenario.profile import active_or_load
+
+# 渲染源 = 当前场景 profile 的 prompts 目录（plan §5.3），不再硬编码仓库路径。
+PROMPTS_DIR = active_or_load().root / "prompts"
 DEFAULT_AGENT_DIR = Path.home() / ".config" / "opencode" / "agent"
 
 # Map our prompt name → opencode mode + tool overrides

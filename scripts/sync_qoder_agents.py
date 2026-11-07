@@ -112,10 +112,12 @@ def sync_qoder_agents(prompts_dir: Path, agents_dir: Path) -> list[Path]:
 
 
 def main() -> None:  # pragma: no cover - thin CLI wrapper
-    from reviewagent.config import config
-    from reviewagent.prompts.loader import PROMPTS_DIR
+    # 兼容导入：外部脚本可能 `from scripts.sync_qoder_agents import PROMPTS_DIR`。
+    from reviewagent.prompts.loader import PROMPTS_DIR  # noqa: F401
+    from reviewagent.scenario.profile import active_or_load
 
-    prompts_dir = PROMPTS_DIR
+    # 渲染源改为当前场景 profile 的 prompts 目录（plan §5.3）。
+    prompts_dir = active_or_load().root / "prompts"
     agents_dir = Path.cwd() / ".qoder" / "agents"
     paths = sync_qoder_agents(prompts_dir, agents_dir)
     print(f"synced {len(paths)} qoder agents to {agents_dir}")
