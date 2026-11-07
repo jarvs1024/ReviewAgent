@@ -203,17 +203,19 @@ class ImproveCommand(BaseCommand):
         return params
 
     def _find_cross_file_refs(
-        self, file_path: str, diff: str, worktree_path, max_refs: int = 6,
+        self, file_path: str, diff: str, worktree_path, max_refs: int | None = None,
     ) -> list[dict]:
         """在 worktree 找 diff 改动的标识符在其他文件的 caller 引用.
 
         实现见 review/dynamic/providers/cross_file_refs.py:find_refs（门面薄委托）；
-        params 从当前动态规则集解析，`max_refs` 保持 legacy 默认 6。
+        params 从当前动态规则集解析（缺省回退 legacy 6）——显式传入的
+        `max_refs` 优先，否则不覆盖规则参数。
         """
         from reviewagent.review.dynamic.providers.cross_file_refs import find_refs
 
         params = self._dynamic_rule_params()
-        params["max_refs_per_file"] = max_refs
+        if max_refs is not None:
+            params["max_refs_per_file"] = max_refs
         return find_refs(file_path, diff, worktree_path, params=params)
 
     def _collect_cross_file_refs_for_mr(
