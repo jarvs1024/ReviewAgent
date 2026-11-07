@@ -7,7 +7,10 @@ Type=oneshot
 User=workflow
 WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment=REVIEW_PROFILE=ssd-python-autotest
+Environment=REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
 EnvironmentFile=/home/workflow/ReviewAgent/.env
+ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check
 ExecStart=/home/workflow/ReviewAgent/.venv/bin/python /home/workflow/ReviewAgent/scripts/weekly_report.py --week-offset -1 --enqueue
 StandardOutput=journal
 StandardError=journal

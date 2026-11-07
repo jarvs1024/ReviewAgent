@@ -251,13 +251,33 @@ LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
 
 - 服务器部署 → 见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 - 快速启动（本地开发 / 运维） → 见 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
+- 生效配置与两个指纹 → 见 [`docs/CONFIG.md`](docs/CONFIG.md)（由 `reviewagent config show` 生成）
+- 规则包模板（verbatim / structured） → 见 [`docs/RULES.md`](docs/RULES.md)
+- 备份 / 恢复 / drain → 见 [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md)
 - LLM Provider 适配层设计 → 见 [`docs/LLM_PROVIDER_ADAPTER.md`](docs/LLM_PROVIDER_ADAPTER.md)
 
 ---
 
 ## 配置
 
-单一 `.env`（不入 git，模板见 `.env.example`）。关键变量：
+配置分三个平面（**唯一默认值来源**是 [`reviewagent/settings/schema.py`](reviewagent/settings/schema.py)，
+env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) 里解析）：
+
+| 平面 | 载体 | 说明 |
+|---|---|---|
+| 实例平面 | `.env`（模板 `.env.example`，仅约 16 项） | 本机部署参数（GitLab / LLM / Redis / data_dir / profile / 日志 / 周报投递）。**只有 GITLAB_* 三项必填** |
+| 场景平面 | `profiles/<name>/`（`REVIEW_PROFILE` 选择） | prompts / 限制 / improve 权重 / 规则引用 / 周报标题；切换场景 = 新 data_dir + 同时重启 API 与 worker |
+| 规则平面 | 规则包 `.md`（profile 的 `rules:`） | 键命名空间、verbatim/structured 渲染、`reviewagent rules check` 校验 |
+
+启动前校验与人工核对：
+
+```bash
+.venv/bin/python -m reviewagent config check --profile ssd-python-autotest   # 缺必填/绑定冲突/值越界 → 退出码 2
+.venv/bin/python -m reviewagent config show --diff-default --sources          # 只看与默认不同 + 来源
+.venv/bin/python -m reviewagent rules check --profile ssd-python-autotest     # 规则索引 + ruleset_fingerprint
+```
+
+完整字段清单与来源见 [`docs/CONFIG.md`](docs/CONFIG.md)（生成文件）。主要分组：
 
 | 分组 | 变量 | 说明 |
 |---|---|---|
@@ -265,17 +285,17 @@ LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
 | LLM | `LLM_PROVIDER` `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | **`qoder-sdk`（推荐）** / `qodercli`（旧 subprocess 兜底） / `opencode`（HTTP API 兜底）；详见 [LLM Provider 迁移](#llm-provider-迁移-qodercli--qoder-sdk) |
 | QoderSDK | `QODER_SDK_PAT` `QODER_SDK_CLI_PATH` `QODER_SDK_MODEL` `QODER_SDK_FALLBACK_MODEL` `QODER_SDK_TIMEOUT` `QODER_SDK_MAX_TURNS` `QODER_SDK_PERMISSION_MODE` `QODER_SDK_DISALLOWED_TOOLS` | **LLM_PROVIDER=qoder-sdk 时必填**；`QODER_SDK_PAT` 替换 `qodercli login` 状态；`QODER_SDK_CLI_PATH` 留空走 PATH，配置非空则严格校验；`QODER_SDK_MODEL` 默认 `Lite`（调试）/ `QODERCLI_MODEL`（生产） |
 | QoderCLI（旧） | `QODERCLI_NODE_PATH` `QODERCLI_JS_PATH` `QODERCLI_MODEL` `QODERCLI_TIMEOUT` `QODERCLI_MAX_TURNS` `QODERCLI_PERMISSION_MODE` `QODERCLI_FALLBACK_MODEL` | 仅 `LLM_PROVIDER=qodercli` 旧 subprocess 路径用，留作兜底；切到 qoder-sdk 后此组可忽略 |
-| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` `RQ_WORKER_CLASS` | 队列名默认 `review`（周报队列 `review-weekly`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数；macOS 使用 `ReviewAgentSpawnWorker` 避免 RQ fork crash |
-| 存储 | `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` | 默认 `./data` |
-| 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过 |
+| Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` | 队列名默认 `review`（周报队列 `review-weekly`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数。`RQ_WORKER_CLASS` 是 `rq` CLI 运维键（不在 schema），写进 systemd unit，见 `docs/DEPLOYMENT.md` |
+| 实例 | `REVIEW_PROFILE` `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` `LOG_FORMAT` `LOG_ROTATION` | profile 名 / 数据目录 / 日志级别 / 日志格式（`text`/`json`）/ 轮转（`single`/`none`）；data_dir ↔ profile 绑定（`instance.json`） |
+| 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过（场景平面，profile 可覆盖） |
 | 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库读 `AGENTS.md` / `.agents/rules/*.md`；`REPO_CONTEXT_MAX_LINES` 规则文件最大行数（默认 2000） |
-| improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MIN_SCORE` `IMPROVE_MIN_SEVERITY` `IMPROVE_REVIEW_MODE` `IMPROVE_KEYWORD_PATHS` `IMPROVE_SKIP_TEST_PATHS` `IMPROVE_PARTIAL_CONTEXT_LINES` `IMPROVE_PATCH_CONTEXT_LINES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_PRIORITY_WEIGHT_DIFF` `IMPROVE_PRIORITY_WEIGHT_KEYWORD` `IMPROVE_PRIORITY_WEIGHT_DENSITY` `IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE` `IMPROVE_MAX_FILES_TO_REVIEW` `IMPROVE_NEW_FILE_FULL` `IMPROVE_TEST_SAMPLE_PATHS` `IMPROVE_TEST_SAMPLE_MAX` | 并行度 / 限流 / 模式 / priority 权重；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先；文件筛选护栏：`MAX_FILES_TO_REVIEW` 送 LLM 文件数硬上限(必保新增+关键路径)、`NEW_FILE_FULL` 新增文件优先(加分+豁免截断)、`TEST_SAMPLE_PATHS`/`TEST_SAMPLE_MAX` 自动 case 抽样 |
+| improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MIN_SCORE` `IMPROVE_MIN_SEVERITY` `IMPROVE_REVIEW_MODE` `IMPROVE_KEYWORD_PATHS` `IMPROVE_SKIP_TEST_PATHS` `IMPROVE_PARTIAL_CONTEXT_LINES` `IMPROVE_PATCH_CONTEXT_LINES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_PRIORITY_WEIGHT_DIFF` `IMPROVE_PRIORITY_WEIGHT_KEYWORD` `IMPROVE_PRIORITY_WEIGHT_DENSITY` `IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE` `IMPROVE_MAX_FILES_TO_REVIEW` `IMPROVE_NEW_FILE_FULL` `IMPROVE_TEST_SAMPLE_PATHS` `IMPROVE_TEST_SAMPLE_MAX` | 并行度 / 限流 / 模式 / priority 权重（场景平面，profile 提供默认）；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先；文件筛选护栏：`MAX_FILES_TO_REVIEW` 送 LLM 文件数硬上限(必保新增+关键路径)、`NEW_FILE_FULL` 新增文件优先(加分+豁免截断)、`TEST_SAMPLE_PATHS`/`TEST_SAMPLE_MAX` 自动 case 抽样 |
 | 检视过滤 | `REVIEW_EXCLUDE_EXTENSIONS` | 不送审的文件扩展名（默认含 `.md`/`.txt`/图片等） |
 | 周报-总开关 | `REVIEWAGENT_WEEKLY_ENABLED` `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` `REVIEWAGENT_WEEKLY_TARGET_BRANCH` `REVIEWAGENT_WEEKLY_TIMEZONE` | 总开关（默认 true）；目标项目 id（0=跳过 merged_mrs/repo_scan 段）/ 分支（默认 `main`）/ 时区（默认 `Asia/Shanghai`） |
 | 周报-采集 | `REVIEWAGENT_WEEKLY_COLLECTORS` `REVIEWAGENT_WEEKLY_NOTIFIER` | 启用的采集段（默认 `telemetry,merged_mrs,repo_scan`）；通知器（默认 `dingtalk`） |
-| 周报-调度 | `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` | cron 触发时间，`OnCalendar` 格式（默认 `Mon 10:30`；由 `scripts/run_weekly_report.sh` 或外部 cron 调用） |
-| 周报-钉钉 | `REVIEWAGENT_WEEKLY_DASHBOARD_URL` `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | 看板地址（渲染到「本周检视概况」末尾，空=不显示）；webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为兼容回退）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
-| 周报-标题 | `REVIEWAGENT_WEEKLY_REPORT_TITLE` `REVIEWAGENT_WEEKLY_REPORT_EMOJI` | 周报标题（默认 `SSD自动化代码检视周报`）/ emoji（默认 📊） |
+| 周报-调度 | `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` | cron 触发时间，`OnCalendar` 格式（默认 `Mon 10:30`；由 systemd timer 或外部 cron 调用） |
+| 周报-钉钉 | `REVIEWAGENT_WEEKLY_DASHBOARD_URL` `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | 看板地址（渲染到「本周检视概况」末尾，空=不显示）；webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为 schema 别名）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
+| 周报-标题 | `REVIEWAGENT_WEEKLY_REPORT_TITLE` `REVIEWAGENT_WEEKLY_REPORT_EMOJI` | 标题（空 = 用 `profile.reporting.weekly_title`，内置场景为 `SSD自动化代码检视周报`）/ emoji（默认 📊） |
 
 ---
 
@@ -313,6 +333,10 @@ LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
 ## 相关文档
 
 - [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — 本地开发 / 服务器运维
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — 服务器部署记录
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — 服务器部署、切换场景与升级顺序
+- [`docs/CONFIG.md`](docs/CONFIG.md) — 生效配置（生成）与 `profile_fingerprint` / `config_fingerprint` 说明
+- [`docs/RULES.md`](docs/RULES.md) — 规则包最小模板（verbatim / structured）与 `rules check`
+- [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md) — `VACUUM INTO` 备份、drain、恢复校验
+- [`CHANGELOG.md`](CHANGELOG.md) — 用户可见变更与 Known limits
 - [`docs/LLM_PROVIDER_ADAPTER.md`](docs/LLM_PROVIDER_ADAPTER.md) — LLM Provider 适配层设计与验证
 - [本 README 的 LLM Provider 迁移章节](#llm-provider-迁移-qodercli--qoder-sdk) — qodercli → qoder-sdk 切换指南 / 字段映射 / 错误处理

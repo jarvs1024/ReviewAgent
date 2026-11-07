@@ -1,7 +1,11 @@
 # 快速启动指南
 
 > 适用于：本地开发 / 服务器运维
-> 更新日期：2026-08-07
+> 更新日期：2026-11-08
+
+配置分三个平面：实例平面（`.env`，模板 `.env.example` 只含约 16 项）、场景平面
+（`profiles/`，由 `REVIEW_PROFILE` 选择）、规则平面（规则包，见 `docs/RULES.md`）。
+完整字段与来源见 `docs/CONFIG.md`。
 
 ---
 
@@ -15,39 +19,52 @@ python3.12 -m venv .venv
 
 # 2. 配置
 cp .env.example .env
-# 编辑 .env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET
+# 编辑 .env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET（必填）
+# REVIEW_PROFILE 默认 ssd-python-autotest；本地可把 REVIEWAGENT_DATA_DIR 改回 ./data
 
 # 3. 起 Redis（Docker 或本地）
 # docker run -d --name redis -p 6379:6379 redis:7
 
-# 4. 起 webhook + worker
+# 4. 启动前静态校验（缺必填 / profile 非法 / 规则装配失败都在这里 fail-fast）
+.venv/bin/python -m reviewagent config check
+.venv/bin/python -m reviewagent rules check
+
+# 5. 起 webhook + worker
 .venv/bin/uvicorn reviewagent.main:app --host 0.0.0.0 --port 3000
 .venv/bin/rq worker review --url redis://127.0.0.1:6379/0
 ```
+
+> macOS 本地跑 worker 若遇到 RQ fork crash：`RQ_WORKER_CLASS=reviewagent.workers.rq_worker.ReviewAgentSpawnWorker`
+> （`rq` CLI 运维键，不在应用 schema）。
 
 ---
 
 ## 二、服务器运维
 
 ```bash
+# 生效配置（--sources 标注 env|profile|preset|default；secret 一律 ***）
+.venv/bin/python -m reviewagent config show --diff-default --sources
+
 # 服务状态
-systemctl is-active reviewagent-webhook reviewagent-worker@1 reviewagent-worker@2 reviewagent-worker@3
-curl http://127.0.0.1:3000/health
+systemctl status reviewagent-webhook reviewagent-worker reviewagent-weekly-worker --no-pager
+curl -s http://127.0.0.1:3000/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/readyz   # 200 = 全就绪
 
 # 实时日志
 journalctl -u reviewagent-webhook -f
-journalctl -u reviewagent-worker@1 -f
+journalctl -u reviewagent-worker -f
 
-# 看 SQLite 检视历史
+# 看 SQLite 检视历史（生产数据目录 /var/lib/reviewagent）
 .venv/bin/python -c '
 import sqlite3
-db = sqlite3.connect("/home/workflow/data/telemetry.db"); db.row_factory = sqlite3.Row
+db = sqlite3.connect("/var/lib/reviewagent/telemetry.db"); db.row_factory = sqlite3.Row
 for r in db.execute("SELECT id, project_id, mr_iid, command, status, duration_ms FROM review_runs ORDER BY id DESC LIMIT 20"):
     print(dict(r))
 '
 
-# 重启
-systemctl restart reviewagent-webhook reviewagent-worker@1 reviewagent-worker@2 reviewagent-worker@3
+# 重启（顺序：先 worker 后 API，见 docs/DEPLOYMENT.md）
+systemctl restart reviewagent-worker reviewagent-weekly-worker
+systemctl restart reviewagent-webhook
 ```
 
 ---
@@ -92,15 +109,18 @@ bash scripts/run_weekly_report.sh --project-id 34 --week-offset -1
 ## 五、看 worker 进度（关键日志关键词）
 
 ```
-webhook.queued        → webhook 路由成功，已入队
-worker.run_*          → worker 拾到任务
-git.clone_bare ok     → git clone 成功
-git.worktree_add ok   → worktree 创建
-llm.run start         → 调 LLM（qodercli / opencode）
-llm.run ok            → LLM 返回成功
-gitlab.update_*       → 写回 GitLab（标题/描述/建议）
-describe.ok / improve.ok → 全部完成
+bootstrap.ready / config.resolved   → 启动装配完成（含 profile_fingerprint / config_fingerprint）
+webhook.queued                      → webhook 路由成功，已入队
+worker.run_<command>                → worker 拾到任务（如 worker.run_improve）
+git.clone_bare start / ok           → git clone 成功
+qoder_sdk.usage / qodercli.usage    → LLM 调用返回（含 credits / context 占比）
+gitlab.update_title / update_description / post_comment → 写回 GitLab
+链锁竞争：chain.lock_timeout       → 释放链锁失败/超时，放弃本次 chain
+落库失败：improve.record_suggestion failed → 建议未写入 telemetry
 ```
+
+> 事件名以代码为准（spec 早期草稿的 `review.lock_timeout` / `telemetry.write_fail`
+> 是旧命名，日志里搜不到）。
 
 ---
 
@@ -133,5 +153,8 @@ MR description / 建议没改？
 ## 七、相关文档
 
 - [`README.md`](../README.md) — 项目入口（功能 / 架构 / 配置）
-- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — 服务器部署记录
+- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — 服务器部署、切换场景与升级顺序
+- [`docs/CONFIG.md`](CONFIG.md) — 生效配置（生成）与两个指纹
+- [`docs/RULES.md`](RULES.md) — 规则包模板与 `rules check`
+- [`docs/BACKUP_RESTORE.md`](BACKUP_RESTORE.md) — 备份 / 恢复 / drain
 - [`docs/LLM_PROVIDER_ADAPTER.md`](LLM_PROVIDER_ADAPTER.md) — LLM Provider 适配层设计
