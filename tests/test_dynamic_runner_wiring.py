@@ -207,3 +207,23 @@ def test_degraded_evidence_keeps_section_and_logs_once(tmp_path, logs):
     assert f"rule={RULE_KEY}" in timeouts[0]
     degraded = [m for m in logs if "dynamic.degraded" in m]
     assert degraded == []
+
+
+def test_provider_error_degrades_with_reason_and_no_timeout(tmp_path, logs):
+    def _boom(files, diff_by_file, worktree):
+        raise RuntimeError("boom")
+
+    seen, callbacks = _capture_chunk_prompts(collect_cross_refs=_boom)
+    ctx = _ctx(tmp_path, dynamic_rules=_ruleset(), callbacks=callbacks)
+    run(ctx)
+
+    # 非 timeout 降级：section 仍启用、refs 为空
+    assert sorted(seen) == ["a.py", "b.py"]
+    assert all(item["refs"] == [] for item in seen.values())
+    assert all(item["enabled"] is True for item in seen.values())
+    # 恰好一条 dynamic.degraded，且 reason 是异常类型名（非 timeout）
+    degraded = [m for m in logs if "dynamic.degraded" in m]
+    assert len(degraded) == 1
+    assert "reason=RuntimeError" in degraded[0]
+    assert f"rule={RULE_KEY}" in degraded[0]
+    assert [m for m in logs if "dynamic.timeout" in m] == []

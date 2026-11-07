@@ -108,6 +108,7 @@ def find_refs(
     refs: list[dict] = []
     seen: set[tuple[str, int]] = set()
     rel_self = file_path
+    collect_failed: str | None = None
     for ident in idents:
         if len(ident) < 3:
             continue
@@ -127,10 +128,9 @@ def find_refs(
             # 超时 / 降级日志承载，避免每 ident 刷一条 WARNING。
             continue
         except Exception as exc:
-            logger.warning(
-                "dynamic.collect.failed provider=cross_file_refs error={}",
-                type(exc).__name__,
-            )
+            # 非预期异常：整轮只记一次（否则每个 ident 刷一条 WARNING）.
+            if collect_failed is None:
+                collect_failed = type(exc).__name__
             continue
         hits = 0
         for line in result.stdout.splitlines():
@@ -160,6 +160,11 @@ def find_refs(
                 break
         if len(refs) >= max_refs:
             break
+    if collect_failed is not None:
+        logger.warning(
+            "dynamic.collect.failed provider=cross_file_refs error={}",
+            collect_failed,
+        )
     return refs
 
 

@@ -57,6 +57,25 @@ def capture_text():
         loguru_logger.remove(handler_id)
 
 
+@pytest.fixture
+def capture_text_plain():
+    """临时 text sink（`diagnose=False`）：异常用例不打印局部变量，只验消息脱敏."""
+    lines: list[str] = []
+    handler_id = loguru_logger.add(
+        lambda message: lines.append(str(message).rstrip("\n")),
+        level="INFO",
+        format=TEXT_FORMAT,
+        filter=logging_setup._text_filter,
+        colorize=False,
+        backtrace=False,
+        diagnose=False,
+    )
+    try:
+        yield lines
+    finally:
+        loguru_logger.remove(handler_id)
+
+
 # ---------------------------------------------------------------- 原样断言（brief）
 
 
@@ -154,15 +173,78 @@ def test_json_formatter_redacts_message_and_extra():
     assert data["run_id"] == "r1"
 
 
+def test_json_formatter_reserved_fields_not_overridden_by_extra():
+    record = _base_record(
+        extra={
+            "ts": "spoof-ts",
+            "schema_version": 99,
+            "level": "DEBUG",
+            "message": "spoof-message",
+            "event": "review.start",
+        }
+    )
+    data = json.loads(JsonFormatter().format(record))
+    assert data["ts"] == "2026-11-07T00:00:00Z"
+    assert data["schema_version"] == SCHEMA_VERSION
+    assert data["level"] == "INFO"
+    assert data["message"] == "hello"
+    assert data["event"] == "review.start"
+
+
+def test_json_formatter_redacts_nested_extra():
+    formatter = JsonFormatter(secrets={"glpat-SECRET"})
+    record = _base_record(
+        extra={
+            "ctx": {"pat": "glpat-SECRET", "inner": [{"auth": "Authorization: Bearer xyz"}]},
+            "seq": ("ok", "token=abc123"),
+        }
+    )
+    raw = formatter.format(record)
+    data = json.loads(raw)
+    assert "glpat-SECRET" not in raw
+    assert "xyz" not in raw
+    assert "abc123" not in raw
+    assert data["ctx"]["pat"] == "***"
+    assert data["ctx"]["inner"][0]["auth"] == "Authorization: ***"
+    assert data["seq"] == ["ok", "token=***"]
+
+
 def test_redact_url_credentials_and_key_values():
     text = "clone https://user:pw@host.example/repo.git Authorization: Bearer xyz password=hunter2 secret: s3 auth=token"
     out = redact(text)
     assert "user" not in out and "pw@" not in out
     assert "hunter2" not in out
-    assert "Bearer" not in out
+    # 真实凭据不残留（不是只断言 scheme 名 Bearer 消失）
+    assert "xyz" not in out
+    assert "Authorization: ***" in out
     assert "https://***@host.example/repo.git" in out
     assert "password=***" in out
     assert "secret: ***" in out
+
+
+def test_redact_authorization_swallows_scheme_and_credential():
+    bearer = redact("Authorization: Bearer xyz")
+    assert "xyz" not in bearer
+    assert bearer == "Authorization: ***"
+
+    basic = redact("Authorization: Basic dXNlcjpwYXNz")
+    assert "dXNlcjpwYXNz" not in basic
+    assert "Basic" not in basic
+    assert basic == "Authorization: ***"
+
+    # 无 scheme 的裸值同样整段吞掉；`=` 分隔也覆盖
+    assert redact("authorization=glpat-abc") == "authorization=***"
+    # 原按值替换的行为保持不变
+    assert redact("pat=abc123", secrets={"abc123"}) == "pat=***"
+
+
+def test_redact_short_secret_uses_word_boundary():
+    # 短 secret（<4）只在词边界替换，避免把普通单词切碎
+    assert redact("value ab1 and xab1y", secrets={"ab1"}) == "value *** and xab1y"
+    # 长 secret 仍全局替换
+    assert redact("xxTOKEN99yy", secrets={"TOKEN99"}) == "xx***yy"
+    # 空 / 纯空白 secret 忽略
+    assert redact("nothing here", secrets={"", "   "}) == "nothing here"
 
 
 # ---------------------------------------------------------------- text filter
@@ -214,6 +296,56 @@ def test_text_filter_redacts_message(capture_text, monkeypatch):
     assert "glpat-SECRET" not in line
     assert "u:p@" not in line
     assert "***" in line
+
+
+def test_prepare_redacts_non_internal_underscore_keys(monkeypatch):
+    monkeypatch.setattr(logging_setup, "_SECRETS", ("glpat-SECRET",))
+    record = _base_record(
+        extra={"_custom": "glpat-SECRET", "_nested": ["glpat-SECRET"], "_json_line": "glpat-SECRET"},
+    )
+    merged = logging_setup._prepare(record, escape=True)
+    # 非内部 `_foo` 照常脱敏
+    assert merged["_custom"] == "***"
+    assert merged["_nested"] == ["***"]
+    # loguru 内部键原样跳过
+    assert merged["_json_line"] == "glpat-SECRET"
+
+
+def test_text_filter_escapes_forged_exception_message(capture_text_plain, monkeypatch):
+    secret = "glpat-" + "SECRET"  # 拼出来，避免 traceback 的源码行回显字面量
+    monkeypatch.setattr(logging_setup, "_SECRETS", (secret,))
+    forged = "\n2026-11-07 00:00:00 | ERROR | fake:fn:1 - forged"
+    message = f"boom {secret}{forged}"
+    try:
+        raise RuntimeError(message)
+    except RuntimeError:
+        loguru_logger.exception("failed")
+
+    # 一条记录一条输出（异常 message 的换行没有拆出新记录）
+    assert len(capture_text_plain) == 1
+    out = capture_text_plain[0]
+    assert secret not in out
+    # 伪造前缀被 `\n` 转义中和，不会以裸行首形式出现
+    assert forged not in out
+    assert "boom ***" + forged.replace("\n", "\\n") in out
+
+
+def test_text_filter_keeps_exception_type_when_rebuilding(capture_text_plain, monkeypatch):
+    class _TwoArgError(Exception):
+        def __init__(self, first, second) -> None:
+            super().__init__(first, second)
+
+    secret = "glpat-" + "SECRET"
+    monkeypatch.setattr(logging_setup, "_SECRETS", (secret,))
+    try:
+        raise _TwoArgError(secret, "x")
+    except _TwoArgError:
+        loguru_logger.exception("failed")
+
+    out = capture_text_plain[0]
+    assert secret not in out
+    # 两个必填参数的异常无法用 `type(value)(msg)` 重建，但类型仍保留
+    assert "_TwoArgError" in out
 
 
 def test_json_filter_merges_context():

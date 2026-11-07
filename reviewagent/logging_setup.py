@@ -56,11 +56,22 @@ _URL_CREDS_RE = re.compile(
     r"(?i)([a-z][a-z0-9+.\-]*://)([^/\s:@]+):([^/\s@]+)@"
 )
 
-# `token=...` / `password: ...` / `Authorization: Bearer ...` → 值替换为 ***（保留键名）.
+# `Authorization: Bearer xyz` / `Authorization=Basic b64` → `Authorization: ***`
+# （连 scheme 一起吞掉，只保留键名与分隔符；否则 `xyz` / base64 会残留）.
+_AUTH_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(authorization)(\s*[:=]\s*)"
+    r"(?:[A-Za-z][A-Za-z0-9+._-]*\s+)?(\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+)
+
+# `token=...` / `password: ...` / `secret=...` → 值替换为 ***（保留键名）.
+# `authorization` 由 `_AUTH_RE` 单独处理（需要吞掉 scheme）.
 _SECRET_KEY_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(authorization|token|password|secret)(\s*[:=]\s*)"
+    r"(?i)(?<![A-Za-z0-9])(token|password|secret)(\s*[:=]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
 )
+
+# loguru 内部保留的 extra 键：不参与脱敏与上下文后缀（其它 `_foo` 照常处理）.
+_INTERNAL_KEYS = frozenset({"_ctx_suffix", _JSON_LINE_KEY})
 
 _ESCAPE_MAP = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
@@ -77,18 +88,29 @@ _SECRETS: tuple[str, ...] = ()
 # ---------------------------------------------------------------- redaction
 
 
+def _replace_secret(text: str, secret: str) -> str:
+    """按值替换 secret；短值（<4）用词边界，避免把普通单词切碎成 `***`."""
+    if len(secret) < 4:
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])"
+        return re.sub(pattern, "***", text)
+    return text.replace(secret, "***")
+
+
 def redact(text: str, *, secrets: Iterable[str] = ()) -> str:
-    """脱敏：显式 secret 值 → URL 内嵌凭据 → `k=v` / `k: v` 形式的敏感值.
+    """脱敏：显式 secret 值 → URL 内嵌凭据 → Authorization 头 → `k=v` / `k: v`.
 
     顺序固定：先按值替换（`pat=abc123` + secret `abc123` → `pat=***`），
-    再处理带凭据的 URL，最后按键名规则兜底；全程保留键名便于排障.
+    再处理带凭据的 URL，然后整段吞掉 `Authorization` 的 scheme 与凭据，
+    最后按键名规则兜底；全程保留键名便于排障.
     """
     if not text:
         return text
     result = str(text)
-    for secret in sorted({str(s) for s in secrets if s}, key=len, reverse=True):
-        result = result.replace(secret, "***")
+    values = {str(s) for s in secrets if str(s).strip()}
+    for secret in sorted(values, key=len, reverse=True):
+        result = _replace_secret(result, secret)
     result = _URL_CREDS_RE.sub(lambda m: f"{m.group(1)}***@", result)
+    result = _AUTH_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", result)
     result = _SECRET_KEY_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", result)
     return result
 
@@ -110,8 +132,17 @@ def _escape_control(text: str) -> str:
 
 
 def _safe_redact(value: Any, secrets: Iterable[str]) -> Any:
+    """递归脱敏：str 直接 redact，dict/list/tuple 逐项处理，其它类型原样返回."""
     if isinstance(value, str):
         return redact(value, secrets=secrets)
+    if isinstance(value, Mapping):
+        return {key: _safe_redact(item, secrets) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        items = [_safe_redact(item, secrets) for item in value]
+        try:
+            return type(value)(items)
+        except Exception:  # pragma: no cover - 具名元组等构造失败的兜底
+            return items
     return value
 
 
@@ -155,8 +186,8 @@ class JsonFormatter:
 
     def format(self, record: Mapping[str, Any]) -> str:
         extra = dict(record.get("extra") or {})
-        extra.pop("_ctx_suffix", None)
-        extra.pop(_JSON_LINE_KEY, None)
+        for key in _INTERNAL_KEYS:
+            extra.pop(key, None)
         event = extra.pop("event", "")
         component = extra.pop("component", "")
 
@@ -169,6 +200,8 @@ class JsonFormatter:
             "message": redact(str(record.get("message", "")), secrets=self._secrets),
         }
         for key, value in extra.items():
+            if key in payload:  # ts/schema_version/level/event/component/message 不可被 extra 覆盖
+                continue
             payload[key] = _safe_redact(value, self._secrets)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
@@ -227,8 +260,14 @@ def current_context() -> dict[str, Any]:
 # ---------------------------------------------------------------- sink filters
 
 
-def _exception_redacted(record: Mapping[str, Any], secrets: Iterable[str]) -> Any:
-    """尽量把异常 message 二次脱敏；构造失败时保持原异常（不破坏 traceback）."""
+def _exception_redacted(
+    record: Mapping[str, Any], secrets: Iterable[str], *, escape: bool = False,
+) -> Any:
+    """尽量把异常 message 二次脱敏；构造失败时保持原异常（不破坏 traceback）.
+
+    `escape=True`（text sink）在脱敏后再把换行/控制字符转义，避免异常 message
+    里的伪造成日志行；JSON sink 只脱敏，转义交给序列化器.
+    """
     exc = record.get("exception")
     if not exc:
         return exc
@@ -238,15 +277,28 @@ def _exception_redacted(record: Mapping[str, Any], secrets: Iterable[str]) -> An
     try:
         text = str(value)
         fixed = redact(text, secrets=secrets)
+        if escape:
+            fixed = _escape_control(fixed)
         if fixed == text:
             return exc
-        try:
-            new_value: BaseException = type(value)(fixed)
-        except Exception:
-            new_value = RuntimeError(fixed)
+        new_value = _rebuild_exception_value(value, fixed)
         return type(exc)(exc.type, new_value, exc.traceback)
     except Exception:  # pragma: no cover - 脱敏失败不应影响日志输出
         return exc
+
+
+def _rebuild_exception_value(value: BaseException, fixed: str) -> BaseException:
+    """用脱敏后的 message 重建同类型异常（尽量保留类型，便于告警分类）."""
+    try:
+        return type(value)(fixed)
+    except Exception:
+        pass
+    try:
+        new_value = type(value).__new__(type(value), fixed)
+        new_value.args = (fixed,)
+        return new_value
+    except Exception:  # pragma: no cover - 无法重建类型时退化为 RuntimeError
+        return RuntimeError(fixed)
 
 
 def _exception_fields(exc: Any) -> dict[str, str]:
@@ -278,16 +330,14 @@ def _prepare(record: dict[str, Any], *, escape: bool) -> dict[str, Any]:
     if isinstance(explicit, Mapping):
         merged.update(explicit)
     record["extra"] = merged
-    record["exception"] = _exception_redacted(record, _SECRETS)
+    record["exception"] = _exception_redacted(record, _SECRETS, escape=escape)
     record["message"] = redact(str(record.get("message", "")), secrets=_SECRETS)
 
     suffix_parts: list[str] = []
     for key in list(merged):
-        if key.startswith("_"):  # 保留键（_ctx_suffix / _json_line …）不参与脱敏与后缀
+        if key in _INTERNAL_KEYS:  # loguru 内部保留键：不脱敏、不进后缀
             continue
-        value = merged[key]
-        if isinstance(value, str):
-            merged[key] = redact(value, secrets=_SECRETS)
+        merged[key] = _safe_redact(merged[key], _SECRETS)
         if key in context and context[key] is not None:
             text = str(merged[key])
             suffix_parts.append(f"{key}={_escape_control(text) if escape else text}")
