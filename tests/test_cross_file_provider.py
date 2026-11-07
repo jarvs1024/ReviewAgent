@@ -278,6 +278,82 @@ def test_find_refs_clamps_non_positive_hits(monkeypatch, logs):
     assert any("dynamic.param.invalid" in m for m in logs)
 
 
+def test_collect_refs_clamps_infinite_param(monkeypatch, logs):
+    """YAML `.inf` → `int()` 抛 OverflowError；必须 clamp 到默认而非逃逸.
+
+    未兜底时同步门面路径（改善 → find_refs）会把 OverflowError 抛给调用方，
+    动态线程内则整条规则降级。这里用 hits_per_symbol=10 让默认的
+    max_refs_per_file=6 成为唯一实际上限（否则每个 ident 只留 2 条）。
+    """
+    stdout = "".join(f"f{i}.py:{i}:alpha()\n" for i in range(1, 10))
+    _patch_run(monkeypatch, stdout)
+    out = collect_refs(
+        ["a.py"], {"a.py": "+def alpha():\n"}, "/tmp/wt",
+        params={"hits_per_symbol": 10, "max_refs_per_file": float("inf")},
+    )
+    assert len(out["a.py"]) == 6  # legacy 默认值，不是 9（无上限）也不是空
+    invalid = [m for m in logs if "dynamic.param.invalid" in m]
+    assert any("param=max_refs_per_file value=inf -> 6" in m for m in invalid)
+
+
+# ---------------------------------------------------------------------------
+# 门面参数优先级：规则 max_refs_per_file vs 显式第 4 位置参数
+# ---------------------------------------------------------------------------
+
+
+def _facade_cmd(*, rule_max_refs: int = 2):
+    """最小 ImproveCommand（跳过 __init__）+ 手搭 DynamicRuleSet."""
+    from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.review.dynamic import DynamicRule, DynamicRuleSet
+
+    rule = DynamicRule(
+        key="DYN-CROSS-FILE-REFS",
+        title="跨文件引用",
+        provider="cross_file_refs",
+        enabled=True,
+        params={"max_refs_per_file": rule_max_refs},
+    )
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd._dynamic_rules = DynamicRuleSet(rules=(rule,), fingerprint="fp:facade")
+    return cmd
+
+
+def _capture_collect(monkeypatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def _fake_collect(files, diff_by_file, worktree, *, params=None):
+        seen["params"] = params
+        return {fp: [] for fp in files}
+
+    monkeypatch.setattr(mod, "collect_refs", _fake_collect)
+    return seen
+
+
+def test_facade_collect_refs_honours_rule_max_refs(monkeypatch):
+    """3 个位置参数调用时，规则里的 max_refs_per_file 必须生效（不被写死 6 覆盖）."""
+    seen = _capture_collect(monkeypatch)
+    cmd = _facade_cmd(rule_max_refs=2)
+
+    out = cmd._collect_cross_file_refs_for_mr(
+        ["a.py"], {"a.py": "+def alpha():"}, "/tmp/wt",
+    )
+
+    assert out == {"a.py": []}
+    assert seen["params"]["max_refs_per_file"] == 2
+
+
+def test_facade_collect_refs_explicit_arg_wins_over_rule(monkeypatch):
+    """显式第 4 位置参数优先于规则声明的值."""
+    seen = _capture_collect(monkeypatch)
+    cmd = _facade_cmd(rule_max_refs=2)
+
+    cmd._collect_cross_file_refs_for_mr(
+        ["a.py"], {"a.py": "+def alpha():"}, "/tmp/wt", 7,
+    )
+
+    assert seen["params"]["max_refs_per_file"] == 7
+
+
 # ---------------------------------------------------------------------------
 # loader：模板文件存在性 / 逃逸校验
 # ---------------------------------------------------------------------------

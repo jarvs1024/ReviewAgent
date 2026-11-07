@@ -59,7 +59,10 @@ def _int_param(params: dict[str, Any], name: str) -> int:
     raw = (params or {}).get(name, default)
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: YAML `.inf` / 超大 float（int(inf) 抛 OverflowError，
+        # 不在 ValueError 层级下）— 与非法值同样 clamp 到默认，避免同步门面
+        # 路径（improve.py → find_refs）把异常抛到调用方。
         value = default
         invalid = True
     else:
