@@ -18,19 +18,26 @@
 """
 from __future__ import annotations
 
+import hashlib as _hashlib
 import re
-import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from reviewagent.commands._common import BaseCommand, BaseCommandError
-from reviewagent.commands._common import publish_overview
-import subprocess
-import hashlib as _hashlib
+from reviewagent.commands._common import BaseCommand, BaseCommandError, publish_overview
 from reviewagent.config import config
+from reviewagent.git.diff_lines import (
+    find_nearest_valid_line,
+    format_line_map_for_prompt,
+    parse_diff_line_map,
+)
+from reviewagent.gitlab.client import GitLabError
+from reviewagent.llm import OpencodeOutputError, get_client
+from reviewagent.logging_setup import logger
 from reviewagent.review.policies.python import (
     HELP_TEXT_FOOTER as _HELP_TEXT_FOOTER,
+)
+from reviewagent.review.policies.python import (
     code_first_line_matches,
     collect_defined_names,
     detect_apply_risk,
@@ -43,7 +50,6 @@ from reviewagent.review.policies.python import (
     score_suggestion,
     test_feature_density,
 )
-from reviewagent.review.policy import rule_ref_pattern
 
 
 def _suggestion_fingerprint(file_path: str, line: int, header: str | None) -> str:
@@ -63,7 +69,7 @@ def _suggestion_fingerprint(file_path: str, line: int, header: str | None) -> st
     """
     hdr_norm = (header or "").strip().lower()
     return _hashlib.sha256(
-        f"{file_path}:{line}:{hdr_norm}".encode("utf-8")
+        f"{file_path}:{line}:{hdr_norm}".encode()
     ).hexdigest()[:24]
 
 
@@ -82,15 +88,7 @@ def _suggestion_content_fingerprint(existing_code: str) -> str:
     """
     import re as _cf_re
     code_norm = _cf_re.sub(r"\s+", " ", (existing_code or "").strip())
-    return _hashlib.sha256(code_norm.encode("utf-8")).hexdigest()[:16]
-from reviewagent.git.diff_lines import (
-    find_nearest_valid_line,
-    format_line_map_for_prompt,
-    parse_diff_line_map,
-)
-from reviewagent.gitlab.client import GitLabError
-from reviewagent.logging_setup import logger
-from reviewagent.llm import OpencodeOutputError, get_client
+    return _hashlib.sha256(code_norm.encode()).hexdigest()[:16]
 # Backward-compat re-exports
 ImproveError = BaseCommandError
 
@@ -190,439 +188,53 @@ class ImproveCommand(BaseCommand):
     # 正文由 Python 策略提供（suggestion body 构造在 review/policies/python.py）.
     HELP_TEXT_FOOTER = _HELP_TEXT_FOOTER
     # ---------- 并行分块调用 ----------
+    def _lazy_deps(self):
+        from reviewagent.review.policies.registry import get as get_policy
+        from reviewagent.scenario.profile import active_or_load
+        from reviewagent.scenario.rules.resolver import assemble_base
+
+        profile = getattr(self, "_profile", None) or active_or_load()
+        rule_set = getattr(self, "_rule_set", None) or assemble_base(profile)
+        policy = getattr(self, "_policy", None) or get_policy(
+            profile.language, profile=profile, cfg=globals()["config"], read_lines=self._read_file_lines,
+        )
+        self._profile, self._rule_set, self._policy = profile, rule_set, policy
+        return profile, rule_set, policy
+
     def _call_agent(self, ws, *, overflow_files: list[str] | None = None) -> dict[str, Any]:
-        """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果.
+        """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果（编排在 review/runner.py）."""
+        from reviewagent.review.runner import Callbacks, RunContext, run
 
-        V6 新增:
-        - overflow_files: 来自 MAX_DIFF_CHARS 截断的文件列表 (强制 patch-only 模式)
-        - 测试路径过滤 (improve_skip_test_paths)
-        - 文件优先级排序 (improve_keyword_paths 加分)
-        - 4 档 strategy 分配 (full / partial / patch / skip)
-        - _build_chunk_prompt 根据 strategy 切换 source_block (full/partial/patch)
-        """
-        overflow_set: set[str] = set(overflow_files or [])
-        line_map = self._diff_line_map()
-        all_files = sorted(line_map.keys())
-        new_files = self._new_files_from_diff(ws.diff_file) if getattr(ws, "diff_file", None) else set()
-        self._review_mode = "business"  # 默认值, 后续 auto 判断可能覆盖
-
-        # 文件扩展名过滤: 跳过 .md/.doc/.png 等非代码文件
-        excluded_ext = set(config.review_exclude_extensions)
-        if excluded_ext:
-            code_files = [f for f in all_files if not any(f.lower().endswith(ext) for ext in excluded_ext)]
-            if len(code_files) < len(all_files):
-                skipped_ext = set(all_files) - set(code_files)
-                logger.info(
-                    "improve.file_filter project={} mr={} skipped={}",
-                    self.project_id, self.mr_iid, sorted(skipped_ext),
-                )
-            all_files = code_files
-
-        if not all_files:
-            return {"summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。", "suggestions": []}
-
-        # V7 检视模式判断: auto 按 diff 测试文件占比自动切 business/test
-        review_mode = config.improve_review_mode
-        if review_mode == "auto":
-            from pathlib import Path as _P
-            _test_pats = config.improve_skip_test_paths
-            _test_count = sum(
-                1 for fp in all_files
-                if any(p in fp or _P(fp).name.startswith(p.rstrip("/")) for p in _test_pats)
-            )
-            review_mode = "test" if _test_count > len(all_files) * 0.5 else "business"
-            logger.info(
-                "improve.review_mode_auto project={} mr={} test_files={} total={} -> {}",
-                self.project_id, self.mr_iid, _test_count, len(all_files), review_mode,
-            )
-        self._review_mode = review_mode
-
-        # V6 测试路径过滤 (路径级别, 不与扩展名过滤冲突)
-        # V7: test 模式下 IMPROVE_SKIP_TEST_PATHS 仍生效 (D 配置: 测试代码即业务代码, 但 conftest.py 等共享 fixture 文件仍跳过)
-        test_skipped: list[str] = []
-        skip_test_patterns = config.improve_skip_test_paths
-        if skip_test_patterns:
-            from pathlib import Path as _P
-            filtered: list[str] = []
-            for fp in all_files:
-                name = _P(fp).name
-                if any(pat in fp or name.startswith(pat.rstrip("/")) for pat in skip_test_patterns):
-                    test_skipped.append(fp)
-                else:
-                    filtered.append(fp)
-            if test_skipped:
-                logger.info(
-                    "improve.test_path_filter project={} mr={} skipped={}",
-                    self.project_id, self.mr_iid, sorted(test_skipped),
-                )
-            all_files = filtered
-
-        # C: 自动 case / 测试文件抽样检视 (IMPROVE_TEST_SAMPLE_MAX>0 启用)
-        _sample_paths = config.improve_test_sample_paths
-        _sample_max = config.improve_test_sample_max
-        if _sample_paths and _sample_max > 0:
-            all_files, _unsampled = self._sample_case_files(all_files, _sample_paths, _sample_max)
-            if _unsampled:
-                test_skipped.extend(_unsampled)
-                logger.info(
-                    "improve.test_file_sampling project={} mr={} total_case={} sampled={} skipped={}",
-                    self.project_id, self.mr_iid, len(_unsampled) + _sample_max, _sample_max, len(_unsampled),
-                )
-
-        if not all_files:
-            return {
-                "summary_md": "## 改进总览\n\n无代码文件变更，跳过检视。" if not test_skipped
-                              else f"## 改进总览\n\n> ⏭️ 以下 {len(test_skipped)} 个测试/配置文件跳过检视: {', '.join(test_skipped[:10])}{'...' if len(test_skipped) > 10 else ''}",
-                "suggestions": [],
-            }
-
-        # V7 文件优先级打分 (按 score 倒序排序)
-        # 信号: 改动大小(log1p不封顶) + 关键路径 + 改动密度 + 测试特征密度
-        file_meta: dict[str, tuple[int, int]] = {}
-        for fp in all_files:
-            diff_size = len(line_map.get(fp, set()))
-            file_size = self._read_file_line_count(fp, ws)
-            file_meta[fp] = (diff_size, file_size)
-
-        # 预算测试特征密度 (test 模式下才计入权重, 但所有模式都算 — log 用)
-        test_feature_cache: dict[str, float] = {}
-        if config.improve_priority_weight_test_feature > 0:
-            for fp in all_files:
-                test_feature_cache[fp] = self._test_feature_density(fp, file_meta[fp][1])
-
-        def _priority(fp: str) -> float:
-            diff_size, file_size = file_meta[fp]
-            # 改动大小: log1p 单调递增不封顶, 大改动永远比小改动高分
-            score = math.log1p(diff_size) * config.improve_priority_weight_diff
-            # 关键路径加分 (降到 25, 不再碾压 diff_size)
-            fp_stripped = fp.lstrip("/")
-            if any(kw.lstrip("/") in fp or kw in fp_stripped for kw in config.improve_keyword_paths):
-                score += config.improve_priority_weight_keyword
-            # 改动密度: 改动占比 > 30% → 高风险 (整文件重写级别)
-            if file_size > 0 and (diff_size / file_size) > 0.3:
-                score += config.improve_priority_weight_density
-            # 测试特征密度: test 模式生效, business 模式权重=0
-            if config.improve_priority_weight_test_feature > 0:
-                score += test_feature_cache.get(fp, 0.0) * config.improve_priority_weight_test_feature
-            # A: 新增文件优先级加分 (自然吃满 IMPROVE_FULL_FILES 配额 → full 源码)
-            if config.improve_new_file_full and fp in new_files:
-                score += config.improve_priority_weight_keyword
-            return score
-
-        sorted_files = sorted(all_files, key=_priority, reverse=True)
-
-        # V7 strategy 分配 (full / partial / patch) — 抽成独立方法
-        strategy = self._assign_strategy(sorted_files, file_meta, overflow_set)
-
-        files = list(sorted_files)  # 所有文件都进 LLM (策略降级但不丢)
-        skipped_files = list(test_skipped)  # 测试/配置文件不进 LLM
-        cap_truncated: list[str] = []  # D: 文件数硬上限截断的低优先级文件 (与 test_skipped 分开记)
-
-        # 记录 strategy 分布 (metrics + log)
-        from reviewagent.metrics import inc as _metric_inc
-        strat_counts = {"full": 0, "partial": 0, "patch": 0}
-        for s in strategy.values():
-            strat_counts[s] = strat_counts.get(s, 0) + 1
-        _metric_inc(
-            "reviewagent_improve_strategy_total",
-            project_id=str(self.project_id),
-            mr_iid=str(self.mr_iid),
-            strategy="full", amount=float(strat_counts["full"]),
+        profile, rule_set, policy = self._lazy_deps()
+        ctx = RunContext(
+            project_id=self.project_id, mr_iid=self.mr_iid, ws=ws,
+            repo_context=getattr(self, "repo_context", "") or "",
+            cfg=globals()["config"], profile=profile, rule_set=rule_set,
+            dynamic_rules=getattr(self, "_dynamic_rules", None), policy=policy,
+            callbacks=Callbacks(
+                split_diff=self._split_diff_by_file,
+                diff_line_map=self._diff_line_map,
+                read_lines=self._read_file_lines,
+                read_line_count=self._read_file_line_count,
+                stat_bytes=self._stat_file_bytes,
+                blob_sha=self._file_blob_sha,
+                head_sha=self._get_mr_head_sha,
+                new_files=self._new_files_from_diff,
+                collect_cross_refs=self._collect_cross_file_refs_for_mr,
+                build_chunk_prompt=self._build_chunk_prompt,
+                build_batch_prompt=self._build_batch_prompt,
+                call_chunk=self._call_chunk,
+                build_user_prompt=self._build_user_prompt,
+                super_call_agent=lambda ws_: super(ImproveCommand, self)._call_agent(ws_),
+                set_token_summary=lambda p, c, m, cost: setattr(
+                    self, "_last_oc_result", type(self)._make_token_summary(p, c, m, cost),
+                ),
+            ),
+            overflow_files=overflow_files,
         )
-        _metric_inc(
-            "reviewagent_improve_strategy_total",
-            project_id=str(self.project_id),
-            mr_iid=str(self.mr_iid),
-            strategy="partial", amount=float(strat_counts["partial"]),
-        )
-        _metric_inc(
-            "reviewagent_improve_strategy_total",
-            project_id=str(self.project_id),
-            mr_iid=str(self.mr_iid),
-            strategy="patch", amount=float(strat_counts["patch"]),
-        )
-        logger.info(
-            "improve.strategy project={} mr={} total={} full={} partial={} patch={} test_skip={}",
-            self.project_id, self.mr_iid, len(files),
-            strat_counts["full"], strat_counts["partial"], strat_counts["patch"],
-            len(test_skipped),
-        )
-
-        if len(files) <= 1 and not skipped_files:
-            # E2BIG 防线: 单文件源码块超预算时不走基类捷径 (基类
-            # _build_user_prompt 无条件内嵌全部源码, MR 1136 即此路径触发
-            # [Errno 7]), 落到下方 strategy 路径按预算降级 partial/patch
-            if not self._single_file_over_full_budget(files, file_meta):
-                return super()._call_agent(ws)  # 单文件走原路径
-
-        # 按文件拆分 diff
-        diff_by_file = self._split_diff_by_file(ws.diff_file, files)
-
-        # V9 增量复用: 按文件内容指纹 (blob sha) 复用, 取代整 MR head_sha.
-        # 原因: apply 到文件 A → push 新 commit → 整 MR head 变 → head_sha 复用对 ALL 文件
-        # 失效 (每轮全检, 在 apply 循环里收益=0). blob sha 只在文件内容真变时才变
-        # → 仅重检 A, 复用 B/C/D. shallow fetch 不靠 git 历史, 直接读 worktree 算 sha1.
-        _publish_head_sha = self._get_mr_head_sha() or ""
-        files_to_review: list[str] = []
-        files_reuse: list[str] = []
-        file_states: dict[str, dict] = {}
-        # 当前每文件 blob (从 worktree 读 raw bytes + sha1; 始终算, 供末尾 upsert)
-        cur_blobs: dict[str, str | None] = {fp: self._file_blob_sha(fp, ws) for fp in files}
-        if _publish_head_sha:
-            from reviewagent.telemetry.store import get_store
-            try:
-                file_states = get_store().get_file_review_states(self.project_id, self.mr_iid)
-            except Exception as e:
-                logger.warning("improve.incremental_lookup_failed (non-fatal, full review): {}", e)
-                file_states = {}
-
-            if file_states:
-                # 内容变了的文件的 diff (跨文件影响检测: unchanged 文件标识符出现在
-                # changed diff → 强制重检, 防 "B 没变但被 A 牵动" 漏检)
-                changed_diffs = {
-                    fp: diff_by_file.get(fp, "") for fp in files
-                    if cur_blobs.get(fp) != (file_states.get(fp) or {}).get("blob_sha")
-                }
-                changed_text = "\n".join(changed_diffs.values())
-
-                for fp in files:
-                    prev = file_states.get(fp)
-                    prev_blob = (prev or {}).get("blob_sha") if prev else None
-                    if prev_blob and cur_blobs.get(fp) == prev_blob:
-                        # 内容未变 → 跨文件影响检测
-                        idents = set(self._extract_identifiers(diff_by_file.get(fp, "")))
-                        cross_impact = any(
-                            ident in changed_text for ident in idents if len(ident) >= 3
-                        ) if changed_text else False
-                        if cross_impact:
-                            files_to_review.append(fp)  # 强制重检
-                        else:
-                            files_reuse.append(fp)  # 复用上轮
-                    else:
-                        files_to_review.append(fp)  # 内容变了 / 首次 / blob 未知 → 重检
-
-                if files_reuse:
-                    logger.info(
-                        "improve.incremental project={} mr={} total={} review={} reuse={}",
-                        self.project_id, self.mr_iid,
-                        len(files), len(files_to_review), len(files_reuse),
-                    )
-                    from reviewagent.metrics import inc as _metric_inc
-                    _metric_inc(
-                        "reviewagent_improve_incremental_reuse_total",
-                        project_id=str(self.project_id), mr_iid=str(self.mr_iid),
-                        amount=float(len(files_reuse)),
-                    )
-            else:
-                files_to_review = list(files)
-        else:
-            files_to_review = list(files)  # 拿不到 head_sha, 全检
-
-        # D: 文件数硬上限 (IMPROVE_MAX_FILES_TO_REVIEW) — 只截断送 LLM 的集合, 复用文件不计数
-        _max_files = config.improve_max_files_to_review
-        if _max_files > 0 and len(files_to_review) > _max_files:
-            files_to_review, _truncated = self._apply_file_count_cap(
-                files_to_review, new_files, config.improve_keyword_paths, _max_files,
-            )
-            if _truncated:
-                cap_truncated.extend(_truncated)
-                logger.info(
-                    "improve.file_count_cap project={} mr={} max={} kept={} truncated={}",
-                    self.project_id, self.mr_iid, _max_files, len(files_to_review), len(_truncated),
-                )
-
-        # 全局一次 rg 找所有 diff 文件的跨文件 caller 引用 (替代 per-file 重复 rg)
-        # V8: 只对需重检的文件做 rg (reuse 文件不调 LLM, 不需要)
-        wt = str(ws.worktree)
-        cross_file_refs_by_file = self._collect_cross_file_refs_for_mr(files_to_review, diff_by_file, wt)
-
-        # V9: 从 store 取复用文件上轮的 open suggestions (blob 相同 → 仍有效)
-        # 只取 state=open (applied/dismissed 不重显); head_sha 用该文件上次检视的 head
-        # (blob 相同 → 内容字节相同 → 行号必然仍有效)
-        # L4: 同时取待重检文件 (blob 变了) 的 prior open issues 作 prompt 锚点
-        # → LLM 确认而非从零重推, 省 output token + 跨轮连续; 行号已偏移, 让 LLM 重定位
-        reuse_suggestions: list[dict[str, Any]] = []
-        prior_issues_by_file: dict[str, list[dict[str, Any]]] = {}
-        _need_load = bool(files_reuse) or (bool(files_to_review) and bool(file_states))
-        if _need_load:
-            from reviewagent.telemetry.store import get_store
-            try:
-                _store = get_store()
-                rows = _store.list_suggestions(
-                    project_id=self.project_id, mr_iid=self.mr_iid, limit=500,
-                )
-                reuse_set = set(files_reuse)
-                review_set = set(files_to_review)
-                for r in rows:
-                    fp = r.get("file_path", "")
-                    if not fp:
-                        continue
-                    last_head = (file_states.get(fp) or {}).get("head_sha") or ""
-                    if (r.get("head_sha") != last_head
-                            or (r.get("state") or "open") != "open"):
-                        continue
-                    item = {
-                        "file": fp,
-                        "start_line": r.get("target_line", 0),
-                        "severity": r.get("severity", "medium"),
-                        "label": r.get("label", ""),
-                        "header": r.get("header", ""),
-                        "rationale": r.get("one_sentence_summary", "") or r.get("header", ""),
-                    }
-                    if fp in reuse_set:
-                        reuse_suggestions.append(item)
-                    elif fp in review_set:
-                        prior_issues_by_file.setdefault(fp, []).append(item)
-                if files_reuse:
-                    logger.info(
-                        "improve.incremental_reuse_loaded project={} mr={} reuse_files={} suggestions={}",
-                        self.project_id, self.mr_iid, len(files_reuse), len(reuse_suggestions),
-                    )
-                if prior_issues_by_file:
-                    logger.info(
-                        "improve.prior_anchors project={} mr={} files={} anchors={}",
-                        self.project_id, self.mr_iid,
-                        len(prior_issues_by_file),
-                        sum(len(v) for v in prior_issues_by_file.values()),
-                    )
-            except Exception as e:
-                logger.warning("improve.reuse_load_failed (non-fatal): {}", e)
-                # 复用失败 → 降级为全检; 锚点失败 → 跳过锚点 (LLM 自行重推, 无害)
-                if files_reuse:
-                    files_to_review = list(files)
-                    files_reuse = []
-
-        # V9: 计算各文件 priority, 透传给 _merge_chunks 做建议预算加权 (高优先级文件更多槽位)
-        _file_priorities = {fp: _priority(fp) for fp in files}
-
-        # 并行调用 (只调需重检的文件)
-        # V9: files_to_review 为空 + files_reuse 非空 → 全复用, 不兜底
-        if not files_to_review and files_reuse:
-            logger.info("improve.all_reused project={} mr={} — skip LLM entirely", self.project_id, self.mr_iid)
-            # V9: 记录本轮各文件状态 (全复用, blob 不变, count=复用建议数)
-            _counts = {}
-            for s in reuse_suggestions:
-                fp = s.get("file", "")
-                if fp:
-                    _counts[fp] = _counts.get(fp, 0) + 1
-            self._upsert_file_review_states(files, ws, _publish_head_sha, _counts)
-            return self._merge_chunks(
-                [{"summary_md": "", "suggestions": reuse_suggestions}],
-                skipped_files=skipped_files,
-                file_priorities=_file_priorities,
-                new_files=new_files,
-                cap_truncated=cap_truncated,
-            )
-        files_llm = files_to_review if files_to_review else list(files)  # 兜底: 拿不到sha或首次
-
-        # V10: 小 diff 文件合并批次 (full 策略文件独享 chunk, 减少 LLM 调用次数)
-        groups: list[list[str]] = [[fp] for fp in files_llm]
-        if config.improve_batch_enabled and len(files_llm) > 1:
-            groups = self._group_files_for_batching(
-                files_llm, diff_by_file, strategy,
-                max_diff_lines=config.improve_batch_max_diff_lines,
-                max_files=config.improve_batch_max_files,
-                max_total_lines=config.improve_batch_max_total_lines,
-            )
-            _batched = sum(1 for g in groups if len(g) > 1)
-            _merged_files = sum(len(g) for g in groups if len(g) > 1)
-            if _batched:
-                logger.info(
-                    "improve.batch project={} mr={} files={} llm_calls={} batched_groups={} merged_files={}",
-                    self.project_id, self.mr_iid, len(files_llm),
-                    len(groups), _batched, _merged_files,
-                )
-
-        workers = min(len(groups), config.improve_parallel_workers)
-
-        logger.info(
-            "improve.parallel project={} mr={} files_to_review={} reuse={} groups={} workers={}",
-            self.project_id, self.mr_iid, len(files_llm), len(files_reuse), len(groups), workers,
-        )
-
-        chunk_results: list[dict[str, Any]] = []
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_cost_credits = 0.0
-        last_model = ""
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {}
-            for group in groups:
-                if len(group) == 1:
-                    fp = group[0]
-                    prompt = self._build_chunk_prompt(
-                        fp, diff_by_file.get(fp, ""), line_map.get(fp, set()), ws,
-                        cross_file_refs=cross_file_refs_by_file.get(fp, []),
-                        strategy=strategy.get(fp, "full"),  # V6: 4 档 strategy 透传
-                        prior_issues=prior_issues_by_file.get(fp),  # L4 锚点
-                    )
-                    fut = pool.submit(self._call_chunk, prompt, ws, fp)
-                else:
-                    prompt = self._build_batch_prompt(
-                        group, diff_by_file, line_map, ws,
-                        cross_file_refs_by_file, strategy, prior_issues_by_file,
-                    )
-                    fut = pool.submit(self._call_chunk, prompt, ws, f"batch({len(group)}f)")
-                futures[fut] = group
-            for fut in as_completed(futures):
-                group = futures[fut]
-                label = group[0] if len(group) == 1 else f"batch({len(group)}f)"
-                try:
-                    oc_result = fut.result()
-                    data = oc_result.data
-                    # V10: 批次防御 — 丢弃 file 不在组内的 suggestions (防归属混淆)
-                    if len(group) > 1 and isinstance(data, dict):
-                        gs = set(group)
-                        suggs = data.get("suggestions") or []
-                        valid = [s for s in suggs if isinstance(s, dict) and s.get("file") in gs]
-                        dropped = len(suggs) - len(valid)
-                        if dropped:
-                            logger.warning(
-                                "improve.batch_dropped project={} mr={} group={} dropped={} (file 字段不在组内)",
-                                self.project_id, self.mr_iid, label, dropped,
-                            )
-                        data["suggestions"] = valid
-                    chunk_results.append(data)
-                    total_prompt_tokens += oc_result.prompt_tokens
-                    total_completion_tokens += oc_result.completion_tokens
-                    total_cost_credits += oc_result.cost_credits
-                    if oc_result.model:
-                        last_model = oc_result.model
-                except Exception as e:
-                    logger.error(
-                        "improve.chunk_failed project={} mr={} file={} err={}",
-                        self.project_id, self.mr_iid, label, e,
-                    )
-                    # 单个 chunk 失败不影响其他 (batch 失败 = 全组空结果, 不拆分重试)
-                    chunk_results.append({"summary_md": "", "suggestions": []})
-
-        # 汇总 token 统计到 _last_oc_result (主线程安全写入)
-        self._last_oc_result = type(self)._make_token_summary(
-            total_prompt_tokens, total_completion_tokens, last_model, total_cost_credits
-        )
-
-        # V8: 把复用的 suggestions 也合并进结果 (作为额外的 "chunk result")
-        if reuse_suggestions:
-            chunk_results.append({"summary_md": "", "suggestions": reuse_suggestions})
-
-        # V9: 记录本轮各文件状态 (LLM 产出 + 复用), 供下一轮按文件粒度复用
-        _counts: dict[str, int] = {}
-        for cr in chunk_results:
-            for s in (cr.get("suggestions") or []):
-                fp = s.get("file", "")
-                if fp:
-                    _counts[fp] = _counts.get(fp, 0) + 1
-        self._upsert_file_review_states(files, ws, _publish_head_sha, _counts)
-
-        # skipped_files 已含 test_skipped (上文 skipped_files = list(test_skipped))
-        # V6 软阈值化后不再有"限额 overflow 丢弃"——overflow 文件降级为 patch 仍进 LLM
-        return self._merge_chunks(
-            chunk_results,
-            skipped_files=skipped_files,
-            file_priorities=_file_priorities,
-            new_files=new_files,
-            cap_truncated=cap_truncated,
-        )
+        result = run(ctx)
+        self._review_mode = ctx.review_mode
+        return result
 
     def _call_chunk(self, prompt: str, ws, file_path: str) -> dict[str, Any]:
         """单个 chunk 的 opencode 调用."""
@@ -943,227 +555,14 @@ class ImproveCommand(BaseCommand):
 
     @staticmethod
     def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None, file_priorities: dict[str, float] | None = None, new_files: set[str] | None = None, cap_truncated: list[str] | None = None) -> dict[str, Any]:
-        """合并多个 chunk 的结果.
+        """合并多个 chunk 的结果（实现见 review/runner.py:merge_chunks，门面薄委托）."""
+        from reviewagent.review.runner import merge_chunks
 
-        V9 选优: file_priorities 用于 per-file 预算加权 (高优先级文件更多槽位).
-        """
-        all_suggestions: list[dict[str, Any]] = []
-        summaries: list[str] = []
-
-        for r in results:
-            if not isinstance(r, dict):
-                continue
-            suggs = r.get("suggestions") or []
-            if isinstance(suggs, list):
-                all_suggestions.extend(suggs)
-            sm = (r.get("summary_md") or "").strip()
-            if sm:
-                summaries.append(sm)
-
-        # 去重: 同 file + 同 start_line 只保留 severity 最高的
-        seen: dict[str, dict[str, Any]] = {}
-        sev_order = {"high": 3, "medium": 2, "low": 1}
-        for s in all_suggestions:
-            if not isinstance(s, dict):
-                continue
-            key = f"{s.get('file', '')}:{s.get('start_line', 0)}"
-            existing = seen.get(key)
-            if existing is None:
-                seen[key] = s
-            else:
-                new_sev = sev_order.get((s.get("severity") or "medium").lower(), 2)
-                old_sev = sev_order.get((existing.get("severity") or "medium").lower(), 2)
-                if new_sev > old_sev:
-                    seen[key] = s
-
-        merged_suggestions = list(seen.values())
-
-        # 严重度过滤: 低于 min_severity 的建议不发布 ({prefix}-RULE 引用豁免)
-        min_severity = config.improve_min_severity
-        if min_severity:
-            sev_levels = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-            min_level = sev_levels.get(min_severity, 0)
-            if min_level > 0:
-                kept = []
-                for s in merged_suggestions:
-                    rationale = (s.get("rationale") or "")
-                    if rule_ref_pattern(config.rule_key_prefix).search(rationale):
-                        kept.append(s)
-                        continue
-                    s_sev = (s.get("severity") or "medium").lower()
-                    s_level = sev_levels.get(s_sev, 2)
-                    if s_level >= min_level:
-                        kept.append(s)
-                    else:
-                        logger.info(
-                            "improve.severity_filter file={} line={} severity={} header={!r}",
-                            s.get("file"), s.get("start_line"), s_sev, s.get("header"),
-                        )
-                merged_suggestions = kept
-
-        # 评分过滤: 低于 min_score 的建议不发布 ({prefix}-RULE 引用豁免)
-        min_score = config.improve_min_score
-        if min_score > 0:
-            kept = []
-            for s in merged_suggestions:
-                rationale = (s.get("rationale") or "")
-                if rule_ref_pattern(config.rule_key_prefix).search(rationale):
-                    kept.append(s)
-                    continue
-                sc = ImproveCommand._score_suggestion(s)
-                if sc >= min_score:
-                    kept.append(s)
-                else:
-                    logger.info(
-                        "improve.score_filter file={} line={} score={} header={!r}",
-                        s.get("file"), s.get("start_line"), sc, s.get("header"),
-                    )
-            merged_suggestions = kept
-
-        # V9 选优: (severity, score) 复合键 + priority 加权 per-file 预算 + 全局两遍填充(覆盖优先)
-        # 修复: 原来只按 severity 3 档排序, 同档内随机(稳定排序=处理序) → 50文件时 top15
-        # 全落前3个文件, 47文件零覆盖. 改为 score 区分同档 + 每文件先取1条保证覆盖.
-        sev_rank = {"high": 3, "medium": 2, "low": 1}
-
-        def _key(s):
-            # severity 为主键 (遵循 high/medium/low 严格分级), score 为同档内区分器
-            return (sev_rank.get((s.get("severity") or "medium").lower(), 2),
-                    ImproveCommand._score_suggestion(s))
-
-        # per-file 预算: 按 priority 加权 (高优先级文件更多槽位, 低优先级少占, 下限 min_per_file)
-        max_per_file = config.improve_max_suggestions_per_file
-        min_per_file = config.improve_min_suggestions_per_file
-        _max_prio = max((file_priorities or {}).values()) if file_priorities else 0.0
-
-        def _budget(fp: str) -> int:
-            if max_per_file <= 0:
-                return 10 ** 9  # 不限
-            # A: 新增文件给满额, 不被低优先级压缩 + 豁免单文件截断
-            if new_files and fp in new_files:
-                return max_per_file
-            if not file_priorities or _max_prio <= 0:
-                return max_per_file
-            norm = (file_priorities.get(fp, 0.0) or 0.0) / _max_prio
-            b = min_per_file + round((max_per_file - min_per_file) * norm)
-            return max(min_per_file, min(max_per_file, b))
-
-        by_file: dict[str, list[dict[str, Any]]] = {}
-        for s in merged_suggestions:
-            fp = s.get("file", "") or "_unknown"
-            by_file.setdefault(fp, []).append(s)
-
-        # 每文件按复合键留 top budget(fp), 其余计入 per_file_truncated
-        per_file_truncated = 0
-        kept_list: list[dict[str, Any]] = []
-        for fp, suggs in by_file.items():
-            suggs.sort(key=_key, reverse=True)
-            b = _budget(fp)
-            if len(suggs) > b:
-                per_file_truncated += len(suggs) - b
-                suggs = suggs[:b]
-            kept_list.extend(suggs)
-        if per_file_truncated > 0:
-            logger.info(
-                "improve.per_file_limit max_per_file={} min={} truncated={} (降为总览文字)",
-                max_per_file, min_per_file, per_file_truncated,
-            )
-        merged_suggestions = kept_list
-
-        # 全局限流: 两遍填充 — 第1遍每文件1条(覆盖优先), 第2遍按复合键填剩余(质量优先)
-        max_suggestions = config.improve_max_suggestions
-        truncated_count = 0
-        if max_suggestions > 0 and len(merged_suggestions) > max_suggestions:
-            by_file2: dict[str, list[dict[str, Any]]] = {}
-            for s in merged_suggestions:
-                fp = s.get("file", "") or "_unknown"
-                by_file2.setdefault(fp, []).append(s)
-            # 文件按其最佳建议的复合键降序 (高价值文件先占覆盖槽); 新增文件优先 (A: 豁免截断)
-            file_order = sorted(by_file2.keys(),
-                                key=lambda fp: (1 if (new_files and fp in new_files) else 0,
-                                               _key(by_file2[fp][0])),
-                                reverse=True)
-            phase1: list[dict[str, Any]] = []
-            used: dict[str, int] = {}
-            for fp in file_order:
-                if len(phase1) >= max_suggestions:
-                    break
-                phase1.append(by_file2[fp][0])  # 每文件1条 → 覆盖最大化
-                used[fp] = 1
-            # 第2遍: 剩余候选按复合键降序填, 受 budget 约束
-            remaining = [s for fp in by_file2 for s in by_file2[fp][1:]]
-            remaining.sort(key=_key, reverse=True)
-            for s in remaining:
-                if len(phase1) >= max_suggestions:
-                    break
-                fp = s.get("file", "") or "_unknown"
-                if used.get(fp, 0) < _budget(fp):
-                    phase1.append(s)
-                    used[fp] = used.get(fp, 0) + 1
-            truncated_count = len(merged_suggestions) - len(phase1)
-            merged_suggestions = phase1
-            logger.info(
-                "improve.suggestion_limit kept={} truncated={} files_covered={}",
-                max_suggestions, truncated_count,
-                len({s.get("file") for s in phase1}),
-            )
-
-        # summary: 从 suggestions 列表生成概览
-        total_suggestions = len(merged_suggestions)
-        if total_suggestions > 0:
-            items: list[str] = []
-            for s in merged_suggestions:
-                fp = s.get("file", "")
-                line = s.get("start_line", "")
-                header = (s.get("header") or "").strip()
-                severity = (s.get("severity") or "medium").upper()
-                label = s.get("label", "")
-                rationale = (s.get("rationale") or "").strip()
-                # 简短版: 文件 + 行号 + 标签 + header + 理由首句
-                short = rationale.split("。")[0].split("，")[0]
-                line_str = f"L{line}" if line else ""
-                items.append(
-                    f"- **`{fp}`**{line_str} — **{header}** [{severity}/{label}]: {short}"
-                )
-            merged_summary = (
-                "## 改进总览\n\n"
-                + "\n".join(items)
-            )
-            if truncated_count > 0:
-                merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
-            if per_file_truncated > 0:
-                merged_summary += f"\n\n> ℹ️ 另有 {per_file_truncated} 条建议因单文件上限（{max_per_file} 条/文件）降为总览文字"
-            if skipped_files:
-                # V6: skipped_files 现在仅含测试/配置文件 (IMPROVE_FULL_FILES 软阈值化后不再丢文件)
-                display = skipped_files[:10]
-                suffix = f" 等 {len(skipped_files)} 个" if len(skipped_files) > 10 else ""
-                merged_summary += (
-                    f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视 (含 IMPROVE_SKIP_TEST_PATHS 配置跳过 + IMPROVE_TEST_SAMPLE_PATHS 抽样跳过): "
-                    f"{', '.join(display)}{suffix}"
-                )
-        else:
-            merged_summary = "## 改进总览\n\n未发现问题。"
-            if skipped_files:
-                display = skipped_files[:10]
-                suffix = f" 等 {len(skipped_files)} 个" if len(skipped_files) > 10 else ""
-                merged_summary += (
-                    f"\n\n> ⏭️ 以下 {len(skipped_files)} 个测试/配置文件跳过检视: "
-                    f"{', '.join(display)}{suffix}"
-                )
-
-        # D: 文件数硬上限截断的低优先级文件 (与 test_skipped 分开提示)
-        if cap_truncated:
-            _display = cap_truncated[:10]
-            _suffix = f" 等 {len(cap_truncated)} 个" if len(cap_truncated) > 10 else ""
-            merged_summary += (
-                f"\n\n> ✂️ 另有 {len(cap_truncated)} 个低优先级文件因超出文件数上限"
-                f"（IMPROVE_MAX_FILES_TO_REVIEW={config.improve_max_files_to_review}）未检视: "
-                f"{', '.join(_display)}{_suffix}"
-            )
-
-        return {
-            "summary_md": merged_summary,
-            "suggestions": merged_suggestions,
-        }
+        return merge_chunks(
+            results, cfg=config, score_fn=ImproveCommand._score_suggestion,
+            skipped_files=skipped_files, file_priorities=file_priorities,
+            new_files=new_files, cap_truncated=cap_truncated,
+        )
 
     # ---------- helpers ----------
     @staticmethod
@@ -1432,7 +831,7 @@ class ImproveCommand(BaseCommand):
                     lbl = (pi.get("label") or "").strip()
                     _anchors.append(f"{i}. [{sev}] {hdr}" + (f" (label={lbl})" if lbl else ""))
                 prior_section = (
-                    f"#### 已知问题锚点（上一轮 open；行号可能偏移）\n\n"
+                    "#### 已知问题锚点（上一轮 open；行号可能偏移）\n\n"
                     + "\n".join(_anchors) + "\n\n"
                 )
 
@@ -2136,7 +1535,6 @@ class ImproveCommand(BaseCommand):
                         )
                         inline_skipped.append({"suggestion": raw, "reason": "duplicate_at_line"})
                         continue
-                    import hashlib as _dedup_hl
                     # Fingerprint (file:line:header_normalized) — 同位置同类问题永远同 fp.
                     # helper 在模块顶部定义, record_suggestion 处复用.
                     _dedup_fingerprint = _suggestion_fingerprint(
@@ -2277,7 +1675,7 @@ class ImproveCommand(BaseCommand):
                         # line 在 apply 后会漂移. header 同文件同类问题稳定.
                         _cohort_hdr = re.sub(r"\s+", " ", (normalised.get("header") or "").strip().lower())
                         cohort_key = _hl.sha256(
-                            f"{file_path}:{_cohort_hdr}".encode("utf-8")
+                            f"{file_path}:{_cohort_hdr}".encode()
                         ).hexdigest()[:24]
                         get_store().record_suggestion(
                             project_id=self.project_id,
@@ -2392,7 +1790,7 @@ class ImproveCommand(BaseCommand):
         #      不会知道文件筛选护栏丢掉了哪些文件, 需从 agent_result["summary_md"] 抽 marker 行.
         if summary_md:
             _guardrail_markers = self._extract_guardrail_markers(
-                (agent_result.get("summary_md") or "")
+                agent_result.get("summary_md") or ""
             )
             for _marker in _guardrail_markers:
                 if _marker and _marker not in summary_md:
@@ -2574,7 +1972,8 @@ class ImproveCommand(BaseCommand):
                 after_lines = file_lines[after_start:after_start + n_added]
                 tail_lines = improved_lines[-n_added:]
                 if len(after_lines) == n_added and all(
-                    t.strip() == a.strip() for t, a in zip(tail_lines, after_lines)
+                    t.strip() == a.strip()
+                    for t, a in zip(tail_lines, after_lines, strict=False)
                 ):
                     improved_lines = improved_lines[:-n_added]
                     improved_code = "\n".join(improved_lines)
@@ -2602,13 +2001,13 @@ class ImproveCommand(BaseCommand):
         #     例: `f = open() / f.write / f.close` → `with open as f: / f.write`
         #         improved=[with..., f.write] < existing=[f=open, f.write, f.close]
         #         improved[0]=`with ...` ≠ target_line=`f = open(...)`, 但有 `with` 块起始.
-        _BLOCK_OPEN_RE = re.compile(r'^\s*(?:with\s|try\s*:|if\s|for\s|while\s|async\s|class\s|def\s)')
+        _block_open_re = re.compile(r'^\s*(?:with\s|try\s*:|if\s|for\s|while\s|async\s|class\s|def\s)')
         is_structural_refactor = False
         if len(improved_lines) < len(existing_lines) and improved_lines:
             norm_existing_set = {ln.strip() for ln in existing_lines if ln.strip()}
             new_block_openers = [
                 ln.strip() for ln in improved_lines
-                if ln.strip() and _BLOCK_OPEN_RE.match(ln.strip())
+                if ln.strip() and _block_open_re.match(ln.strip())
                 and ln.strip() not in norm_existing_set
             ]
             if new_block_openers:

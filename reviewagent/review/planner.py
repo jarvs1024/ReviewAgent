@@ -76,6 +76,8 @@ class Plan:
             里那部分，仅用于日志/回归断言）。
         single_file: 旧 ``if len(files) <= 1 and not skipped_files`` 判定；
             调用方仍需叠加 full 源码预算检查后决定是否走基类捷径。
+        single_file_over_budget: ``single_file`` 且唯一文件的 full 源码块
+            超预算（E2BIG 防线）；非单文件时恒为 False。
         overflow: 本次规划文件中的 overflow 集合（强制 patch）。
         review_mode: 本次生效的检视模式（``business`` / ``test``）。
     """
@@ -91,6 +93,7 @@ class Plan:
     new_files: frozenset[str] = frozenset()
     cross_reuse: tuple[str, ...] = ()
     single_file: bool = False
+    single_file_over_budget: bool = False
     overflow: frozenset[str] = frozenset()
     review_mode: str = "business"
 
@@ -474,6 +477,7 @@ def plan(
         batches: Sequence[Sequence[str]],
         *,
         single_file: bool = False,
+        single_file_over_budget: bool = False,
         cross_reuse: Sequence[str] = (),
     ) -> Plan:
         planned_set = set(planned)
@@ -489,6 +493,7 @@ def plan(
             new_files=frozenset(news & planned_set),
             cross_reuse=tuple(cross_reuse),
             single_file=single_file,
+            single_file_over_budget=single_file_over_budget,
             overflow=frozenset(overflow & planned_set),
             review_mode=review_mode,
         )
@@ -607,8 +612,11 @@ def plan(
         len(test_skipped),
     )
 
-    # 9) E2BIG 单文件捷径标记 (预算检查由调用方叠加)
+    # 9) E2BIG 单文件捷径标记 (唯一文件的 full 源码块预算在同一 file_meta/budget 上判定)
     single_file = len(sorted_files) <= 1 and not test_skipped
+    single_file_over_budget = single_file and single_file_over_full_budget(
+        sorted_files, file_meta, stat_bytes=stat_bytes, budget_fn=get_budget,
+    )
 
     # 10) V9 增量复用: 按文件内容指纹 (blob sha) 复用, 取代整 MR head_sha.
     # blob sha 只在文件内容真变时才变 → 只重检变了的文件, 其余复用.
@@ -698,7 +706,9 @@ def plan(
 
     return _finalise(
         sorted_files, files_to_review, files_reuse, strategy, batches,
-        single_file=single_file, cross_reuse=cross_reuse,
+        single_file=single_file,
+        single_file_over_budget=single_file_over_budget,
+        cross_reuse=cross_reuse,
     )
 
 
