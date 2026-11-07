@@ -231,6 +231,66 @@ def test_run_command_tolerates_missing_current_job(monkeypatch):
         )
 
 
+def test_verify_job_manifest_disables_retries_on_mismatch(monkeypatch):
+    """确定性指纹错配（RuntimeError 消息含 mismatch）→ 毒 job，retries_left 清零."""
+    import rq
+
+    from reviewagent.workers import tasks
+
+    fake_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr(rq, "get_current_job", lambda *args, **kwargs: fake_job)
+
+    def _boom(_payload):
+        raise RuntimeError("job.config_mismatch: config fingerprint mismatch job='a' active='b'")
+
+    monkeypatch.setattr(tasks, "verify_job", _boom)
+
+    with pytest.raises(RuntimeError, match="mismatch"):
+        tasks._verify_job_manifest(
+            profile="p",
+            profile_fingerprint="a",
+            config_fingerprint="a",
+            ruleset_fingerprint="",
+            dynamic_rules_fingerprint="",
+        )
+
+    assert fake_job.retries_left == 0
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("bad payload"),
+        RuntimeError("io boom"),
+    ],
+    ids=["value-error", "runtime-error-io"],
+)
+def test_verify_job_manifest_keeps_retries_on_transient_error(monkeypatch, exc):
+    """非确定性错误（I/O、坏 profile 等）不能当毒 job：异常原样抛出，重试次数保留."""
+    import rq
+
+    from reviewagent.workers import tasks
+
+    fake_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr(rq, "get_current_job", lambda *args, **kwargs: fake_job)
+
+    def _boom(_payload):
+        raise exc
+
+    monkeypatch.setattr(tasks, "verify_job", _boom)
+
+    with pytest.raises(type(exc)):
+        tasks._verify_job_manifest(
+            profile="p",
+            profile_fingerprint="a",
+            config_fingerprint="a",
+            ruleset_fingerprint="",
+            dynamic_rules_fingerprint="",
+        )
+
+    assert fake_job.retries_left == 2
+
+
 def test_run_mr_chain_rejects_mismatch_before_lock_and_command(monkeypatch):
     """链入口先校验指纹：错配时既不取锁，也不执行命令（无锁/store 副作用）."""
     import rq

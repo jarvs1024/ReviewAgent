@@ -47,6 +47,28 @@ def test_readyz_returns_503_with_reasons_when_unready(client, monkeypatch):
     }
 
 
+def test_readyz_awaits_threadpool_offloaded_readiness(client, monkeypatch):
+    """探针必须在 threadpool 执行：若退化为事件循环内直调，会记录到 running loop."""
+    import asyncio
+
+    observed: list[bool] = []
+
+    def _probe():
+        try:
+            asyncio.get_running_loop()
+            observed.append(True)
+        except RuntimeError:
+            observed.append(False)
+        return (True, [])
+
+    monkeypatch.setattr(main_module.bootstrap, "runtime_readiness", _probe)
+
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 200
+    assert observed == [False], "runtime_readiness 必须在 threadpool 执行，不能阻塞事件循环"
+
+
 def test_root_endpoint_mentions_readyz(client):
     body = client.get("/").json()
     assert body["endpoints"].get("readyz") == "GET /readyz"
@@ -63,6 +85,25 @@ def test_sqlite_probe_passes_with_working_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store_module, "_store", store_module.Store(tmp_path / "probe.db"))
 
     assert bootstrap._check_sqlite() == []
+
+
+def test_sqlite_probe_uses_store_ping(monkeypatch):
+    """探针必须走 `Store.ping()`（真实 SELECT 1）；退化为 `_conn()` 时本测试失败."""
+    from reviewagent.telemetry import store as store_module
+
+    calls: list[str] = []
+
+    class _FakeStore:
+        def ping(self):
+            calls.append("ping")
+
+        def _conn(self):  # pragma: no cover - 只会在实现退化时被触达
+            raise AssertionError("探针不得直接使用 _conn()，应调用 Store.ping()")
+
+    monkeypatch.setattr(store_module, "get_store", lambda: _FakeStore())
+
+    assert bootstrap._check_sqlite() == []
+    assert calls == ["ping"]
 
 
 def test_sqlite_probe_reports_failure(monkeypatch):

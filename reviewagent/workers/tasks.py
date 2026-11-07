@@ -316,6 +316,19 @@ def _disable_retries_for_current_job() -> None:
         logger.warning("job.retries_clear skipped: {}", e)
 
 
+def _is_manifest_mismatch(exc: BaseException) -> bool:
+    """是否 `verify_job` 产生的确定性指纹错配（消息含 "mismatch" / "fingerprint"）.
+
+    `verify_job` 还会经由 `active_or_load()` / `active_rule_set()` / `current()`
+    抛出文件 I/O、坏 REVIEW_PROFILE 等非确定性错误——那些重试是有意义的，
+    不能当毒 job 处理。
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    message = str(exc).lower()
+    return "mismatch" in message or "fingerprint" in message
+
+
 def _verify_job_manifest(
     *,
     profile: str,
@@ -324,7 +337,7 @@ def _verify_job_manifest(
     ruleset_fingerprint: str,
     dynamic_rules_fingerprint: str,
 ) -> None:
-    """校验运行指纹；失败时先抑制重试再把异常抛出（确定性错配 → 毒 job 不重试）."""
+    """校验运行指纹；仅确定性错配抑制重试，其余异常原样抛出（保留重试）."""
     try:
         verify_job({
             "profile": profile,
@@ -333,8 +346,9 @@ def _verify_job_manifest(
             "ruleset_fingerprint": ruleset_fingerprint,
             "dynamic_rules_fingerprint": dynamic_rules_fingerprint,
         })
-    except Exception:  # noqa: BLE001 — verify_job 的失败都是确定性的，重试无意义
-        _disable_retries_for_current_job()
+    except Exception as exc:  # noqa: BLE001 — 原样 re-raise，只区分是否毒 job
+        if _is_manifest_mismatch(exc):
+            _disable_retries_for_current_job()
         raise
 
 
@@ -473,7 +487,10 @@ def run_mr_chain(
     - telemetry store 用 check_same_thread=False + 每次新建连接, 线程安全
     - chain lock 仍持有整个期间, 防止同 MR 的其他 chain job 并发
 
-    失败隔离: 某命令失败不影响其他命令执行.
+    失败语义:
+    - 指纹错配是 job 级失败: 在取锁 / store sweep 之前抛 `RuntimeError`（fail
+      fast，且不保留重试）——不做任何锁或 store 副作用。
+    - 命令执行失败仍是 per-command 的: 某命令失败不影响其他命令执行.
     返回: 每个命令的执行结果列表 (按原始命令顺序).
 
     并发保护: 同 MR 的多个 chain job (来自多次 Apply / push) 共享一把 Redis
