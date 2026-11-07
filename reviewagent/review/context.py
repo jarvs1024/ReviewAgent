@@ -22,6 +22,8 @@ from reviewagent.scenario.prompts import load_template, render_template
 
 _SOURCE_DIR = "prompts/source"
 _DYNAMIC_DIR = "prompts/dynamic"
+_DEFAULT_EMPTY_TEMPLATE = f"{_DYNAMIC_DIR}/cross_file_refs_empty.md"
+_DEFAULT_ITEMS_TEMPLATE = f"{_DYNAMIC_DIR}/cross_file_refs_refs.md"
 # 单文件 full 源码上限（超出截断，防 prompt 撑爆参数长度）
 _MAX_FULL_LINES = 5000
 # patch 模式最多展示的 merged 段数（控 token 成本）
@@ -205,11 +207,23 @@ def render_cross_file_section(
     refs: list[dict],
     *,
     profile: Profile | None = None,
+    evidence: Any = None,
+    empty_template: str | None = None,
+    items_template: str | None = None,
 ) -> str:
-    """渲染跨文件影响分析 section（空引用 / 有引用两条模板）."""
+    """渲染跨文件影响分析 section（四态中的三态由本函数决定）.
+
+    * `evidence.degraded` → 强制空模板（provider 超时 / 异常）；
+    * `refs` 空 → 空模板；非空 → items 模板；
+    * 规则禁用（整段不存在）由调用方直接传 ``""``，不经过本函数。
+
+    不在此处记日志：降级告警由 runner 统一输出。
+    """
+    if evidence is not None and getattr(evidence, "degraded", False):
+        refs = []
     if not refs:
         return _render(
-            f"{_DYNAMIC_DIR}/cross_file_refs_empty.md",
+            empty_template or _DEFAULT_EMPTY_TEMPLATE,
             {},
             profile,
             trim=False,
@@ -220,7 +234,7 @@ def render_cross_file_section(
         for ref in refs
     )
     return _render(
-        f"{_DYNAMIC_DIR}/cross_file_refs_refs.md",
+        items_template or _DEFAULT_ITEMS_TEMPLATE,
         {"refs_count": str(len(refs)), "refs_block": refs_block},
         profile,
         trim=False,

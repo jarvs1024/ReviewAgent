@@ -863,11 +863,15 @@ def test_plan_matches_legacy_call_agent(monkeypatch, tmp_path):
     captured: list[tuple[str, str | None]] = []
     original = cmd._build_chunk_prompt
 
-    def _spy(fp, diff, valid_lines, ws_, cross_file_refs=None, strategy=None, prior_issues=None):
+    def _spy(
+        fp, diff, valid_lines, ws_, cross_file_refs=None, strategy=None,
+        prior_issues=None, cross_file_enabled=True,
+    ):
         captured.append((fp, strategy))
         return original(
             fp, diff, valid_lines, ws_,
             cross_file_refs=cross_file_refs, strategy=strategy, prior_issues=prior_issues,
+            cross_file_enabled=cross_file_enabled,
         )
 
     monkeypatch.setattr(cmd, "_build_chunk_prompt", _spy)

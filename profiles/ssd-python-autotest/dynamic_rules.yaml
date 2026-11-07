@@ -4,11 +4,12 @@ rules:
     title: 跨文件引用
     provider: cross_file_refs
     enabled: true
-    template: prompts/dynamic/cross_file_refs.md
+    empty_template: prompts/dynamic/cross_file_refs_empty.md
+    items_template: prompts/dynamic/cross_file_refs_refs.md
     params:
       rg_file_type: py
-      max_symbols_per_file: 12
-      max_refs_per_file: 5
-      hits_per_symbol: 3
-      timeout_seconds: 20
+      max_symbols_per_file: 15
+      max_refs_per_file: 6
+      hits_per_symbol: 2
+      timeout_seconds: 35
     limits: {max_files: 60}

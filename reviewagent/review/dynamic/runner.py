@@ -73,6 +73,27 @@ def _collect(
     return tuple(refs)
 
 
+def refs_by_file(
+    evidence: dict[str, DynamicEvidence], files: Any,
+) -> dict[str, list[dict]]:
+    """把扁平动态证据按 `review_file` 还原为 ``{file: [ref, ...]}``.
+
+    provider 在每条 ref 上追加了内部键 `review_file`（被检视文件）；此处剥离该
+    键并分桶，使渲染器输入与迁移前（legacy 门面返回值）逐字节一致。降级证据与
+    指向非本次检视文件的 ref 一律丢弃。
+    """
+    out: dict[str, list[dict]] = {fp: [] for fp in files}
+    for ev in evidence.values():
+        if ev.degraded:
+            continue
+        for ref in ev.refs:
+            item = dict(ref)
+            review_file = item.pop("review_file", None)
+            if review_file in out:
+                out[review_file].append(item)
+    return out
+
+
 def run_dynamic(
     ruleset: DynamicRuleSet,
     *,

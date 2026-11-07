@@ -101,9 +101,17 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
     assert rule.provider == "cross_file_refs"
     assert rule.enabled is True
     assert rule.title == "跨文件引用"
-    # 模板只是被声明/规范化，存在性校验留给 T14。
-    assert rule.template == "prompts/dynamic/cross_file_refs.md"
-    assert rule.params["timeout_seconds"] == 20
+    # T14: 模板拆分为空 / 有引用两条，加载期校验存在性。
+    assert rule.template is None
+    assert rule.empty_template == "prompts/dynamic/cross_file_refs_empty.md"
+    assert rule.items_template == "prompts/dynamic/cross_file_refs_refs.md"
+    assert rule.params == {
+        "rg_file_type": "py",
+        "max_symbols_per_file": 15,
+        "max_refs_per_file": 6,
+        "hits_per_symbol": 2,
+        "timeout_seconds": 35,
+    }
     assert rule.limits == {"max_files": 60}
     assert declared_ruleset.fingerprint
     assert str((base_profile.root / "dynamic_rules.yaml").stat().st_mtime_ns) == (
@@ -206,6 +214,8 @@ def test_defaults_normalized(tmp_path, base_profile):
     assert rule.title == "DYN-MIN"
     assert rule.enabled is True
     assert rule.template is None
+    assert rule.empty_template is None
+    assert rule.items_template is None
     assert rule.params == {}
     assert rule.limits == {}
 
@@ -307,7 +317,7 @@ def test_success_returns_tuple_refs(declared_ruleset):
     assert fetched["files"] == ["core.py"]
     assert fetched["diff_by_file"] == {}
     assert fetched["worktree"] is None
-    assert fetched["params"]["timeout_seconds"] == 20
+    assert fetched["params"]["timeout_seconds"] == 35
 
 
 class _Boom:

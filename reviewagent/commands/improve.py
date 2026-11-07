@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -88,11 +87,14 @@ class ImproveCommand(BaseCommand):
     HELP_TEXT_FOOTER = _HELP_TEXT_FOOTER
     # ---------- 并行分块调用 ----------
     def _lazy_deps(self):
+        from reviewagent.review.dynamic import load_dynamic_rules
         from reviewagent.review.policies.registry import get as get_policy
         from reviewagent.scenario.profile import active_or_load
         from reviewagent.scenario.rules.resolver import assemble_base
 
         profile = getattr(self, "_profile", None) or active_or_load()
+        # 动态规则加载即校验模板；配置错误在命令启动期 fail-fast（预期行为）。
+        self._dynamic_rules = getattr(self, "_dynamic_rules", None) or load_dynamic_rules(profile)
         rule_set = getattr(self, "_rule_set", None) or assemble_base(profile)
         policy = getattr(self, "_policy", None) or get_policy(
             profile.language, profile=profile, cfg=globals()["config"], read_lines=self._read_file_lines,
@@ -109,7 +111,7 @@ class ImproveCommand(BaseCommand):
             project_id=self.project_id, mr_iid=self.mr_iid, ws=ws,
             repo_context=getattr(self, "repo_context", "") or "",
             cfg=globals()["config"], profile=profile, rule_set=rule_set,
-            dynamic_rules=getattr(self, "_dynamic_rules", None), policy=policy,
+            dynamic_rules=self._dynamic_rules, policy=policy,
             callbacks=Callbacks(
                 split_diff=self._split_diff_by_file,
                 diff_line_map=self._diff_line_map,
@@ -187,68 +189,32 @@ class ImproveCommand(BaseCommand):
         """
         return extract_identifiers(diff)
 
-    @staticmethod
-    def _find_cross_file_refs(file_path: str, diff: str, worktree_path, max_refs: int = 6) -> list[dict]:
+    def _dynamic_rule_params(self) -> dict[str, Any]:
+        """当前启用 `cross_file_refs` 规则的参数（缺省回退 legacy 常量）."""
+        from reviewagent.review.dynamic.providers.cross_file_refs import DEFAULT_PARAMS
+
+        params = dict(DEFAULT_PARAMS)
+        ruleset = getattr(self, "_dynamic_rules", None)
+        if ruleset is not None:
+            for rule in ruleset.rules:
+                if rule.enabled and rule.provider == "cross_file_refs":
+                    params.update(rule.params or {})
+                    break
+        return params
+
+    def _find_cross_file_refs(
+        self, file_path: str, diff: str, worktree_path, max_refs: int = 6,
+    ) -> list[dict]:
         """在 worktree 找 diff 改动的标识符在其他文件的 caller 引用.
 
-        用 rg (ripgrep) 排除当前文件, 每个 ident 限 2 条命中, 总数限 max_refs.
-        返回 [{"file": rel, "line": N, "content": "..."}, ...]
+        实现见 review/dynamic/providers/cross_file_refs.py:find_refs（门面薄委托）；
+        params 从当前动态规则集解析，`max_refs` 保持 legacy 默认 6。
         """
-        from pathlib import Path
-        idents = ImproveCommand._extract_identifiers(diff)
-        if not idents or not worktree_path:
-            return []
-        workdir = str(Path(worktree_path))
-        refs: list[dict] = []
-        seen: set[tuple[str, int]] = set()
-        rel_self = file_path
-        for ident in idents:
-            if len(ident) < 3:
-                continue
-            try:
-                result = subprocess.run(
-                    ["rg", "-n", "--no-heading", "-t", "py",
-                     rf"\b{ident}\b", ".",
-                     "-g", f"!{rel_self}",
-                     "-g", "!reviewagent/**",
-                     "-g", "!tests/**",
-                     "-g", "!.venv/**",
-                     "-g", "!**/__pycache__/**",
-                     "-g", "!.git/**"],
-                    cwd=workdir,
-                    capture_output=True, text=True, timeout=8,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-                continue
-            hits = 0
-            for line in result.stdout.splitlines():
-                parts = line.split(":", 2)
-                if len(parts) < 3:
-                    continue
-                f, ln_s, content = parts[0], parts[1], parts[2]
-                f_rel = f.lstrip("./")
-                if f_rel == rel_self or not f_rel:
-                    continue
-                try:
-                    ln = int(ln_s)
-                except ValueError:
-                    continue
-                key = (f_rel, ln)
-                if key in seen:
-                    continue
-                seen.add(key)
-                refs.append({
-                    "file": f_rel,
-                    "line": ln,
-                    "content": content.strip()[:500],
-                    "ident": ident,
-                })
-                hits += 1
-                if hits >= 2 or len(refs) >= max_refs:
-                    break
-            if len(refs) >= max_refs:
-                break
-        return refs
+        from reviewagent.review.dynamic.providers.cross_file_refs import find_refs
+
+        params = self._dynamic_rule_params()
+        params["max_refs_per_file"] = max_refs
+        return find_refs(file_path, diff, worktree_path, params=params)
 
     def _collect_cross_file_refs_for_mr(
         self, files: list[str], diff_by_file: dict[str, str], worktree_path, max_refs_per_file: int = 6
@@ -256,112 +222,52 @@ class ImproveCommand(BaseCommand):
         """对整个 MR 一次性 rg 找所有 diff 文件的标识符在仓库的 caller 引用.
 
         Returns: {file_path: [{file, line, content, ident}, ...]}
-        - 一次 rg 用所有 ident 的并集作为 pattern, 避免每个文件重启 subprocess
-        - 按 ident 分桶, 给每个 diff file 排除自身的 caller
-        - 比 per-file 调用更全: file A 的 ident 在 file B 的 caller 也会被发现 (反之亦然)
+        实现见 review/dynamic/providers/cross_file_refs.py:collect_refs（门面薄委托）；
+        params 从当前动态规则集解析，`max_refs_per_file` 保持 legacy 默认 6。
         """
-        from pathlib import Path
-        if not worktree_path:
-            return {fp: [] for fp in files}
-        workdir = str(Path(worktree_path))
+        from reviewagent.review.dynamic.providers.cross_file_refs import collect_refs
 
-        # 1. 收集所有 ident (per file)
-        idents_by_file: dict[str, set[str]] = {}
-        all_idents: set[str] = set()
-        for fp in files:
-            idents = set(self._extract_identifiers(diff_by_file.get(fp, "")))
-            idents_by_file[fp] = idents
-            all_idents |= idents
-        # 排除短 ident + 常见噪音
-        stop = {"self", "cls", "None", "True", "False", "args", "kwargs"}
-        all_idents = {i for i in all_idents if len(i) >= 3} - stop
-        if not all_idents:
-            return {fp: [] for fp in files}
-
-        # 2. 一次 rg 找所有 ident (按 ident 分类)
-        idents_sorted = sorted(all_idents)
-        import re as _re
-        pattern = r"\b(?:" + "|".join(_re.escape(i) for i in idents_sorted) + r")\b"
-        try:
-            result = subprocess.run(
-                ["rg", "-n", "--no-heading", "-t", "py", pattern, ".",
-                 "-g", "!reviewagent/**",
-                 "-g", "!tests/**",
-                 "-g", "!.venv/**",
-                 "-g", "!**/__pycache__/**",
-                 "-g", "!.git/**"],
-                cwd=workdir,
-                capture_output=True, text=True, timeout=30,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            logger.warning("improve.cross_file_global_rg failed: {}", e)
-            return {fp: [] for fp in files}
-
-        # 3. 解析: 按 ident 分桶
-        refs_by_ident: dict[str, list[dict]] = {i: [] for i in all_idents}
-        for line in result.stdout.splitlines():
-            parts = line.split(":", 2)
-            if len(parts) < 3:
-                continue
-            f, ln_s, content = parts[0], parts[1], parts[2]
-            f_rel = f.lstrip("./")
-            if not f_rel:
-                continue
-            try:
-                ln = int(ln_s)
-            except ValueError:
-                continue
-            # 一行只算一个 ident 命中 (按 ident 顺序优先)
-            for ident in idents_sorted:
-                if _re.search(rf"\b{_re.escape(ident)}\b", content):
-                    refs_by_ident[ident].append({
-                        "file": f_rel,
-                        "line": ln,
-                        "content": content.strip()[:500],
-                        "ident": ident,
-                    })
-                    break
-
-        # 4. 给每个 diff file 分配 refs (排除自身, 每个 ident 限 2, 总限 max_refs)
-        out: dict[str, list[dict]] = {}
-        for fp in files:
-            my_idents = idents_by_file.get(fp, set())
-            seen: set[tuple[str, int]] = set()
-            refs: list[dict] = []
-            for ident in my_idents:
-                hits = 0
-                for r in refs_by_ident.get(ident, []):
-                    if r["file"] == fp:
-                        continue
-                    key = (r["file"], r["line"])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    refs.append(r)
-                    hits += 1
-                    if hits >= 2 or len(refs) >= max_refs_per_file:
-                        break
-                if len(refs) >= max_refs_per_file:
-                    break
-            out[fp] = refs
-        return out
+        params = self._dynamic_rule_params()
+        params["max_refs_per_file"] = max_refs_per_file
+        return collect_refs(files, diff_by_file, worktree_path, params=params)
 
     def _render_cross_file_section(self, refs: list[dict]) -> str:
         """把 cross-file 引用渲染成 chunk prompt 段.
 
         文案在 ``prompts/dynamic/cross_file_refs_*.md``，实现见
         review/context.py:render_cross_file_section（门面薄委托）.
+        模板路径优先取当前动态规则集里首个启用的声明，缺省用 legacy 模板。
         """
         from reviewagent.review.context import render_cross_file_section
         from reviewagent.scenario.profile import active_or_load
 
-        return render_cross_file_section(refs, profile=active_or_load())
+        empty_template: str | None = None
+        items_template: str | None = None
+        ruleset = getattr(self, "_dynamic_rules", None)
+        if ruleset is not None:
+            for rule in ruleset.rules:
+                if not rule.enabled:
+                    continue
+                if empty_template is None and rule.empty_template:
+                    empty_template = rule.empty_template
+                if items_template is None and rule.items_template:
+                    items_template = rule.items_template
+                if empty_template and items_template:
+                    break
+
+        return render_cross_file_section(
+            refs,
+            profile=active_or_load(),
+            empty_template=empty_template,
+            items_template=items_template,
+        )
 
     def _build_chunk_prompt(
         self, file_path: str, file_diff: str, valid_lines: set[int], ws,
         cross_file_refs: list[dict] | None = None,
         *, strategy: str = "full",
         prior_issues: list[dict] | None = None,
+        cross_file_enabled: bool = True,
     ) -> str:
         """构建单文件的精简 prompt.
 
@@ -419,9 +325,13 @@ class ImproveCommand(BaseCommand):
         )
 
         # 跨文件 caller 引用: 优先用 _call_agent 预计算的全局结果, fallback 到 per-file 调用
-        if cross_file_refs is None:
-            cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
-        cross_file_section = self._render_cross_file_section(cross_file_refs)
+        if cross_file_enabled:
+            if cross_file_refs is None:
+                cross_file_refs = self._find_cross_file_refs(file_path, file_diff, wt)
+            cross_file_section = self._render_cross_file_section(cross_file_refs)
+        else:
+            # 动态规则禁用：整段不存在（连空模板都不渲染）。
+            cross_file_section = ""
 
         # L4: 已知问题锚点 — 让 LLM 确认而非重推, 聚焦新问题
         prior_section = ""
@@ -686,6 +596,8 @@ class ImproveCommand(BaseCommand):
         cross_file_refs_by_file: dict[str, list[dict]],
         strategy: dict[str, str],
         prior_issues_by_file: dict[str, list[dict]],
+        *,
+        cross_file_enabled: bool = True,
     ) -> str:
         """V10: 多文件合并批次 prompt — rules 只发一次 + N 个文件 section.
 
@@ -718,7 +630,10 @@ class ImproveCommand(BaseCommand):
                 source_block = self._build_patch_only_block(fp, valid_lines)
 
             vl_str = f"{fp}: {sorted(valid_lines)}"
-            cross_section = self._render_cross_file_section(cross_file_refs_by_file.get(fp, []))
+            cross_section = (
+                self._render_cross_file_section(cross_file_refs_by_file.get(fp, []))
+                if cross_file_enabled else ""
+            )
 
             prior_section = ""
             pis = prior_issues_by_file.get(fp)

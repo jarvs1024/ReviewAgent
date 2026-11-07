@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from reviewagent.logging_setup import logger
+from reviewagent.review.dynamic.runner import refs_by_file, run_dynamic
 from reviewagent.review.planner import (
     Plan,
     group_files_for_batching,
@@ -21,6 +22,9 @@ from reviewagent.review.planner import (
     plan as plan_files,
 )
 from reviewagent.review.validation import merge_chunks
+
+# 动态规则整体线程超时（规则自身 params.timeout_seconds 优先）。
+_DEFAULT_DYNAMIC_TIMEOUT_S = 35.0
 
 
 @dataclass
@@ -220,9 +224,34 @@ def run(ctx: RunContext) -> dict[str, Any]:
 
     # 全局一次 rg 找所有 diff 文件的跨文件 caller 引用 (替代 per-file 重复 rg)
     # V8: 只对需重检的文件做 rg (reuse 文件不调 LLM, 不需要)
-    cross_file_refs_by_file = callbacks.collect_cross_refs(
-        files_to_review, diff_by_file, str(ctx.ws.worktree),
-    )
+    # 有动态规则集时走 run_dynamic（四态证据）；否则保持 legacy 直调回调。
+    cross_file_enabled = True
+    if ctx.dynamic_rules is None:
+        cross_file_refs_by_file = callbacks.collect_cross_refs(
+            files_to_review, diff_by_file, str(ctx.ws.worktree),
+        )
+    else:
+        enabled_rules = [r for r in ctx.dynamic_rules.rules if r.enabled]
+        if enabled_rules:
+            evidence = run_dynamic(
+                ctx.dynamic_rules,
+                files=files_to_review,
+                diff_by_file=diff_by_file,
+                worktree=str(ctx.ws.worktree),
+                timeout_s=_DEFAULT_DYNAMIC_TIMEOUT_S,
+                fetch_callback=callbacks.collect_cross_refs,
+            )
+            cross_file_refs_by_file = refs_by_file(evidence, files_to_review)
+            for key, ev in evidence.items():
+                if ev.degraded:
+                    logger.warning(
+                        "dynamic.degraded rule={} provider={} reason={}",
+                        key, ev.provider, ev.reason,
+                    )
+        else:
+            # 规则全部禁用 → 整段不存在（不是空模板）。
+            cross_file_refs_by_file = {}
+            cross_file_enabled = False
 
     # V9: 从 store 取复用文件上轮的 open suggestions (blob 相同 → 仍有效)
     # 只取 state=open (applied/dismissed 不重显); head_sha 用该文件上次检视的 head
@@ -336,12 +365,14 @@ def run(ctx: RunContext) -> dict[str, Any]:
                     cross_file_refs=cross_file_refs_by_file.get(fp, []),
                     strategy=planned.strategies.get(fp, "full"),
                     prior_issues=prior_issues_by_file.get(fp),
+                    cross_file_enabled=cross_file_enabled,
                 )
                 fut = pool.submit(callbacks.call_chunk, prompt, ctx.ws, fp)
             else:
                 prompt = callbacks.build_batch_prompt(
                     group, diff_by_file, line_map, ctx.ws,
                     cross_file_refs_by_file, planned.strategies, prior_issues_by_file,
+                    cross_file_enabled=cross_file_enabled,
                 )
                 fut = pool.submit(callbacks.call_chunk, prompt, ctx.ws, f"batch({len(group)}f)")
             futures[fut] = group

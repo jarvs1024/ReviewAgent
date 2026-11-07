@@ -8,9 +8,9 @@
 provider 注册与执行骨架在 `review/dynamic/`。
 
 加载期硬失败（配置错误必须启动即暴露）：越出 profile 目录、不支持的
-`schema_version`、未知顶层/规则字段、非法或重复的 `DYN-*` 键。模板文件存在性
-由 T14 落地（默认 profile 已声明 `prompts/dynamic/cross_file_refs.md`），这里只
-规范化字符串。
+`schema_version`、未知顶层/规则字段、非法或重复的 `DYN-*` 键、以及声明的
+模板文件缺失或越出 profile 目录。模板字段 `template` / `empty_template` /
+`items_template` 均只做路径规范化并校验存在性。
 """
 from __future__ import annotations
 
@@ -24,7 +24,11 @@ import yaml
 _KEY_RE = re.compile(r"^DYN-[A-Z0-9-]+$")
 _SCHEMA_VERSION = 1
 _ALLOWED_TOP = frozenset({"schema_version", "rules"})
-_ALLOWED_RULE = frozenset({"key", "title", "provider", "enabled", "template", "params", "limits"})
+_ALLOWED_RULE = frozenset({
+    "key", "title", "provider", "enabled", "template", "empty_template",
+    "items_template", "params", "limits",
+})
+_TEMPLATE_FIELDS = ("template", "empty_template", "items_template")
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,8 @@ class DynamicRule:
     provider: str
     enabled: bool = True
     template: str | None = None
+    empty_template: str | None = None
+    items_template: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, Any] = field(default_factory=dict)
 
@@ -71,7 +77,24 @@ def _read_mapping(path: Path) -> dict[str, Any]:
     return data
 
 
-def _parse_rule(raw: Any, seen: set[str]) -> DynamicRule:
+def _template_path(raw: Any, field_name: str, root: Path) -> str | None:
+    """规范化模板路径并校验：必须存在且位于 profile 根目录内."""
+    if raw is None:
+        return None
+    rel = str(raw)
+    path = (root / rel).resolve()
+    if root not in path.parents:
+        raise ValueError(
+            f"dynamic rule field {field_name} escapes profile root: {rel}"
+        )
+    if not path.is_file():
+        raise ValueError(
+            f"dynamic rule field {field_name} references missing template: {rel}"
+        )
+    return rel
+
+
+def _parse_rule(raw: Any, seen: set[str], root: Path) -> DynamicRule:
     if not isinstance(raw, dict):
         raise ValueError(f"dynamic rule must be a mapping: {raw!r}")
     unknown = set(raw) - _ALLOWED_RULE
@@ -86,14 +109,17 @@ def _parse_rule(raw: Any, seen: set[str]) -> DynamicRule:
     provider = raw.get("provider")
     if not provider:
         raise ValueError(f"dynamic rule missing provider: {key}")
-    template = raw.get("template")
-    # 只做规范化，不 stat：模板文件由 T14 落地并校验。
+    templates = {
+        name: _template_path(raw.get(name), name, root) for name in _TEMPLATE_FIELDS
+    }
     return DynamicRule(
         key=key,
         title=str(raw.get("title") or key),
         provider=str(provider),
         enabled=bool(raw.get("enabled", True)),
-        template=str(template) if template is not None else None,
+        template=templates["template"],
+        empty_template=templates["empty_template"],
+        items_template=templates["items_template"],
         params=dict(raw.get("params") or {}),
         limits=dict(raw.get("limits") or {}),
     )
@@ -116,5 +142,5 @@ def load_dynamic_rules(profile) -> DynamicRuleSet:
     if not isinstance(raw_rules, list):
         raise ValueError(f"dynamic_rules field rules must be a list: {path}")
     seen: set[str] = set()
-    rules = tuple(_parse_rule(raw, seen) for raw in raw_rules)
+    rules = tuple(_parse_rule(raw, seen, root) for raw in raw_rules)
     return DynamicRuleSet(rules=rules, fingerprint=str(path.stat().st_mtime_ns))
