@@ -835,36 +835,15 @@ class ImproveCommand(BaseCommand):
         return out
 
     def _render_cross_file_section(self, refs: list[dict]) -> str:
-        """把 cross-file 引用渲染成 chunk prompt 段."""
-        if not refs:
-            return (
-                "## 🟠 优先 1 — 跨文件影响分析 (规则检查之前必做, **P1**)\n\n"
-                "Python 端 rg 没找到 cross-file caller 引用 (本文件可能是新增 / 改动是局部 / 仓库无其他文件引用).\n\n"
-                "**仍请按 P1 优先级自行判断是否需要产 R-OTHER-IMPACT suggestion** — Python 端仅做粗扫，"
-                "如下情况仍可能有跨文件风险:\n"
-                "- 新增 / 重命名的公共函数、类、常量 (无 caller 但下游模块可能依赖)\n"
-                "- 改了 fixture / 测试 helper (本 diff 未引用但其它 test 可能引用)\n"
-                "- 改了 import 路径 (旧路径可能还有引用未被发现)\n"
-                "- 改了 SQL / ORM schema (model/migration 可能未同步)\n\n"
-                "确认无风险 → 在 summary_md 注明 '未发现 cross-file 关联'。**不要为凑数硬编 R-OTHER-IMPACT**。\n\n"
-            )
-        section = "## 🟠 优先 1 — 跨文件影响分析 (Python 端已 grep, **P1, 在所有规则检查之前**)\n\n"
-        section += f"在 worktree 找到 {len(refs)} 条其他文件对本文件改动的引用:\n\n"
-        for ref in refs:
-            section += (
-                f"**`{ref['file']}:{ref['line']}`** 引用 `{ref['ident']}`:\n"
-                f"```\n{ref['content']}\n```\n\n"
-            )
-        section += (
-            "**请逐一分析每条 caller 是否需要同步更新**：\n"
-            "- 函数签名变了但 caller 没传新参数 / 类型不匹配 → 产 suggestion, `label: cross-file impact`\n"
-            "- 常量改了引用方没同步 → 产 suggestion, `label: cross-file impact`\n"
-            "- 删除/重命名的函数别处还在用 → 写进 summary_md 文字, 格式 `> 跨文件影响: <文件> L<行号> <问题>`\n"
-            "- 跨文件影响类问题**不要求先命中 R-XXX 20 类**, 命中即产 suggestion\n"
-            "- `rationale` 必须以 `R-OTHER-IMPACT:<简短描述>` 开头 (例 `R-OTHER-IMPACT:caller_param` / `R-OTHER-IMPACT:schema_drift` / `R-OTHER-IMPACT:import_path` / `R-OTHER-IMPACT:fixture_break`)\n"
-            "- **严格只用于跨文件影响** — 同文件内的资源/异常/循环问题应归 R-RES / R-LOOP / R-ERR 等, 不要错归 R-OTHER-IMPACT\n\n"
-        )
-        return section
+        """把 cross-file 引用渲染成 chunk prompt 段.
+
+        文案在 ``prompts/dynamic/cross_file_refs_*.md``，实现见
+        review/context.py:render_cross_file_section（门面薄委托）.
+        """
+        from reviewagent.review.context import render_cross_file_section
+        from reviewagent.scenario.profile import active_or_load
+
+        return render_cross_file_section(refs, profile=active_or_load())
 
     def _build_chunk_prompt(
         self, file_path: str, file_diff: str, valid_lines: set[int], ws,
@@ -914,21 +893,18 @@ class ImproveCommand(BaseCommand):
         # Why: chunk prompt 跟 system prompt 分开发给 LLM, 引用式提示会被
         #      LLM 跳过或被长上下文稀释注意力 → R-XXX 20 类基本不被识别.
         #      把清单 inline 后, LLM 能直接看到每条规则的命中条件.
-        from reviewagent.prompts.loader import load_block as _load_block
-        _general_rules_block = _load_block("_general_rules_block")
+        # 规则文案在 prompts/rules_repo.md / rules_general.md（assembly 装配）.
+        from reviewagent.review.assembly import (
+            ChunkPromptParts,
+            build_chunk_prompt,
+            build_rules_block,
+        )
+        from reviewagent.scenario.profile import active_or_load
 
-        rules_block = ""
-        if self.repo_context:
-            rules_block = (
-                f"## 🔴 优先 2 — SSD 自定义规则 (项目方定义)\n\n"
-                f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
-                f"{self.repo_context}\n\n"
-                f"---\n\n"
-                f"{_general_rules_block}\n\n"
-            )
-        else:
-            # 无 SSD 规则时也要给 LLM 通用规则清单
-            rules_block = _general_rules_block + "\n\n"
+        profile = active_or_load()
+        rules_block = build_rules_block(
+            self.repo_context, self._general_rules_text(), profile=profile
+        )
 
         # 跨文件 caller 引用: 优先用 _call_agent 预计算的全局结果, fallback 到 per-file 调用
         if cross_file_refs is None:
@@ -952,17 +928,17 @@ class ImproveCommand(BaseCommand):
                 + "\n".join(_anchors) + "\n\n---\n\n"
             )
 
-        return (
-            f"{cross_file_section}"
-            f"{rules_block}"
-            f"{prior_section}"
-            f"## 本次检视文件: `{file_path}`\n\n"
-            f"### diff\n```diff\n{file_diff}\n```\n\n"
-            f"{source_block}\n\n"
-            f"### VALID NEW LINES（start_line 只能从此取）\n\n{vl_str}\n\n"
-            f"## 输出\n\n"
-            f"按 system prompt 输出 JSON。"
-            f"**summary_md 输出空字符串 `\"\"`**，只输出本文件的 suggestions。"
+        return build_chunk_prompt(
+            ChunkPromptParts(
+                cross_file_section=cross_file_section,
+                rules_block=rules_block,
+                prior_section=prior_section,
+                file_path=file_path,
+                file_diff=file_diff,
+                source_block=source_block,
+                valid_lines=vl_str,
+            ),
+            profile=profile,
         )
 
     @staticmethod
@@ -1418,16 +1394,17 @@ class ImproveCommand(BaseCommand):
         组内保留各自 strategy 的 source block (partial 仍 partial, patch 仍 patch);
         suggestions 必须带 file 字段, 解析侧会过滤 file 不在组内的建议 (防归属混淆).
         """
-        from reviewagent.prompts.loader import load_block as _load_block
-        _general_rules_block = _load_block("_general_rules_block")
-        if self.repo_context:
-            rules_block = (
-                f"## 🔴 优先 2 — SSD 自定义规则 (项目方定义)\n\n"
-                f"先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:\n\n"
-                f"{self.repo_context}\n\n---\n\n{_general_rules_block}\n\n"
-            )
-        else:
-            rules_block = _general_rules_block + "\n\n"
+        from reviewagent.review.assembly import (
+            BatchPromptParts,
+            build_batch_prompt,
+            build_rules_block,
+        )
+        from reviewagent.scenario.profile import active_or_load
+
+        profile = active_or_load()
+        rules_block = build_rules_block(
+            self.repo_context, self._general_rules_text(), profile=profile
+        )
 
         n = len(group)
         sections: list[str] = []
@@ -1469,16 +1446,14 @@ class ImproveCommand(BaseCommand):
             )
 
         file_list = "\n".join(f"- `{fp}`" for fp in group)
-        return (
-            f"{rules_block}"
-            f"## 本次检视共 {n} 个文件 (小改动合并批次)\n\n"
-            f"**每条 suggestion 的 `file` 字段只能从以下路径中选:**\n{file_list}\n\n"
-            f"---\n\n"
-            + "\n\n---\n\n".join(sections)
-            + "\n\n## 输出\n\n"
-            f"按 system prompt 输出 JSON。**summary_md 输出空字符串 `\"\"`**。\n"
-            f"输出本批次全部文件的 suggestions 合并列表; 每条必须带正确的 `file` 字段 "
-            f"(file 不在上述清单中的 suggestion 会被丢弃)。"
+        return build_batch_prompt(
+            BatchPromptParts(
+                rules_block=rules_block,
+                file_count=n,
+                file_list=file_list,
+                sections="\n\n---\n\n".join(sections),
+            ),
+            profile=profile,
         )
 
     def _test_feature_density(self, file_path: str, file_size: int) -> float:
@@ -1511,6 +1486,37 @@ class ImproveCommand(BaseCommand):
             return active_rule_set().verbatim_body
         except Exception:  # noqa: BLE001
             return ""
+
+    @staticmethod
+    def _general_rules_text() -> str:
+        """chunk / batch prompt 内联的通用规则正文（不做静默降级）.
+
+        优先取 T5 resolver 的 `verbatim_body`（与旧
+        `load_block("_general_rules_block")` 逐字节一致）；resolver 异常时回退
+        旧 loader — 旧 loader 再失败就照常抛错（与重构前一致，不能静默输出
+        空规则块）. 与 `_rule_block_text()` 的区别：后者为预算估算吞掉异常.
+        """
+        try:
+            from reviewagent.scenario.rules.resolver import active_rule_set
+
+            return active_rule_set().verbatim_body
+        except Exception:  # noqa: BLE001
+            from reviewagent.prompts.loader import load_block as _load_block
+
+            return _load_block("_general_rules_block")
+
+    def _prompt_policy(self):
+        """当前 profile 的语言策略（prompt/source 装配用；调用时解析，不缓存）."""
+        from reviewagent.review.policies.registry import get
+        from reviewagent.scenario.profile import active_or_load
+
+        profile = active_or_load()
+        return get(
+            profile.language,
+            profile=profile,
+            cfg=globals()["config"],
+            read_lines=self._read_file_lines,
+        )
 
     def _full_source_budget_bytes(self, diff_lines: int) -> int:
         """full 源码块允许的最大字节数 (含行号前缀) — E2BIG 防线.
@@ -1608,53 +1614,21 @@ class ImproveCommand(BaseCommand):
         )
 
     def _build_full_source_block(self, file_path: str) -> str:
-        """full 模式: 读 worktree 文件, 拼完整源码 (≤ 5000 行, 超出截断)."""
-        _MAX = 5000
-        lines = self._read_file_lines(file_path)
-        if not lines:
-            return f"### 完整源码\n(无法读取 {file_path})"
-        total = len(lines)
-        if total > _MAX:
-            kept = lines[:_MAX]
-            numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(kept))
-            return (
-                f"### 完整源码: `{file_path}` (共 {total} 行, **已截断到前 {_MAX} 行**)\n"
-                f"⚠️ 末尾 {total - _MAX} 行未加载, 如需检视请缩小 diff 范围或拆分 MR\n```\n{numbered}\n```"
-            )
-        numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
-        return f"### 完整源码: `{file_path}` (共 {total} 行)\n```\n{numbered}\n```"
+        """full 模式: 读 worktree 文件, 拼完整源码 (≤ 5000 行, 超出截断).
+
+        实现见 review/context.py:build_source_block（门面薄委托）.
+        """
+        return self._build_source_block(file_path, set(), "full")
 
     def _build_partial_context_block(self, file_path: str, valid_lines: set[int], ws) -> str:
         """partial 模式 (V6): 仅取 diff 行 ±N 行 context, 多段合并.
         适用: 超出 IMPROVE_FULL_FILES 但仍需 LLM 检视的中等文件.
         性能: 比 full 模式省 token, 比 patch 模式多 ±N 行 context (跨行识别).
+
+        实现见 review/context.py:build_source_block（门面薄委托）；
+        ``ws`` 仅为兼容旧签名保留（行读取走 self._read_file_lines）.
         """
-        lines = self._read_file_lines(file_path)
-        if not lines:
-            return f"### 上下文 (partial)\n(无法读取 {file_path})"
-        n = config.improve_partial_context_lines
-        ranges: list[tuple[int, int]] = []
-        for vl in sorted(valid_lines):
-            lo, hi = max(1, vl - n), min(len(lines), vl + n)
-            ranges.append((lo, hi))
-        # 合并重叠/相邻段
-        merged: list[list[int]] = []
-        for lo, hi in sorted(ranges):
-            if merged and lo <= merged[-1][1] + 1:
-                merged[-1][1] = max(merged[-1][1], hi)
-            else:
-                merged.append([lo, hi])
-        blocks: list[str] = []
-        for lo, hi in merged:
-            chunk = lines[lo - 1:hi]
-            numbered = "\n".join(f"{lo+i:4d}| {ln}" for i, ln in enumerate(chunk))
-            blocks.append(numbered)
-        return (
-            f"### diff 上下文 (partial, ±{n} 行): `{file_path}`\n"
-            f"⚠️ 此文件超出 IMPROVE_FULL_FILES={config.improve_full_files} 配额, 已降级为 partial 模式\n"
-            f"⚠️ 仅显示 diff 附近 {len(merged)} 段 (±{n} 行), 跨段语义识别能力下降\n"
-            f"```\n" + "\n...\n".join(blocks) + "\n```"
-        )
+        return self._build_source_block(file_path, valid_lines, "partial")
 
     def _build_patch_only_block(self, file_path: str, valid_lines: set[int]) -> str:
         """patch-only 模式 (V7): diff 行 ±N 行最小 context.
@@ -1662,44 +1636,30 @@ class ImproveCommand(BaseCommand):
         V6 纯行号基本检不出跨行问题; V7 加 ±patch_context_lines 行 source,
         让 LLM 能看到局部结构 (函数签名/缩进/上下文), 从"摆设"变"能用".
         适用: MAX_DIFF_CHARS overflow 文件 + 低优先级大文件.
+
+        实现见 review/context.py:build_source_block（门面薄委托）.
         """
-        n = config.improve_patch_context_lines
+        return self._build_source_block(file_path, valid_lines, "patch")
+
+    def _build_source_block(
+        self, file_path: str, valid_lines: set[int], strategy: str,
+    ) -> str:
+        """source 块装配门面: 读行 -> FileContext -> context.build_source_block."""
+        from reviewagent.review.context import build_source_block
+        from reviewagent.review.types import FileContext
+
         lines = self._read_file_lines(file_path)
-        vl = sorted(valid_lines)
-        vl_display = vl[:20]
-        vl_suffix = "..." if len(vl) > 20 else ""
-
-        # ±N 行最小 context (与 partial 同算法, 但段数不限, 只取前 5 段控成本)
-        context_block = ""
-        if lines and n > 0:
-            ranges: list[tuple[int, int]] = []
-            for v in vl:
-                lo, hi = max(1, v - n), min(len(lines), v + n)
-                ranges.append((lo, hi))
-            merged: list[list[int]] = []
-            for lo, hi in sorted(ranges):
-                if merged and lo <= merged[-1][1] + 1:
-                    merged[-1][1] = max(merged[-1][1], hi)
-                else:
-                    merged.append([lo, hi])
-            blocks: list[str] = []
-            for lo, hi in merged[:5]:  # 最多 5 段, 控 token 成本
-                chunk = lines[lo - 1:hi]
-                numbered = "\n".join(f"{lo+i:4d}| {ln}" for i, ln in enumerate(chunk))
-                blocks.append(numbered)
-            omitted = len(merged) - 5 if len(merged) > 5 else 0
-            context_block = (
-                f"\n### 最小上下文 (patch, ±{n} 行, 前 {len(merged[:5])} 段)\n"
-                f"```\n" + "\n...\n".join(blocks) + "\n```\n"
-                + (f"(另有 {omitted} 段未展示)\n" if omitted else "")
-            )
-
-        return (
-            f"### patch-only: `{file_path}`\n"
-            f"⚠️ 已降级为 patch-only (overflow 或低优先级), 仅 diff + ±{n} 行最小 context\n"
-            f"⚠️ 跨行/跨段语义识别能力有限, 优先识别行内问题 (裸 except / 可变默认参数 / 硬编码等)\n"
-            f"建议关注行: {vl_display}{vl_suffix}\n"
-            f"{context_block}"
+        ctx = FileContext(
+            file_path=file_path,
+            lines=tuple(lines),
+            valid_lines=frozenset(valid_lines),
+            start_line=1,
+        )
+        return build_source_block(
+            ctx,
+            strategy,
+            cfg=globals()["config"],
+            policy=self._prompt_policy(),
         )
 
     def _read_file_lines(self, file_path: str) -> list[str]:
