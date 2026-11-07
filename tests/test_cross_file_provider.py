@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 import yaml
+from loguru import logger as loguru_logger
 
 from reviewagent.review.dynamic.providers import cross_file_refs as mod
 from reviewagent.review.dynamic.providers.cross_file_refs import (
@@ -25,6 +26,21 @@ from reviewagent.review.dynamic.providers.cross_file_refs import (
 )
 from reviewagent.scenario.dynamic import load_dynamic_rules
 from reviewagent.scenario.profile import Profile, load_profile
+
+
+@pytest.fixture
+def logs():
+    """捕获 loguru 消息（provider 的非法参数告警）."""
+    messages: list[str] = []
+    handler_id = loguru_logger.add(
+        lambda message: messages.append(str(message).rstrip("\n")),
+        level="INFO",
+        format="{message}",
+    )
+    try:
+        yield messages
+    finally:
+        loguru_logger.remove(handler_id)
 
 
 @pytest.fixture(scope="module")
@@ -89,18 +105,10 @@ def test_provider_falls_back_to_module_collect_refs(monkeypatch):
     assert seen["files"] == ["a.py"]
 
 
-def test_provider_find_refs_delegates_to_module(monkeypatch):
-    calls: list[tuple[Any, ...]] = []
-
-    def _fake_find(file_path, diff, worktree, *, params=None):
-        calls.append((file_path, diff, worktree, params))
-        return [_ref("other.py", 7, "alpha")]
-
-    monkeypatch.setattr(mod, "find_refs", _fake_find)
-    provider = CrossFileRefsProvider(lambda *a, **kw: {})
-    out = provider.find_refs("a.py", "+def alpha():", "/tmp/wt")
-    assert out == [_ref("other.py", 7, "alpha")]
-    assert calls == [("a.py", "+def alpha():", "/tmp/wt", None)]
+def test_provider_has_no_find_refs_method():
+    """R1：单文件路径直接调模块函数，provider 不再暴露 find_refs（死方法已删）."""
+    assert not hasattr(CrossFileRefsProvider, "find_refs")
+    assert callable(mod.find_refs)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +223,59 @@ def test_collect_refs_buckets_exclude_self(monkeypatch):
     )
     assert [r["file"] for r in out["a.py"]] == ["b.py"]
     assert [r["file"] for r in out["b.py"]] == ["a.py"]
+
+
+# ---------------------------------------------------------------------------
+# params 数值校验（<=0 / 非数值 → clamp 到默认并告警）
+# ---------------------------------------------------------------------------
+
+
+def test_collect_refs_clamps_non_positive_int_params(monkeypatch, logs):
+    """hits_per_symbol=0 / max_refs_per_file=-1 必须 clamp 到 legacy 默认.
+
+    未 clamp 时 `hits >= 0` 立即成立 → 每个 ident 只留 1 条（静默退化）。
+    """
+    stdout = "b.py:1:alpha()\nc.py:2:alpha()\nd.py:3:alpha()\n"
+    _patch_run(monkeypatch, stdout)
+    out = collect_refs(
+        ["a.py"], {"a.py": "+def alpha():\n"}, "/tmp/wt",
+        params={
+            "hits_per_symbol": 0,
+            "max_refs_per_file": -1,
+            "rule_key": "DYN-TEST",
+        },
+    )
+    # 默认 hits=2 → 只保留前两条；max_refs=-1 未变成 1 条。
+    assert [r["file"] for r in out["a.py"]] == ["b.py", "c.py"]
+    invalid = [m for m in logs if "dynamic.param.invalid" in m]
+    assert any("param=hits_per_symbol value=0 -> 2" in m for m in invalid)
+    assert any("param=max_refs_per_file value=-1 -> 6" in m for m in invalid)
+    assert all("rule=DYN-TEST" in m for m in invalid)
+
+
+def test_collect_refs_clamps_non_numeric_int_params(monkeypatch, logs):
+    stdout = "b.py:1:alpha()\n"
+    _patch_run(monkeypatch, stdout)
+    out = collect_refs(
+        ["a.py"], {"a.py": "+def alpha():\n"}, "/tmp/wt",
+        params={"hits_per_symbol": "abc", "max_refs_per_file": None},
+    )
+    assert [r["file"] for r in out["a.py"]] == ["b.py"]
+    invalid = [m for m in logs if "dynamic.param.invalid" in m]
+    assert any("param=hits_per_symbol value=abc -> 2" in m for m in invalid)
+    assert any("param=max_refs_per_file value=None -> 6" in m for m in invalid)
+
+
+def test_find_refs_clamps_non_positive_hits(monkeypatch, logs):
+    stdout = "b.py:3:alpha()\nc.py:4:alpha()\nd.py:5:alpha()\n"
+    _patch_run(monkeypatch, stdout)
+    refs = find_refs(
+        "a.py", "+def alpha():", "/tmp/wt",
+        params={"hits_per_symbol": -2, "max_refs_per_file": 0},
+    )
+    # 默认 hits=2 / max_refs=6 → 两条命中，而不是 1 条或空。
+    assert [r["file"] for r in refs] == ["b.py", "c.py"]
+    assert any("dynamic.param.invalid" in m for m in logs)
 
 
 # ---------------------------------------------------------------------------

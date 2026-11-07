@@ -6,12 +6,14 @@ prompt 缺段——失败时返回空证据 + `degraded=True`，由 context 渲�
 * 每个启用规则在独立 daemon 线程中执行，`join(timeout)` 到期即降级为
   `reason="timeout"` 并记 WARNING（线程无法强杀，残留线程随后自行结束）；
 * 超时优先级：`rule.params["timeout_seconds"]` > 调用方传入的 `timeout_s`；非法值
-  （非数值）回退 `timeout_s`，且解析发生在起线程之前，异常不得外逃；
+  （非数值 / `nan` / `inf` / `<= 0`）回退 `timeout_s`，且解析发生在起线程之前，
+  异常不得外逃（`thread.join(nan)` 会直接抛 `ValueError`）；
 * provider 未注册（`KeyError`）或采集抛异常 → `reason=type(exc).__name__`；
 * 禁用规则不进入结果字典（消费方据此完全不渲染该规则）。
 """
 from __future__ import annotations
 
+import math
 import threading
 from typing import Any
 
@@ -34,11 +36,18 @@ def _degraded(rule: DynamicRule, reason: str) -> DynamicEvidence:
 
 
 def _coerce_timeout(raw: Any) -> float | None:
-    """把任意值归一为 float 秒；不可转换时返回 None（不抛异常）."""
+    """把任意值归一为有限且为正的 float 秒；非法时返回 None（不抛异常）.
+
+    非数值之外还必须拒绝 `nan` / `inf` / `<= 0` —— `thread.join(nan)` 会抛
+    `ValueError`，负值 / 零值则让超时语义失效（立即或永不判定超时）。
+    """
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
 
 
 def _resolve_timeout(rule: DynamicRule, timeout_s: float) -> float:
@@ -64,11 +73,14 @@ def _collect(
     fetch_callback: Any,
 ) -> tuple[dict[str, Any], ...]:
     provider = get_provider(rule.provider, fetch_callback=fetch_callback)
+    # 复制一份 params 并带上规则键，仅供 provider 侧非法参数告警归属（不参与采集）。
+    params = dict(rule.params or {})
+    params.setdefault("rule_key", rule.key)
     refs = provider.fetch(
         files=files,
         diff_by_file=diff_by_file,
         worktree=worktree,
-        params=rule.params,
+        params=params,
     )
     return tuple(refs)
 
@@ -130,14 +142,9 @@ def run_dynamic(
             logger.warning("dynamic.timeout rule={} provider={}", rule.key, rule.provider)
             out[rule.key] = _degraded(rule, "timeout")
         elif "error" in box:
-            reason = type(box["error"]).__name__
-            logger.warning(
-                "dynamic.degrade rule={} provider={} reason={}",
-                rule.key,
-                rule.provider,
-                reason,
-            )
-            out[rule.key] = _degraded(rule, reason)
+            # 降级告警统一由调用方（review/runner.py）按 `dynamic.degraded` 输出，
+            # 这里不再重复记日志（T13 自加的 `dynamic.degrade` 已移除）。
+            out[rule.key] = _degraded(rule, type(box["error"]).__name__)
         else:
             out[rule.key] = DynamicEvidence(
                 rule_key=rule.key,

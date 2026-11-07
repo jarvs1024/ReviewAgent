@@ -342,7 +342,8 @@ def test_unknown_provider_degrades(declared_ruleset, logs):
     assert evidence.degraded is True
     assert evidence.reason == "KeyError"
     assert evidence.refs == ()
-    assert any("dynamic.degrade" in message for message in logs)
+    # T13 自加的 `dynamic.degrade` 已移除：降级告警统一由 review/runner.py 输出。
+    assert not any("dynamic.degrade" in message for message in logs)
 
 
 class _Slow:
@@ -432,3 +433,47 @@ def test_disabled_rule_omitted_from_result(declared_ruleset):
     )
     assert out == {}
     assert RULE_KEY not in out
+
+
+@pytest.mark.parametrize(
+    "bad_timeout",
+    [float("nan"), float("inf"), 0, -5],
+    ids=["nan", "inf", "zero", "negative"],
+)
+def test_non_finite_or_non_positive_timeout_falls_back(declared_ruleset, bad_timeout):
+    """`timeout_seconds` 为 nan / inf / <=0 时回退 `timeout_s`，不得抛异常.
+
+    `thread.join(nan)` 会抛 `ValueError`，必须在校验层拦下；这里用极小的
+    调用方 `timeout_s` 验证确实走了回退值（超时降级而非崩溃）。
+    """
+    register("slow_provider_bad_numeric_timeout", lambda **kw: _Slow())
+    rule = replace(
+        declared_ruleset.rules[0],
+        provider="slow_provider_bad_numeric_timeout",
+        params={"timeout_seconds": bad_timeout},
+    )
+    started = time.monotonic()
+    out = run_dynamic(
+        declared_ruleset.with_rule(rule),
+        files=["core.py"],
+        diff_by_file={},
+        worktree=None,
+        timeout_s=0.01,
+    )
+    elapsed = time.monotonic() - started
+    evidence = out[RULE_KEY]
+    assert evidence.degraded is True
+    assert evidence.reason == "timeout"
+    assert evidence.refs == ()
+    assert elapsed < 0.3
+
+
+def test_non_finite_fallback_timeout_uses_sane_default():
+    from reviewagent.review.dynamic.runner import _FALLBACK_TIMEOUT_S, _resolve_timeout
+
+    rule = DynamicRule(
+        key="DYN-X", title="x", provider="p", params={"timeout_seconds": float("nan")},
+    )
+    assert _resolve_timeout(rule, 5) == 5
+    assert _resolve_timeout(rule, float("inf")) == _FALLBACK_TIMEOUT_S
+    assert _resolve_timeout(rule, -1) == _FALLBACK_TIMEOUT_S

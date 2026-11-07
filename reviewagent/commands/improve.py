@@ -217,18 +217,24 @@ class ImproveCommand(BaseCommand):
         return find_refs(file_path, diff, worktree_path, params=params)
 
     def _collect_cross_file_refs_for_mr(
-        self, files: list[str], diff_by_file: dict[str, str], worktree_path, max_refs_per_file: int = 6
+        self,
+        files: list[str],
+        diff_by_file: dict[str, str],
+        worktree_path,
+        max_refs_per_file: int | None = None,
     ) -> dict[str, list[dict]]:
         """对整个 MR 一次性 rg 找所有 diff 文件的标识符在仓库的 caller 引用.
 
         Returns: {file_path: [{file, line, content, ident}, ...]}
         实现见 review/dynamic/providers/cross_file_refs.py:collect_refs（门面薄委托）；
-        params 从当前动态规则集解析，`max_refs_per_file` 保持 legacy 默认 6。
+        params 从当前动态规则集解析（缺省回退 legacy 6）——显式传入的
+        `max_refs_per_file` 优先，否则不覆盖规则参数。
         """
         from reviewagent.review.dynamic.providers.cross_file_refs import collect_refs
 
         params = self._dynamic_rule_params()
-        params["max_refs_per_file"] = max_refs_per_file
+        if max_refs_per_file is not None:
+            params["max_refs_per_file"] = max_refs_per_file
         return collect_refs(files, diff_by_file, worktree_path, params=params)
 
     def _render_cross_file_section(self, refs: list[dict]) -> str:

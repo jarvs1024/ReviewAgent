@@ -49,12 +49,29 @@ _MAX_CONTENT_CHARS = 500
 
 
 def _int_param(params: dict[str, Any], name: str) -> int:
-    """取整数 param；缺失 / 非法时回退 legacy 常量（不抛异常）."""
-    raw = (params or {}).get(name, DEFAULT_PARAMS[name])
+    """取正整数 param；缺失 / 非法（非数值或 `<= 0`）时回退 legacy 常量.
+
+    零 / 负数上限会让采集静默退化成"每个 ident 只留 1 条"甚至空结果，因此
+    一律 clamp 到默认值并记 WARNING（`rule_key` 由 dynamic runner 注入，仅用于
+    告警归属；直接调用模块函数时缺省为 `-`）。
+    """
+    default = int(DEFAULT_PARAMS[name])
+    raw = (params or {}).get(name, default)
     try:
-        return int(raw)
+        value = int(raw)
     except (TypeError, ValueError):
-        return int(DEFAULT_PARAMS[name])
+        value = default
+        invalid = True
+    else:
+        invalid = value <= 0
+        if invalid:
+            value = default
+    if invalid:
+        logger.warning(
+            "dynamic.param.invalid rule={} param={} value={} -> {}",
+            (params or {}).get("rule_key", "-"), name, raw, value,
+        )
+    return value
 
 
 def _rg_type_args(params: dict[str, Any]) -> list[str]:
@@ -262,6 +279,3 @@ class CrossFileRefsProvider:
         else:
             grouped = self._fetch_callback(files, diff_by_file, worktree)
         return self._flatten(grouped)
-
-    def find_refs(self, file_path: str, diff: str, worktree: Any) -> list[dict]:
-        return find_refs(file_path, diff, worktree)
