@@ -1,0 +1,8 @@
+{
+  "assemble_seconds": 0.000669,
+  "build_prompt_seconds": 0.000136,
+  "iterations": 5,
+  "peak_rss_mb": 31.02,
+  "platform": "darwin",
+  "total_seconds": 0.000805
+}

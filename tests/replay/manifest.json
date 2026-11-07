@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "source": "synthetic",
+  "derived_from": "tests/golden",
+  "tolerance": {
+    "suggestion_count_relative": 0.1,
+    "severity_share_pp": 2.0
+  },
+  "cases": [
+    {
+      "name": "resource-leak-basics",
+      "project_id": 101,
+      "mr_iid": 1101,
+      "head_sha": "synthetic-resource-leak-basics",
+      "baseline": {
+        "suggestion_count": 3,
+        "severity": {"high": 2, "medium": 1, "low": 0},
+        "high_items": [
+          "core/main.py|可变默认参数",
+          "services/health.py|资源句柄未关闭"
+        ]
+      }
+    },
+    {
+      "name": "api-validation-mix",
+      "project_id": 102,
+      "mr_iid": 1102,
+      "head_sha": "synthetic-api-validation-mix",
+      "baseline": {
+        "suggestion_count": 4,
+        "severity": {"high": 1, "medium": 2, "low": 1},
+        "high_items": [
+          "api/routes.py|请求参数未校验"
+        ]
+      }
+    },
+    {
+      "name": "clean-diff",
+      "project_id": 103,
+      "mr_iid": 1103,
+      "head_sha": "synthetic-clean-diff",
+      "baseline": {
+        "suggestion_count": 0,
+        "severity": {"high": 0, "medium": 0, "low": 0},
+        "high_items": []
+      }
+    }
+  ]
+}

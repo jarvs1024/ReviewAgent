@@ -1,0 +1,52 @@
+{
+  "api/routes.py": {
+    "summary_md": "探针回放：路由入参缺少校验，命名与模块风格不一致。",
+    "suggestions": [
+      {
+        "file": "api/routes.py",
+        "start_line": 2,
+        "severity": "high",
+        "header": "请求参数未校验",
+        "rationale": "R-CONST: 路由入参未做类型/值域校验，非法输入会直达下游。",
+        "label": "potential bug",
+        "existing_code": "page = int(request.args.get('page'))",
+        "improved_code": "page = max(1, int(request.args.get('page', '1')))"
+      },
+      {
+        "file": "api/routes.py",
+        "start_line": 6,
+        "severity": "low",
+        "header": "命名风格不一致",
+        "rationale": "R-CLEAN: 局部变量命名与同模块风格不一致，影响可读性。",
+        "label": "style",
+        "existing_code": "limit = 6",
+        "improved_code": "page_size = 6"
+      }
+    ]
+  },
+  "core/models.py": {
+    "summary_md": "",
+    "suggestions": [
+      {
+        "file": "core/models.py",
+        "start_line": 2,
+        "severity": "medium",
+        "header": "字段缺少校验",
+        "rationale": "R-DATA: 模型字段未校验存在性与值域，脏数据可能落库。",
+        "label": "code quality",
+        "existing_code": "    id = 1",
+        "improved_code": "    id: int = 1"
+      },
+      {
+        "file": "core/models.py",
+        "start_line": 6,
+        "severity": "medium",
+        "header": "常量重复定义",
+        "rationale": "R-CONST: 与已有常量重复定义，后续容易漂移。",
+        "label": "enhancement",
+        "existing_code": "    size = 1",
+        "improved_code": "    size: int = 1"
+      }
+    ]
+  }
+}

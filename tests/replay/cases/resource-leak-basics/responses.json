@@ -1,0 +1,42 @@
+{
+  "services/health.py": {
+    "summary_md": "探针回放：健康检查模块存在资源泄漏与异常吞没。",
+    "suggestions": [
+      {
+        "file": "services/health.py",
+        "start_line": 2,
+        "severity": "high",
+        "header": "资源句柄未关闭",
+        "rationale": "R-RES: open() 句柄未使用 with 托管，异常路径会泄漏文件描述符。",
+        "label": "potential bug",
+        "existing_code": "    return open(path).read()",
+        "improved_code": "    with open(path) as f:\n        return f.read()"
+      },
+      {
+        "file": "services/health.py",
+        "start_line": 6,
+        "severity": "medium",
+        "header": "裸 except 吞异常",
+        "rationale": "R-ERR: 裸 except 捕获所有异常并静默返回空串，问题被掩盖。",
+        "label": "code quality",
+        "existing_code": "    except:",
+        "improved_code": "    except (OSError, ValueError):"
+      }
+    ]
+  },
+  "core/main.py": {
+    "summary_md": "",
+    "suggestions": [
+      {
+        "file": "core/main.py",
+        "start_line": 2,
+        "severity": "high",
+        "header": "可变默认参数",
+        "rationale": "R-ERR: 使用可变对象作为默认参数，多次调用会共享同一状态。",
+        "label": "potential bug",
+        "existing_code": "def run(options={}):",
+        "improved_code": "def run(options=None):"
+      }
+    ]
+  }
+}
