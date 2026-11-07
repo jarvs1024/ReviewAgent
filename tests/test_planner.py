@@ -101,6 +101,10 @@ def _plan(
     line_map = kwargs.pop("line_map", None)
     if line_map is None and line_counts is not None:
         line_map = {fp: set(range(1, n + 1)) for fp, n in line_counts.items()}
+    # 规则块字节数必填（默认 0 会让预算比旧实现宽）：与门面同源取真实正文长度
+    kwargs.setdefault(
+        "rule_block_bytes", len(ImproveCommand._rule_block_text().encode()),
+    )
     kwargs.setdefault("read_line_count", lambda fp: sizes.get(fp, 1))
     kwargs.setdefault("stat_bytes", lambda fp: file_bytes.get(fp, -1))
     return plan(
@@ -201,7 +205,7 @@ def test_review_mode_explicit_is_not_auto():
 # ---------------------------------------------------------------------------
 
 
-def test_test_path_sampling_deterministic_and_matches_legacy(logs):
+def test_test_path_sampling_deterministic_delegates(logs):
     cfg = dataclasses.replace(
         current(),
         improve_skip_test_paths=(),
@@ -433,7 +437,7 @@ def test_full_source_budget_clip_disabled_uses_full_diff_lines():
 # ---------------------------------------------------------------------------
 
 
-def test_file_count_cap_must_keep_matches_legacy():
+def test_file_count_cap_delegates():
     cfg = dataclasses.replace(current(), improve_max_files_to_review=3)
     files = ["new1.py", "services/kw.py", "opt1.py", "opt2.py", "opt3.py"]
     sizes = {fp: 5 for fp in files}

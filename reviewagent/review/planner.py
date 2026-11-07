@@ -414,7 +414,7 @@ def plan(
     prior_states: Mapping[str, Mapping[str, Any]] | None = None,
     head_sha: str | None = "",
     blob_sha: Callable[[str], str | None] | None = None,
-    rule_block_bytes: int = 0,
+    rule_block_bytes: int,
     profile_fingerprint: str | None = None,
     ruleset_fingerprint: str | None = None,
     new_files: Collection[str] | None = None,
@@ -440,7 +440,8 @@ def plan(
             **不可变输入**，planner 不做 DB 访问.
         head_sha: MR 当前 head；空/None 时全量重检（不复用）.
         blob_sha: ``file -> 当前 blob sha``；None → 一律视为未知（不做复用）.
-        rule_block_bytes: 规则块正文字节数（full 源码预算用）.
+        rule_block_bytes: 规则块正文字节数（full 源码预算用；**必填**——
+            省略默认值会让预算比旧实现宽出规则块大小，可能翻转 full↔partial）.
         profile_fingerprint / ruleset_fingerprint: 指纹失效判定入参；
             None（Task 15 之前）保持只按 blob 复用.
         new_files: 新增文件集合（priority 加分 / 文件数上限必保）.

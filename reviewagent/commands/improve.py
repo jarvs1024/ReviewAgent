@@ -1603,8 +1603,8 @@ class ImproveCommand(BaseCommand):
             sorted_files, file_meta, overflow_set, cfg=cfg,
             stat_bytes=self._stat_file_bytes,
             budget_fn=self._full_source_budget_bytes,
-            project_id=self.project_id,
-            mr_iid=self.mr_iid,
+            project_id=getattr(self, "project_id", None),
+            mr_iid=getattr(self, "mr_iid", None),
         )
 
     def _build_full_source_block(self, file_path: str) -> str:
