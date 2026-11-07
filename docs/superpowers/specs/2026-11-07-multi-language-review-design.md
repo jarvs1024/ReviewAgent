@@ -2,7 +2,7 @@
 
 - 日期：2026-11-07
 - 分支：new_review_v2（基于 main 新建）
-- 状态：已与需求方分段确认；已完成完整性/矛盾核查、分层评审、规则层评审、Python/C++ 解耦评审与严格兼容性审计；首期仅 Python 场景（C/C++ 仅预留接口），待审阅
+- 状态：已与需求方分段确认；已完成完整性/矛盾核查、分层评审、规则层评审、静态/动态规则分治、Python/C++ 解耦评审与严格兼容性审计；首期仅 Python 场景（C/C++ 仅预留接口），待审阅
 
 ## 1. 背景与问题
 
@@ -14,6 +14,7 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 - `commands/improve.py` 为 3354 行巨石模块，prompt 装配、调度、校验、发布、去重全部耦合；
 - 周报链路除规则解析外仍写死：标题（`reporting/config.py:50,79`、`artifact.py:49,80,103`）、规则→ruff 动作映射（`renderer.py:477-484`）、代码文件扩展名与入口文件优先名（`collectors/repo_scan.py:298,315`）、三个 weekly prompt 的 SSD 语境；
 - 规则知识三处散落：prompt Markdown、`repo_context.py`（仓库规则）、`rule_translate.py`（反向正则解析规则名），换场景必然漏改；
+- 动态检视能力硬编码在流程内：`_extract_identifiers`（:666-696）、per-file 与全局两套 rg（:699-855）、跨文件证据文案 `_render_cross_file_section`（:857-887）；它与静态规则共用同一条 prompt，但配置、生命周期、失败语义完全不同，无法独立启停或演进；
 - 配置纯环境变量，无场景切换概念。
 
 目标：框架不变、场景可变——**切换场景包即可适配不同检视场景与检视质量**，规则可独立配置，架构可扩展。
@@ -29,6 +30,9 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 | 规则层 | **独立子系统**：完整模型（RulePack/Rule/RuleSet）、四层来源装配、适用性过滤、覆盖/禁用、键索引 |
 | 仓库自定义规则 | **独立模块**处理被检仓库 AGENTS.md / `.agents/rules`，优先级第一 |
 | 规则正反例 | **支持**：每条规则可选附带反例/正例，按 prompt 预算注入 |
+| 静态/动态规则 | **分开管理**：静态规则=可声明知识（Markdown 规则包 / RuleSet），启动期装配；动态规则=请求级证据提供器（如按仓库实际代码做跨文件上下文深检），独立配置文件、独立模型、独立生命周期与失败语义 |
+| 动态规则首期范围 | **只迁移现有跨文件 caller 检索**：同一 rg 参数、限额、排除项、排序与 prompt 文案，逐字节等价；不新增深度分析能力 |
+| 动态规则失败语义 | **降级不阻塞**：超时 / 工具缺失 / 执行异常 → WARNING + 空证据 + 现有 fallback 文案；配置错误 / provider 未注册 → 启动失败 |
 | Profile 语义 | **场景包**（非语言包）：语言只是属性，同语言可有多场景 |
 | `REVIEW_PROFILE` 未设置 | **默认回退 `ssd-python-autotest` 并记 warning**；显式设置了不存在的值才启动失败 |
 | 测试耦合处理 | **兼容门面**：`ImproveCommand` 保留同名私有方法（仅委托）与模块级 `config` 引用，现有测试耦合零改动 |
@@ -46,7 +50,8 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 ## 3. 非目标
 
 - 不做仓库级 profile 自动发现（实例级已确认；仓库级留作后续演进）。
-- 不做规则 DSL / 规则引擎执行（规则只描述，由 LLM 判读）。
+- 不做规则 DSL / 规则引擎执行（规则只描述，由 LLM 判读；动态规则只采集证据，也不构成 DSL）。
+- **首期不新增动态深度分析**：多跳调用链、依赖图、历史缺陷挖掘等只预留 provider 位置；本期只把现有跨文件 caller 检索迁入动态规则框架，且输出与现网一致。
 - 不做 C/C++ AST 级符号校验。
 - **首期不实施 C/C++ 场景**：`cpp-generic-dev` 场景包、`policies/cpp.py`、C++ 周报内容、`repo_scan` 的 C/C++ 扩展名均推迟；本期只保证接口可承载。
 - 探针场景只是 `tests/fixtures/profiles/` 下的测试夹具，不进入 `profiles/`、不参与部署，也不属于 C/C++ 实施。
@@ -60,9 +65,9 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 ```
 L5 入口层      webhook/ · api/
 L4 命令任务层  commands/ · workers/
-L3 检视引擎层  review/（types · planner · context · assembly · runner · policy · validation · publishing）
-L2 场景装配层  scenario/（profile · prompts · rules 子系统）
-L1 场景数据层  profiles/（profile.yaml · prompts/ · rules/）
+L3 检视引擎层  review/（types · planner · context · assembly · runner · policy · validation · publishing · dynamic）
+L2 场景装配层  scenario/（profile · prompts · rules 子系统 · dynamic 动态规则加载）
+L1 场景数据层  profiles/（profile.yaml · dynamic_rules.yaml · prompts/ · rules/）
 L0 平台层      config · logging · metrics · telemetry · gitlab · llm · git（凭据与运行参数）
 L6 报告层      reporting/（依赖 L1/L2；禁止 import review）
 ```
@@ -73,9 +78,10 @@ L6 报告层      reporting/（依赖 L1/L2；禁止 import review）
 - `reporting → scenario`（只消费 RuleSet/Profile，不碰检视引擎）；
 - `scenario → L0`；`review` 不得被 `scenario` 反向依赖；
 - 入口层依赖命令/任务层；启动期可调用 `scenario` 加载器与 `review/policies/registry.py` 做校验，但不执行业务逻辑；
-- `review` 共享模块（planner/context/assembly/runner/validation/publishing）**不得 import `review/policies/*`**，只能调用构造时注入的 `LanguagePolicy`；
+- `review` 共享模块（planner/context/assembly/runner/validation/publishing/**dynamic**）**不得 import `review/policies/*`**，只能调用构造时注入的 `LanguagePolicy`；
 - `review/policies/*` 可依赖 `scenario` 的模型与 profile 数据，但不得依赖 `commands/workers/reporting`；
-- 共享代码内禁止语言字面量：`.py`、`-t py`、`ast`、`if language == ...`；语言差异只允许存在于 `review/policies/` 与 `profiles/`；
+- `scenario/dynamic.py` 只产出动态规则模型，不 import `review`；provider 注册由入口启动期校验（与 policy registry 同模式）；
+- 共享代码内禁止语言字面量：`.py`、`-t py`、`ast`、`if language == ...`；语言差异只允许存在于 `review/policies/` 与 `profiles/`（动态规则的 `rg.file_type`、模板、限额属 profile 数据）；
 - `profiles/` 是纯数据目录，不得包含可执行代码。
 
 ### 4.2 目标目录
@@ -88,11 +94,14 @@ reviewagent/
 │   │   └── prompts/              # 可选默认模板（未配置时回退）
 │   └── ssd-python-autotest/
 │       ├── profile.yaml
+│       ├── dynamic_rules.yaml    # 动态规则（请求级证据），与静态 rules/ 分开
 │       ├── prompts/improve.md, describe.md, weekly_*.md
+│       ├── prompts/dynamic/      # 动态证据段模板（空/非空）
 │       └── rules/*.md
 ├── scenario/                     # L2 场景装配
 │   ├── profile.py                # 加载/校验/env 合并/单例
 │   ├── prompts.py                # 原 prompts/loader，按 profile 解析模板
+│   ├── dynamic.py                # 动态规则加载/校验（未知 provider、重复 DYN 键）
 │   └── rules/                    # 规则层（独立子系统）
 │       ├── model.py              # RulePack / Rule / RuleSet
 │       ├── parser.py             # Markdown 包解析
@@ -102,11 +111,17 @@ reviewagent/
 │       └── repo.py               # 被检仓库规则获取（原 repo_context）
 ├── review/                       # L3 检视引擎
 │   ├── planner.py                # 文件过滤/打分/抽样/strategy/分批（纯计算）
-│   ├── context.py                # full/partial/patch 源块、跨文件证据、锚点块
+│   ├── context.py                # full/partial/patch 源块、动态证据段渲染、锚点块
 │   ├── assembly.py               # prompt 纯函数装配（不调 LLM）
 │   ├── runner.py                 # 流水线编排（planner→context→assembly→chunk→merge）+ 并行/预算
 │   ├── policy.py                 # LanguagePolicy 协议 + GenericPolicy 默认实现
 │   ├── types.py                  # FileKind / FileContext / Suggestion / RiskVerdict
+│   ├── dynamic/                  # 动态规则框架（语言无关）
+│   │   ├── model.py              # DynamicRule / DynamicEvidence / DynamicRuleSet
+│   │   ├── registry.py           # provider id → 工厂（惰性加载，入口校验）
+│   │   ├── runner.py             # 批量采集、限额、超时、降级、telemetry
+│   │   └── providers/
+│   │       └── cross_file_refs.py  # 跨文件 caller 证据（迁移现有 rg 逻辑）
 │   ├── policies/                 # cpp 仅预留注册位，首期不创建文件
 │   │   ├── registry.py           # language → policy 惰性加载（唯一语言分发点）
 │   │   └── python.py             # 全部 Python 语义：AST/rg/密度/缩进/打分/关键字
@@ -123,7 +138,7 @@ reviewagent/
 tests/
 ├── architecture/                 # 解耦守卫：import 方向 / 语言字面量 / 规则命名空间
 ├── fixtures/profiles/probe-scenario/  # 测试专用第二场景（不是 C/C++）
-└── golden/prompts/ssd-python-autotest/  # prompt 字节级基线
+└── golden/prompts/ssd-python-autotest/  # prompt 字节级基线（含动态证据有/无/降级三态）
 ```
 
 ### 4.3 框架总图
@@ -131,34 +146,40 @@ tests/
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ L5 入口层                                                                    │
-│   webhook/（MR · Push · Note）          api/（runs · MR · suggestions · weekly）│
+│   webhook/（MR · Push · Note）       api/（runs · MR · suggestions · weekly）│
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │ 入队 / 查询
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
 │ L4 命令任务层                                                                │
 │   commands/improve（薄壳 + 兼容门面）· describe · suggestion_actions         │
-│   workers/tasks（RQ chain · per-MR lock · weekly queue）                      │
+│   workers/tasks（RQ chain · per-MR lock · weekly queue）                     │
 └───────────────────────────────┬──────────────────────────────────────────────┘
-                                │ 构造时注入 Profile + RuleSet + LanguagePolicy
+                                │ 构造时注入 Profile + RuleSet + DynamicRuleSet + LanguagePolicy
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
 │ L3 检视引擎 review/（语言无关）                                              │
 │                                                                              │
 │   planner ─► context ─► assembly ─► runner ─► validation ─► publishing       │
 │      ▲          ▲          ▲          ▲           ▲              ▲           │
-│      └──────────┴──────────┴──── policy.py ──────┴──────────────┘           │
-│                    （9 个钩子；policies/python.py 是唯一 Python 实现）        │
+│      └──────────┴──────────┴──── policy.py ──────┴──────────────┘            │
+│                    （10 个钩子；policies/python.py 是唯一 Python 实现）      │
+│                                                                              │
+│   dynamic/ ──► context（请求级证据段：跨文件 caller 等）                     │
+│      │  独立于静态 RuleSet：只产证据，不产规则文本                           │
+│      └── 采集失败 → 空证据 + fallback 文案（不阻塞检视）                     │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │ 只读装配结果，不反向依赖
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
 │ L2 场景装配 scenario/                                                        │
-│   profile.py（加载/校验/env 合并）      prompts.py（模板加载与渲染）          │
+│   profile.py（加载/校验/env 合并）      prompts.py（模板加载与渲染）         │
 │   rules/（model · parser · resolver · render · keys · repo）                 │
+│   dynamic.py（dynamic_rules.yaml 加载/校验，与静态规则分开）                 │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │ 纯数据
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
 │ L1 场景数据 profiles/                                                        │
-│   ssd-python-autotest/（profile.yaml · prompts/ · rules/）                   │
-│   _shared/rules/（必须声明 applies_to.languages）                             │
+│   ssd-python-autotest/（profile.yaml · dynamic_rules.yaml）                  │
+│   ssd-python-autotest/（prompts/ · prompts/dynamic/ · rules/）               │
+│   _shared/rules/（必须声明 applies_to.languages）                            │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
@@ -175,14 +196,17 @@ flowchart TD
     A[Webhook / 手动 API] --> B[RQ chain 入队]
     B --> C{per-MR 锁}
     C --> D[加载 Profile<br/>REVIEW_PROFILE 或默认回退]
-    D --> E[装配 RuleSet<br/>repo 1000 > override 900 > profile 800 > shared 500]
+    D --> E[装配静态 RuleSet<br/>repo 1000 > override 900 > profile 800 > shared 500]
     D --> F[Registry 取 LanguagePolicy<br/>按 language 惰性加载]
+    D --> P[加载 DynamicRuleSet<br/>dynamic_rules.yaml + provider 注册校验]
     E --> G[planner<br/>过滤 · 打分 · 抽样 · strategy · 分批]
     F --> G
-    G --> H[并行 chunk]
-    H --> I[context<br/>full/partial/patch + 跨文件证据]
+    P --> G
+    G --> Q[dynamic runner<br/>按本次文件批量采集证据<br/>限额 · 超时 · 降级]
+    Q --> I[context<br/>full/partial/patch + 动态证据段]
     I --> J[assembly<br/>仓库规则置顶 → 场景规则 → 共享规则<br/>正反例按预算注入]
-    J --> K[LLM]
+    J --> H[并行 chunk 调用]
+    H --> K[LLM]
     K --> L[merge]
     L --> M[validation<br/>锚定 · 去重 · 严重度 · apply 风险 · 键归一]
     M --> N[publishing<br/>inline suggestion + 汇总 + telemetry]
@@ -198,8 +222,10 @@ flowchart TD
 | `scenario/profile.py` | 加载、校验、env 合并 | profile 规范演进 | 检视流程 |
 | `scenario/prompts.py` | 模板加载与变量校验 | 模板机制演进 | LLM 调用 |
 | `scenario/rules/*` | 规则解析、装配、渲染、键索引、仓库规则 | 规则层演进 | 语言实现细节 |
+| `scenario/dynamic.py` | 动态规则加载、校验、语言过滤 | 动态规则规范演进 | 证据采集实现 |
+| `review/dynamic/*` | 动态证据批量采集、限额、超时、降级、provider 注册 | 新增证据类型 | 静态规则解析、发布 |
 | `review/planner.py` | 文件过滤、打分、抽样、strategy、分批 | 调度策略演进 | 语言语法判断 |
-| `review/context.py` | 源块、证据块、锚点块 | 上下文策略演进 | 语言特定检索 |
+| `review/context.py` | 源块、动态证据段、锚点块 | 上下文策略演进 | 语言特定检索 |
 | `review/assembly.py` | prompt 纯函数装配 | 输出结构演进 | LLM 调用、IO |
 | `review/runner.py` | 流水线编排（planner→context→assembly→chunk→merge）、并行、预算 | 执行/编排策略演进 | 语言语义 |
 | `review/validation.py` | 锚定、去重、严重度、键归一 | 校验策略演进 | AST/语言判断（委托 policy） |
@@ -210,25 +236,26 @@ flowchart TD
 
 ### 4.6 新增场景接入清单
 
-1. 新建 `profiles/<scenario>/profile.yaml`：`language`、prompts、rules、rule_keys、capabilities、file_filter、scoring、reporting。
+1. 新建 `profiles/<scenario>/profile.yaml`：`language`、prompts、rules、`dynamic_rules`、rule_keys、capabilities、file_filter、scoring、reporting。
 2. 放入 `prompts/`：improve、describe、三个 weekly 模板（可复用 `_shared/prompts/`）。
 3. 放入 `rules/`：规则包声明 `applies_to` 与 `render` 模式；共享包只从 `_shared/` 引用。
-4. 新增 `review/policies/<language>.py`：只覆盖有差异的钩子，并在 registry 注册。
-5. 不改共享模块；确需新增通用能力时按 §7.5 执行。
-6. 跑架构守卫 + 场景端到端 + golden/回放，然后部署（独立实例与数据目录）。
+4. 新建 `dynamic_rules.yaml`：声明证据类型、provider、限额、排除项、prompt 模板、失败策略；不需要动态证据时显式留空（`rules: []`）。
+5. 新增 `review/policies/<language>.py`：只覆盖有差异的钩子，并在 registry 注册；新增证据类型时另加 provider 并在 `review/dynamic/registry.py` 注册。
+6. 不改共享模块；确需新增通用能力时按 §7.5 执行。
+7. 跑架构守卫 + 场景端到端 + golden/回放（静态规则与动态证据各一组），然后部署（独立实例与数据目录）。
 
 ## 5. Profile（场景包）规范
 
 ### 5.1 目录与选择
 
-- 场景 = 一个目录，含 `profile.yaml` + `prompts/` + `rules/`。
+- 场景 = 一个目录，含 `profile.yaml` + `dynamic_rules.yaml` + `prompts/` + `rules/`。
 - 实例选择：环境变量 `REVIEW_PROFILE`（场景目录名或绝对路径）。
   - 未设置 → 载入 `ssd-python-autotest`，日志 WARNING；
   - 设置为不存在的目录 → 启动即失败，列出可用场景及 `description`；
   - 必填字段缺失 → 启动即失败，列出缺失字段；
   - `language` 未注册 → 由入口启动期调用 `review/policies/registry.py` 校验，失败中止启动（`scenario` 不 import `review`）。
 - 加载时机：`config` 先完成 env 解析，随后由入口显式初始化 `scenario/profile.py` 单例（API `main.py` lifespan、`rq_worker.py` bootstrap、CLI）；`config` 不得 import `scenario`，避免循环依赖。
-- 启动时同步装配并校验当前 profile 的 RuleSet（场景包 + 共享包 + 覆盖/禁用：解析、命名空间、共享包声明）；任何错误 fail-fast。仓库规则在每次 MR 执行时获取，合并为请求级 RuleSet（priority=1000），失败按 §9 降级。
+- 启动时同步装配并校验当前 profile 的 RuleSet（场景包 + 共享包 + 覆盖/禁用：解析、命名空间、共享包声明）；任何错误 fail-fast。同时加载 `dynamic_rules.yaml` 并校验 provider 注册、`DYN-*` 键与模板文件；动态规则配置错误同样 fail-fast。仓库规则在每次 MR 执行时获取，合并为请求级 RuleSet（priority=1000），失败按 §9 降级。
 - **双进程一致性**：RQ job 载荷新增 `profile` 字段；worker 执行前校验与自身场景一致，不一致标记失败并记录日志。
 
 ### 5.2 profile.yaml 示例
@@ -248,6 +275,7 @@ rules:                          # 场景规则包（按顺序，frontmatter 决�
   # - ../_shared/rules/ssd_storage.md   # 后续复用示例；首期不启用，避免新增规则改变检视结果
 rule_overrides: {}              # 首期留空以保持行为不变（示例：R-LOG: {severity: high, weight: 1.2}）
 disable: []                     # 场景级禁用规则键
+dynamic_rules: dynamic_rules.yaml  # 动态规则（请求级证据）；与静态规则分开管理，结构见 §6.7
 repo_context:                   # 仓库规则（第一优先）
   files: [AGENTS.md]
   rules_dir: .agents/rules
@@ -308,6 +336,7 @@ reporting:
 - 正文使用 `{{placeholder}}` 变量替换：diff 块、源码块、规则渲染块、仓库规则块、profile 元信息；占位符缺失/多余 → 报错带 profile 名与模板路径。
 - 现有 prompt 文件**逐字节迁入** `ssd-python-autotest`；`improve.py` 中内联的仓库规则段（两条装配路径：`:858-885` / `:940-951` 与 `:1450-1466`）及 "Python 端已 grep" 文案（`:871`）改为模板变量，两条路径共用同一 `review/assembly.py` 实现，禁止只改其一。
 - 共享装配层（`review/assembly.py`、`review/context.py`）不得内联任何语言文案、缩进约定或示例，一律通过模板变量与 policy `prompt_sections` 注入。
+- 动态证据段模板（`prompts/dynamic/*.md`）与主模板同样做占位符齐全性校验；`refs_count` / `refs_block` 等由 `review/context.py` 计算并注入，模板内不得自行拼装条目行。
 - `scripts/sync_agents.py` / `sync_qoder_agents.py` 改为读取当前 profile 的 prompts 目录。
 
 ### 5.4 env 与 profile 合并规则
@@ -324,7 +353,7 @@ reporting:
 
 规则层决定检视效果与质量，与 prompt、语言策略解耦。规则包是数据，解析/装配/渲染是纯逻辑，可独立测试。
 
-### 6.1 两类规则、四层来源
+### 6.1 静态规则的来源分层（动态规则见 §6.7）
 
 | 来源 | 位置 | 默认优先级 | 说明 |
 |---|---|---|---|
@@ -436,6 +465,126 @@ log.error("nvme read failed: dev=%s, lba=%d, status=0x%x", dev, lba, st)
 
 `rule_translate` 的 `R-*` 中文名改读 RuleSet（`Rule.title`）；`R-OTHER-IMPACT:*` / `R-OTHER:*` 是 LLM 自由前缀，不在规则包内，仍从**当前 profile** 的 `improve.md` 解析；映射缓存按 profile 隔离，禁止跨 profile 复用。
 
+### 6.7 静态规则与动态规则分治
+
+#### 6.7.1 定义与边界
+
+| 维度 | 静态规则 | 动态规则 |
+|---|---|---|
+| 本质 | 执行前已知的**声明式知识** | 执行期针对本次 MR 采集的**证据** |
+| 输入 | 规则包 / 仓库 AGENTS.md / profile 覆盖 | 本次 diff、worktree 实际代码、policy 符号提取 |
+| 产出 | prompt 的「规则」部分 + 键索引 | 结构化证据（文件 / 行 / 符号 / 代码片段） |
+| 生命周期 | 启动期装配，实例内不可变；仓库规则按 MR 请求级合并 | **请求级**：每 MR 采集一次，仅内存缓存 |
+| 失败影响 | 解析/命名空间错误 → 启动失败 | 超时/工具缺失 → 降级为空证据，不阻塞 |
+| 配置位置 | `profile.yaml` + `rules/*.md`（+ 仓库规则） | `dynamic_rules.yaml` + `prompts/dynamic/*` |
+| 模型 | `RulePack / Rule / RuleSet` | `DynamicRule / DynamicRuleSet / DynamicEvidence` |
+| 消费方 | assembly / validation / publishing / reporting | context（渲染证据段）→ LLM；结果仍走现有 validation/publishing |
+
+判定口径：**能不能在执行前写下来**。`R-LOG`、`CPP-R-LEAK` 这类「要检查什么」是静态规则；「本仓库哪些文件引用了这次改动的符号」必须读仓库才知道，是动态规则。二者在 prompt 中共存，但绝不混入同一模型或同一装配阶段。
+
+#### 6.7.2 动态规则模型与配置
+
+```python
+DynamicRule(
+    key: str,                 # 管理键 DYN-*，只用于配置/telemetry/报告归属，不进 LLM 输出
+    title: str,
+    provider: str,            # review/dynamic/registry.py 中的 provider id
+    enabled: bool,
+    languages: list[str],     # 必须包含 profile.language；否则启动失败，防止跨语言误载
+    rg: dict,                 # {file_type: "py", excludes: ["reviewagent/**", ...]}；file_type 空=不限
+    limits: dict,             # {timeout_s, per_file_timeout_s, hits_per_symbol,
+                              #  max_refs_per_file, max_content_chars, max_symbols}
+    prompt: dict,             # {section_key, empty_template, items_template, priority}
+    suggestion: dict,         # {keys: ["R-OTHER-IMPACT"], labels: ["cross-file impact"]}
+    on_error: str,            # degrade（首期唯一实现；fail 仅预留给后续强依赖场景）
+)
+DynamicEvidence(rule_key, items_by_file, meta)   # meta: {degraded, duration_ms, hits, error}
+DynamicRuleSet(rules, by_key)                    # 不可变；按 profile 装配；不含任何静态规则
+```
+
+`profiles/ssd-python-autotest/dynamic_rules.yaml`（首期唯一启用项，参数逐项对应现网常量）：
+
+```yaml
+version: 1
+rules:
+  - key: DYN-CROSS-FILE-IMPACT
+    title: 跨文件 caller 影响
+    provider: cross_file_refs
+    enabled: true
+    languages: [python]
+    rg:
+      file_type: py                     # = 现网 rg -t py
+      excludes: [reviewagent/**, tests/**, .venv/**, "**/__pycache__/**", .git/**]
+    limits:
+      timeout_s: 30                     # 全局一次 rg
+      per_file_timeout_s: 8             # 单文件回退路径
+      hits_per_symbol: 2
+      max_refs_per_file: 6
+      max_content_chars: 500
+      max_symbols: 15
+    prompt:
+      section_key: cross_file_impact
+      empty_template: prompts/dynamic/cross_file_impact_empty.md
+      items_template: prompts/dynamic/cross_file_impact_items.md
+      priority: 1
+    suggestion:
+      keys: [R-OTHER-IMPACT]
+      labels: [cross-file impact]
+    on_error: degrade
+```
+
+模板是 profile 数据，允许出现场景语言文案（如「Python 端 rg」）；`items_template` 只接受 `{{refs_count}}` / `{{refs_block}}` 等共享渲染器提供的占位符，条目行格式由 `review/context.py` 统一产出。动态模板同时承担该规则的**检视指令**（如「请逐一分析每条 caller 是否需要同步更新」），因此动态规则仍是可配置、可启停的规则，只是其判定依赖请求期证据，而不是静态写入 RuleSet。
+
+首期该规则保持 `enabled: true` 且 `capabilities.cross_file_search: true`，确保现网 prompt 中的跨文件段继续出现；只有显式关闭才会改变 prompt。
+
+#### 6.7.3 Provider 协议与执行时序
+
+```python
+class DynamicEvidenceProvider(Protocol):
+    name: str
+    def collect(self, req: DynamicRequest) -> DynamicEvidence: ...
+# DynamicRequest: files, diff_by_file, workspace, policy, rule, limits, config,
+#                 collect_refs, find_refs   # 命令门面注入的回调（见下）
+```
+
+- provider 属 `review/dynamic/**`（共享模块）：不得 import `policies.*`、`commands`、`reporting`；语言差异只通过注入的 `policy.extract_symbols` 与 `rule.rg` 数据获得；
+- **实现归位**：rg 采集实现是 `review/dynamic/providers/cross_file_refs.py` 的模块级函数（接收 policy 与限额）；命令门面 `_collect_cross_file_refs_for_mr` / `_find_cross_file_refs` 只委托给它，并在门面内惰性解析 policy、限额与配置。provider 类不直接调用该模块函数，只调用 runner 注入的 `collect_refs` / `find_refs` 回调（回调就是门面方法），从而保证现有 10 处实例级 patch 继续生效；provider 单元测试可直接注入模块函数；
+- 时序：planner 选出本次文件 → `review/dynamic/runner.py` 按启用规则批量 `collect`（一次 rg 覆盖全部符号，避免每文件重启子进程）→ 证据按文件分发 → `review/context.py` 用模板渲染 → `review/assembly.py` 装配 → LLM → 现有 validation/publishing；
+- `capabilities.cross_file_search=false` 时整条规则跳过（不渲染、不报错）；
+- 动态规则**不参与**静态 RuleSet 的装配、顺序、预算与键索引；禁用动态规则不影响任何静态规则的渲染与校验。
+
+#### 6.7.4 输出契约
+
+- provider 只返回证据，不产 suggestion、不写 telemetry suggestion、不改 RuleSet；
+- suggestion 仍由 LLM 产出，经 `RuleSet.key_patterns` 校验、`RuleSet.normalize_keys` 归一、现有 validation/publishing 发布；行为与现网一致；
+- `DynamicRule.suggestion.keys / labels` 只用于归属、telemetry 与周报统计，**不放宽**校验；动态指令只存在于独立证据段，不得注入静态规则块或改变其顺序/预算；
+- 管理键 `DYN-*` 不进入 prompt、suggestion 与周报规则索引；其命名空间由 `scenario/dynamic.py` 单独校验。
+
+#### 6.7.5 失败与降级语义
+
+- 启动期（硬失败）：`dynamic_rules.yaml` 缺失但 profile 已引用 / YAML 或字段非法 / `DYN-*` 键重复或非法 / 模板文件缺失 / provider 未注册 / 任一启用规则的 `languages` 不含 `profile.language` → 启动失败并指明文件与键；
+- 运行期（降级）：provider 超时、rg 缺失、非零退出、解析异常 → WARNING + `DynamicEvidence(items_by_file={}, degraded=True)`；`context` 渲染该规则的 `empty_template`，与现网 rg 失败时返回空 refs 的表现**完全一致**；
+- 单文件回退路径（`cross_file_refs is None`）与批量路径采用同一降级规则；
+- telemetry 记录 `dynamic.<rule_key>` 的 `hits / duration_ms / degraded / error`（事件级，不改表结构、不影响 suggestion 数据）；
+- 任何降级都不得把 MR 标记失败，也不得让 prompt 缺失段落（空模板必须存在）。
+
+#### 6.7.6 首期逐字节兼容清单
+
+> 以下每一条都是「行为不打折」的验收项，缺一即视为回归：
+
+1. 批量路径：对 `files_to_review` 的 diff 取符号并集，一次 `rg -n --no-heading -t py <pattern> .`，排除 `reviewagent/**`、`tests/**`、`.venv/**`、`**/__pycache__/**`、`.git/**`，timeout 30s；
+2. 单文件回退：同一 rg 参数，额外排除自身文件，timeout 8s；
+3. 符号提取：仍为 `def` / `class` / 大写常量 / `from ... import ...` 四类，长度 ≥3，去 `self/cls/None/True/False/args/kwargs`，最多 15 个；同一实现同时服务 planner 的增量复用判定与动态证据；
+4. 分配语义：每符号最多 2 条命中、每文件最多 6 条引用、`content` 截断 500 字符、排除自身文件、一行只算一个符号；
+5. 排序与去重：沿用现有实现语义——批量路径的符号并集按 `sorted` 拼接正则，分发给各文件时沿用集合迭代顺序；**不新增排序、不改序**（避免 prompt 抖动）；golden 测试固定输入与 `PYTHONHASHSEED`；
+6. prompt 文案：空/非空两段与现网 `_render_cross_file_section` 逐字节一致（含「Python 端 rg」「优先 1」「R-OTHER-IMPACT」键族与 `label: cross-file impact`）；
+7. 注入位置：单文件路径为「跨文件段 → 规则块 → 锚点 → 文件头」；批量路径为「规则块在批次头，每个文件段内跨文件段先于锚点与 diff」；两条路径的相对顺序均不变；
+8. 失败表现：rg 异常/超时 → 空证据 → 渲染空模板，与现网一致。
+
+#### 6.7.7 扩展方式
+
+新增证据类型（多跳调用链、schema 漂移、依赖图、历史缺陷关联等）只需：新增 provider + 在 `dynamic_rules.yaml` 增加一条规则 + 提供 profile 模板；静态规则、现有 provider 与共享引擎均不改。`limits.depth` 作为深度参数预留，首期不实现，也不改变现有输出。
+
 ## 7. 检视引擎拆分与接口
 
 ### 7.1 拆分映射
@@ -444,7 +593,12 @@ log.error("nvme read failed: dev=%s, lba=%d, status=0x%x", dev, lba, st)
 |---|---|
 | 文件扩展名过滤、review_mode、测试路径/抽样、优先级打分（:204-330） | `review/planner.py` |
 | `_group_files_for_batching`、`_assign_strategy`、`_sample_case_files`、`_test_feature_density`（:1307-1655） | `review/planner.py`（测试特征密度经 policy 计算） |
-| `_build_full_source_block` / `_build_partial_context_block` / `_build_patch_only_block`、跨文件段、已知问题锚点（:857-887, 1656-1770, 1950-1975） | `review/context.py` |
+| `_build_full_source_block` / `_build_partial_context_block` / `_build_patch_only_block`、已知问题锚点（1656-1770, 1950-1975） | `review/context.py` |
+| `_extract_identifiers`（:666-696） | `review/policies/python.py` 的 `extract_symbols`；planner 增量复用判定与动态 provider 共用 |
+| `_find_cross_file_refs`（:699-759） | `review/dynamic/providers/cross_file_refs.py` 的单文件回退路径（签名与限额语义保持） |
+| `_collect_cross_file_refs_for_mr`（:761-855） | `review/dynamic/providers/cross_file_refs.py` 的批量路径 + `review/dynamic/runner.py` 调度、超时与降级 |
+| `_render_cross_file_section`（:857-887） | `review/context.py`（证据段渲染）+ profile `prompts/dynamic/*.md`（空/非空两段文案） |
+| `_build_chunk_prompt` 的 `cross_file_refs` 注入（:953-956）、batch 注入（:1482）、`_call_agent` 预采集（:429-432） | 统一由 `review/dynamic/runner.py` + `review/context.py` 完成；单文件与批量两条路径共用同一渲染实现 |
 | `_build_chunk_prompt` / `_build_batch_prompt` 模板拼装（:889-986, :1442-1519） | `review/assembly.py`（纯函数，不调 LLM；两条路径共用同一装配实现） |
 | `prompts/_general_rules_block.md` 整块注入（:940-951） | `profiles/ssd-python-autotest/rules/general_rules.md`（`render: verbatim`）+ assembly 模板变量；原文件迁移后删除，`rule_translate.py:44` 改读 RuleSet 索引，避免双源 |
 | `_call_agent` 主流程编排（:188-620） | `review/runner.py` 的 `run(...)`：命令薄壳只组装依赖并调用，编排逻辑不再留在命令层 |
@@ -475,7 +629,9 @@ log.error("nvme read failed: dev=%s, lba=%d, status=0x%x", dev, lba, st)
 
 **config 晚绑定**：现有测试会 `monkeypatch.setattr("reviewagent.commands.improve.config", _cfg)` 后直接调用 `_assign_strategy` / `_full_source_budget_bytes` / `_build_patch_only_block` 等方法。迁移后的函数必须把运行参数（预算、权重、阈值）作为 `config` 入参显式接收；门面方法在**调用时**解析模块级 `improve.config` 并传入，禁止在 `review/` 模块里直接 `from reviewagent.config import config` 读取这些测试关心的旋钮，否则 monkeypatch 静默失效。执行期内部调用由命令在入口解析一次并向下传递。
 
-**绕过 `__init__` 的测试构造**：现有测试用 `ImproveCommand.__new__(ImproveCommand)` 后手工赋值少量属性（`project_id` / `mr_iid` / `ws` / `repo_context`）并 monkeypatch 实例方法，再调用 `_call_agent`。门面必须支持这种用法：新增依赖（Profile / RuleSet / LanguagePolicy / config）一律**惰性解析**，不得在方法内假设 `__init__` 已执行；被 patch 的实例方法（`_diff_line_map`、`_read_file_lines`、`_split_diff_by_file`、`_collect_cross_file_refs_for_mr`、`_call_chunk` 等）必须由门面以可调用对象传给引擎，保证实例级 patch 生效。单文件捷径（`super()._call_agent(ws)`，内部调用可被 patch 的 `_build_user_prompt`）由门面以回调注入 runner，不得在 runner 内重建。
+**绕过 `__init__` 的测试构造**：现有测试用 `ImproveCommand.__new__(ImproveCommand)` 后手工赋值少量属性（`project_id` / `mr_iid` / `ws` / `repo_context`）并 monkeypatch 实例方法，再调用 `_call_agent`。门面必须支持这种用法：新增依赖（Profile / RuleSet / DynamicRuleSet / LanguagePolicy / config）一律**惰性解析**，不得在方法内假设 `__init__` 已执行；被 patch 的实例方法（`_diff_line_map`、`_read_file_lines`、`_split_diff_by_file`、`_collect_cross_file_refs_for_mr`、`_call_chunk` 等）必须由门面以可调用对象传给引擎，保证实例级 patch 生效。单文件捷径（`super()._call_agent(ws)`，内部调用可被 patch 的 `_build_user_prompt`）由门面以回调注入 runner，不得在 runner 内重建。
+
+**动态规则回调**：`test_improve_strategy.py` 有 8 处、`test_improve_alignment.py` 有 2 处直接使用 `_collect_cross_file_refs_for_mr`，其中 patch 版本签名固定为 `(files, diff_by_file, wt)` 三个位置参数。因此：门面把 `self._collect_cross_file_refs_for_mr` 作为回调用可调用对象注入动态 provider，provider **只以三个位置参数**调用；限额（`hits_per_symbol` / `max_refs_per_file` 等）由门面在自身实现内从当前 `DynamicRuleSet` 解析并作为默认值使用，不得作为额外参数传给被 patch 的 lambda。`_find_cross_file_refs` 与 `_render_cross_file_section` 可保留同名委托以兼容潜在外部调用，但不得保留业务逻辑。`_extract_identifiers` 迁入 policy 后，门面可保留 staticmethod 委托到默认 Python policy，避免破坏可能的直接引用。
 
 ### 7.3 LanguagePolicy 边界（消除与 profile 的双源）
 
@@ -485,7 +641,7 @@ class LanguagePolicy(Protocol):
     def classify_file(self, path: str) -> FileKind: ...            # TEST / SOURCE / FIXTURE / OTHER
     def test_feature_density(self, path: str, size: int) -> float: ...
     # 上下文
-    def cross_file_evidence(self, symbol: str, workspace: Path) -> str | None: ...
+    def extract_symbols(self, diff: str) -> list[str]: ...        # 语言符号提取（增量复用 + 动态证据共用）
     def render_source_block(self, ctx: FileContext, strategy: str, budget: int) -> str: ...
     # 建议处理
     def normalize_suggestion(self, sug: Suggestion, ctx: FileContext) -> Suggestion: ...
@@ -500,9 +656,10 @@ class LanguagePolicy(Protocol):
 
 - `GenericPolicy` 提供全部默认实现（按 profile 扩展名/路径分类、按严重度打分等），新语言只覆盖有差异的钩子；
 - **profile 只存数据**（扩展名/路径/关键词/权重/能力开关），policy 构造时注入 `Profile` 并负责解释；同一份数据只存一处；
-- **policy 只负责语言语义**：AST 符号与 apply 风险、`rg -t py`/文件类型、测试密度、缩进与源码块、builtins 打分、关键字排除、语言相关 prompt 段；
+- **policy 只负责语言语义**：符号提取（`extract_symbols`）、AST 符号与 apply 风险、测试密度、缩进与源码块、builtins 打分、关键字排除、语言相关 prompt 段；
+- **动态规则的语言差异只有两个出口**：policy 的 `extract_symbols`，以及 profile `dynamic_rules.yaml` 的数据（`rg.file_type` / `excludes` / 限额 / 模板）；`review/dynamic/**` 与其他共享模块一样禁止语言字面量与 `policies.*` import；
 - **源码块归属**：`review/context.py` 负责块结构、标题、顺序与预算；policy 的 `render_source_block` 只产出语言相关片段（缩进、符号标注、语言特有截断），不得自行决定块布局；
-- `capabilities` 是**能力开关**（`ast_validation` / `cross_file_search` / `apply_suggestion` / `full_source_analysis`），引擎据此决定是否调用对应钩子，不承载实现；
+- `capabilities` 是**能力开关**（`ast_validation` / `cross_file_search` / `apply_suggestion` / `full_source_analysis`），引擎据此决定是否调用对应钩子或动态规则（`cross_file_search=false` 时跳过跨文件证据采集），不承载实现；
 - 注册表 `review/policies/registry.py` 提供 `get(language)`（返回接收 `Profile` 的工厂）与 `register(language, factory)`：生产按约定惰性 import，测试可注册探针 policy；模块级禁止 import 具体 policy；未注册即启动失败；
 - 共享模块不得 import `policies.*`；policy 通过构造函数注入 planner/context/assembly/runner/validation/publishing；
 - `suggestion_actions.py` 的 token 采纳判定改用 policy `keywords()` 提供关键字集合（替代模块级 `_KEYWORDS`），其余逻辑语言无关。
@@ -520,7 +677,7 @@ class LanguagePolicy(Protocol):
 **三条硬边界**（由 `tests/architecture/` 自动校验，命中即 CI 失败）：
 
 1. **import 方向**：`review` 共享模块不得 import `review/policies/*`；`scenario` 不得 import `review`；`reporting` 不得 import `review`。
-2. **语言字面量**：`review` 共享模块（planner/context/assembly/runner/validation/publishing/policy/types）与 `scenario` 中不得出现 `.py`、`-t py`、`import ast`、`if language ==` 等语言分支或字面量（扫描 import 与可执行字符串，忽略注释和 docstring）；扫描范围**排除 `review/policies/**`**，它是语言差异的唯一出口。
+2. **语言字面量**：`review` 共享模块（planner/context/assembly/runner/validation/publishing/policy/types/**dynamic**）与 `scenario`（含 `scenario/dynamic.py`）中不得出现 `.py`、`-t py`、`import ast`、`if language ==` 等语言分支或字面量（扫描 import 与可执行字符串，忽略注释和 docstring）；扫描范围**排除 `review/policies/**`**，它是语言差异的唯一出口；profile 下的 `prompts/dynamic/*` 是场景数据，允许出现语言文案。
 3. **规则命名空间**：当前 profile 只能装配匹配 `builtin_pattern` / `repo_prefix` 的规则包，跨场景包一律拒绝。
 
 **探针场景**：`tests/fixtures/profiles/probe-scenario/` 是仅测试注册的最小场景（不同扩展名、不同缩进、不同规则键），跑通 fake-LLM 全流程；其 policy 通过 registry 的测试注册接口注入，生产代码不感知该场景。它验证「新增场景只需新增数据与 policy，共享代码零改动」，本身不是 C/C++ 实现，也不参与部署。
@@ -531,7 +688,8 @@ class LanguagePolicy(Protocol):
 
 以下为后续实施 C/C++ 场景时的说明，本期不创建目录、不写实现、不加测试；接口与配置字段（`language` 注册表、`rule_keys`、`capabilities`、`reporting`）按此预留。届时**预期**只需新增场景包与 `policies/cpp.py`，共享代码零改动；若首次接入暴露缺失的通用能力，按 §7.5 新增语言无关钩子，并保证 Python golden 不变。
 
-- `language: cpp`；`include_extensions: [.c, .h, .cpp, .cc, .hpp]`；`ast_validation: false`；`apply_suggestion: true`；`cross_file_search: true`（policy 用 C/C++ 文件类型检索）；`full_source_analysis: false`（规避大文件 E2BIG）。
+- `language: cpp`；`include_extensions: [.c, .h, .cpp, .cc, .hpp]`；`ast_validation: false`；`apply_suggestion: true`；`cross_file_search: true`（复用 `cross_file_refs` provider，`rg.file_type: cpp`）；`full_source_analysis: false`（规避大文件 E2BIG）。
+- `dynamic_rules.yaml`：启用 `DYN-CROSS-FILE-IMPACT`，使用 C/C++ 模板与限额；后续可新增 `call_chain` / `dependency_graph` provider，不改现有 provider。
 - `rule_keys`：`builtin_pattern` 为 `CPP-R-*` 命名空间、`repo_prefix: CPP`（仓库键 `CPP-RULE-*`）、`display_prefix: CPP`；解析器按命名空间拒绝与 Python 包混装。
 - `prompts/`：`improve.md`（output_schema 与现有一致）、`describe.md`、三个 `weekly_*.md`。
 - `rules/`：内存/资源泄漏、边界与越界、并发安全、错误处理路径、可移植性、风格一致性，附正反例。
@@ -542,6 +700,7 @@ class LanguagePolicy(Protocol):
 - profile 加载（硬边界）：包不存在 / 必填字段缺失 / 未知顶层字段（防拼写错误）→ 启动失败并列出可用场景与问题字段；`language` 未注册 → 入口启动期校验失败并列出已注册语言；未设置 `REVIEW_PROFILE` → 默认回退 + WARNING。
 - policy 加载：`language` 已声明但 policy 模块缺失或构造异常 → 启动失败，不静默回退 `GenericPolicy`。
 - 规则层：包解析失败（frontmatter/表格损坏、重复键冲突且无法按优先级裁决）→ 启动失败并指明包路径；键命名空间不匹配当前 profile / `_shared` 包缺 `applies_to.languages` → 启动失败并指出包路径与期望命名空间；仓库规则缺失/读取失败 → 视为无项目规则，WARNING，不阻塞检视。
+- 动态规则：`dynamic_rules.yaml` 缺失（profile 已引用）/ 字段非法 / `DYN-*` 键重复或非法 / 模板缺失 / provider 未注册 → 启动失败并指明文件与键；运行期 provider 超时、rg 缺失、非零退出或异常 → WARNING + 空证据 + `empty_template`，记录 telemetry，不阻塞该 MR；单文件回退与批量路径同规则。
 - 模板渲染：占位符缺失/多余 → 报错带 profile 与模板路径。
 - RQ job 场景不匹配：worker 拒绝执行并标记失败。
 - cpp suggestion 校验失败（后续）：丢弃该条并计入 telemetry，不阻塞其余建议。
@@ -552,21 +711,23 @@ class LanguagePolicy(Protocol):
 1. **兼容性铁律**：现有测试零改动全绿（兼容门面 + 默认回退）；渲染后 prompt 做字节级 golden，`verbatim` 规则正文对现有 `_general_rules_block.md` 做 checksum 基线。
 2. **规则层**：parser（frontmatter/表格/正文/正反例/aliases）、resolver（四层优先级、同键覆盖、禁用、适用性过滤、加载时命名空间校验、共享包语言声明）、render（`verbatim` 逐字节 / `structured` 顺序与预算裁剪 / 仓库规则置顶）、keys（键正则生成、仓库前缀、`normalize_keys`）、repo（AGENTS.md 获取/缓存，复用现有 mock）。
 3. **场景层**：profile 加载（默认回退/非法值/env 覆盖/共享包引用/policy 加载失败）、prompt 模板变量齐全性。
-4. **引擎层**：planner（过滤/打分/抽样/分批）、context（三种 source 块）、assembly（golden prompt）、runner（合并/预算）、validation（锚定/去重/键豁免）、python policy（ast/rg/测试判定/缩进/打分）。
-5. **集成**：ssd-python-autotest 端到端 fake-LLM 流程（fakeredis/mock provider）；RQ job profile 校验；周报链路 profile 化（标题/动作/扩展名/翻译，python 输出与现有快照一致）。
-6. **架构守卫**：AST 扫描 import 方向、语言字面量、规则命名空间（§7.5 三条边界）。
-7. **探针场景**：`probe-scenario` 端到端 fake-LLM，证明第二场景零改共享代码接入。
-8. **质量基线**：选取 N 个历史 MR，用新旧装配各跑一次 fake/replay，对比建议数、严重度分布、规则命中；差异需人工签字确认（非阻塞 CI）。
-9. C/C++ 测试随 C/C++ 实施一并新增。
+4. **动态规则**：`scenario/dynamic.py`（加载/字段校验/未知 provider/重复或非法 `DYN-*`/语言过滤/模板缺失）；provider（rg 参数、排除项、限额、空结果、超时与工具缺失降级、单文件与批量结果一致）；`review/context.py` 渲染（空/非空两段与现网逐字节 golden）；门面回调（实例 patch 生效，且只以 `(files, diff_by_file, wt)` 调用）。
+5. **引擎层**：planner（过滤/打分/抽样/分批/增量复用符号判定）、context（三种 source 块 + 动态证据段）、assembly（golden prompt）、runner（合并/预算/动态证据分发）、validation（锚定/去重/键豁免）、python policy（`extract_symbols`/ast/密度/缩进/打分）。
+6. **集成**：ssd-python-autotest 端到端 fake-LLM 流程（fakeredis/mock provider）；RQ job profile 校验；周报链路 profile 化（标题/动作/扩展名/翻译，python 输出与现有快照一致）。
+7. **架构守卫**：AST 扫描 import 方向、语言字面量（含 `review/dynamic/**`）、规则命名空间（§7.5 三条边界）。
+8. **探针场景**：`probe-scenario` 端到端 fake-LLM，证明第二场景零改共享代码接入（含一条最小动态规则）。
+9. **质量基线**：选取 N 个历史 MR，用新旧装配各跑一次 fake/replay，对比建议数、严重度分布、规则命中；动态证据分别覆盖「有命中 / 无命中 / rg 失败降级」三种 prompt 形态；差异需人工签字确认（非阻塞 CI）。
+10. C/C++ 测试随 C/C++ 实施一并新增。
 
 ## 11. 实施顺序（首期：Python 场景）
 
 1. `scenario/` 基础：profile 加载器 + prompts 加载器 + `ssd-python-autotest` 数据迁移（默认回退/env 覆盖，现有测试全绿）；
-2. 规则层：model/parser/resolver/render/keys/repo + 加载时命名空间校验 + `aliases/normalize_keys` + `repo_context.py` 兼容 re-export；
-3. `review/` 拆分 + 扩展缝：`types.py` / `policy.py` 协议 / `GenericPolicy` / `registry` + planner/context/assembly/runner + `policies/python.py`（AST / `rg -t py` / 密度 / 缩进 / 打分 / 关键字全部迁入）+ improve 兼容门面（测试零改动全绿）；
-4. validation + `suggestion_actions`：所有调用点改为注入 policy，校验/豁免/采纳判定完成去 Python 关键字；
-5. publishing 合并（键归一）+ 周报链路 profile 化（三个 weekly prompt、rule_translate、renderer、repo_scan、标题），python 输出不变；
-6. 解耦守卫：`tests/architecture/` 三条边界 + `probe-scenario` 端到端 + prompt golden / 规则 checksum / 历史 MR 回放基线；
-7. 部署与文档更新（`.env.example`、systemd、README、DEPLOYMENT.md）。
+2. 静态规则层：model/parser/resolver/render/keys/repo + 加载时命名空间校验 + `aliases/normalize_keys` + `repo_context.py` 兼容 re-export；
+3. `review/` 拆分 + 扩展缝：`types.py` / `policy.py` 协议 / `GenericPolicy` / `registry` + planner/context/assembly/runner + `policies/python.py`（`extract_symbols` / AST / 密度 / 缩进 / 打分 / 关键字全部迁入）+ improve 兼容门面（测试零改动全绿）；
+4. **动态规则分治**：`scenario/dynamic.py`（`dynamic_rules.yaml` 加载/校验）+ `review/dynamic/{model,registry,runner,providers/cross_file_refs}.py` + profile 动态模板；单文件/批量两条路径与现网逐字节等价，失败降级；
+5. validation + `suggestion_actions`：所有调用点改为注入 policy，校验/豁免/采纳判定完成去 Python 关键字；
+6. publishing 合并（键归一）+ 周报链路 profile 化（三个 weekly prompt、rule_translate、renderer、repo_scan、标题），python 输出不变；
+7. 解耦守卫：`tests/architecture/` 三条边界 + `probe-scenario` 端到端 + prompt golden / 规则 checksum / 动态证据三态 golden / 历史 MR 回放基线；
+8. 部署与文档更新（`.env.example`、systemd、README、DEPLOYMENT.md）。
 
 每步独立可验收、可提交。首期稳定后，再按第 8 节新增 `cpp-generic-dev` 场景包与 `policies/cpp.py`；预期零改共享代码，若需新增能力按 §7.5 执行。
