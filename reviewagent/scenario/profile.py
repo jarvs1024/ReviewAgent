@@ -399,6 +399,8 @@ def load_and_activate() -> Profile:
     from reviewagent.config import current
 
     _active = load_profile(current().review_profile)
+    # 新 profile 不得看到上一个 profile 装配的规则（启动装配随后会重新 set）。
+    _invalidate_rule_set()
     return _active
 
 
@@ -406,6 +408,14 @@ def deactivate() -> None:
     """清空激活缓存（测试隔离 / 重新装配用；不影响 `_current` 配置）."""
     global _active
     _active = None
+    _invalidate_rule_set()
+
+
+def _invalidate_rule_set() -> None:
+    """惰性失效激活 RuleSet（避免 profile <-> rules 的模块级循环导入）."""
+    from reviewagent.scenario.rules.resolver import set_active_rule_set
+
+    set_active_rule_set(None)
 
 
 _INSTANCE_SCHEMA = 1

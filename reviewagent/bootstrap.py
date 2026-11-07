@@ -8,8 +8,8 @@ API（`reviewagent.main` lifespan）与 worker（`ReviewAgentSpawnWorker.bootstr
    `apply_scenario()` 到运行配置；
 3. `bind_instance()`：把 `{data_dir}/instance.json` 绑定到该 profile，
    同一 data_dir 换 profile 直接失败（跨场景数据隔离）；
-4. 基础 RuleSet 占位（`BootstrapResult.rule_set` 本任务恒为 None，
-   Task 5 接入真正的规则装配；规则文件缺失不得阻断启动）；
+4. 装配基础 RuleSet（`assemble_base(profile)`）并设为激活规则集；
+   `BootstrapResult.rule_set` 携带该快照，`bootstrap.ready` 记录其指纹；
 5. 一条 `config.resolved` + 一条 `bootstrap.ready` 日志（含 profile 与
    config fingerprint）；显式出现的场景 env 追加一条 `config.compat_env`。
 
@@ -28,6 +28,7 @@ from reviewagent.config import current
 from reviewagent.logging_setup import logger, setup_logging
 from reviewagent.scenario import profile as profile_module
 from reviewagent.scenario.profile import bind_instance, bound_profile, load_and_activate
+from reviewagent.scenario.rules.resolver import assemble_base, set_active_rule_set
 from reviewagent.settings.binder import REQUIRED_FIELDS, explicit_env, validate
 from reviewagent.settings.binder import fingerprint as config_fingerprint
 from reviewagent.settings.schema import SCHEMA
@@ -44,7 +45,7 @@ class BootstrapResult:
 
     前两个字段与 brief 保持一致（位置参数），其余为扩展信息；
     `data_dir` 不设默认值（静默取当前目录会把日志/数据写到意外位置），
-    `rule_set` 是 Task 5 的接入点，本任务恒为 None。
+    `rule_set` 是启动期装配的规则快照。
     """
 
     profile_name: str
@@ -143,6 +144,8 @@ def startup(kind: str) -> BootstrapResult:
     profile = load_and_activate()
     data_dir = Path(current().data_dir)
     bind_instance(profile, data_dir)
+    rule_set = assemble_base(profile)
+    set_active_rule_set(rule_set)
     values = {spec.name: getattr(current(), spec.name) for spec in SCHEMA}
     result = BootstrapResult(
         profile.name,
@@ -150,8 +153,7 @@ def startup(kind: str) -> BootstrapResult:
         kind=kind,
         config_fingerprint=config_fingerprint(values),
         data_dir=data_dir,
-        # Task 5 在这里装配 RuleSet；当前规则文件尚未落地，先用 None 占位。
-        rule_set=None,
+        rule_set=rule_set,
     )
     logger.info(
         "config.resolved kind={} profile={} profile_fingerprint={} config_fingerprint={}",
@@ -164,11 +166,13 @@ def startup(kind: str) -> BootstrapResult:
     if compat:
         logger.info("config.compat_env keys={}", compat)
     logger.info(
-        "bootstrap.ready kind={} profile={} profile_fingerprint={} config_fingerprint={} data_dir={}",
+        "bootstrap.ready kind={} profile={} profile_fingerprint={} config_fingerprint={} "
+        "rule_fingerprint={} data_dir={}",
         kind,
         profile.name,
         profile.fingerprint,
         result.config_fingerprint,
+        rule_set.fingerprint,
         data_dir,
     )
     _state = result
@@ -176,8 +180,9 @@ def startup(kind: str) -> BootstrapResult:
 
 
 def reset_for_tests() -> None:
-    """清空启动缓存 / 激活状态 / 追加的 readiness 钩子（仅测试使用）."""
+    """清空启动缓存 / 激活状态 / RuleSet / 追加的 readiness 钩子（仅测试使用）."""
     global _state
     _state = None
     profile_module.deactivate()
+    set_active_rule_set(None)
     _readiness_checks[:] = list(_DEFAULT_CHECKS)

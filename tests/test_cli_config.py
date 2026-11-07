@@ -138,7 +138,8 @@ def test_startup_is_idempotent(isolated_instance):
     assert (first.kind, first.profile_name) == ("api", "ssd-python-autotest")
     assert first.profile_fingerprint and first.config_fingerprint
     assert first.data_dir == isolated_instance
-    assert first.rule_set is None  # Task 5 之前的占位
+    assert first.rule_set is not None
+    assert "R-LOG" in first.rule_set.index_by_key
     assert json.loads((isolated_instance / "instance.json").read_text())["profile"] == (
         "ssd-python-autotest"
     )
@@ -160,6 +161,7 @@ def test_startup_logs_config_resolved_and_bootstrap_ready_once(isolated_instance
     assert "profile=ssd-python-autotest" in ready[0]
     assert "profile_fingerprint=" in ready[0]
     assert "config_fingerprint=" in ready[0]
+    assert "rule_fingerprint=" in ready[0]
     assert f"data_dir={isolated_instance}" in ready[0]
 
 
