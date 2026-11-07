@@ -352,24 +352,28 @@ def test_validate_no_existing_code_still_snaps():
     assert decision["action"] == "post", f"expected post, got: {decision}"
 
 
-# ---------- _RULE_REF_REGEX + _score_suggestion ----------
+# ---------- rule key patterns (profile ruleset) + _score_suggestion ----------
 
-def test_rule_ref_regex_exempts_ssd_rule():
+def _rule_key_patterns():
+    """激活 profile 的规则键抽取正则（等价旧的 _RULE_REF_REGEX）."""
+    from reviewagent.scenario.rules.resolver import active_rule_set
+
+    return active_rule_set().key_patterns
+
+
+def test_rule_key_patterns_exempts_ssd_rule():
     """SSD-RULE-* 豁免 _score_suggestion 过滤"""
-    from reviewagent.commands.improve import _RULE_REF_REGEX
-    assert _RULE_REF_REGEX.search("命中 SSD-RULE-NIL-GUARD")
+    assert _rule_key_patterns().extract("命中 SSD-RULE-NIL-GUARD")
 
 
-def test_rule_ref_regex_exempts_r_xxx():
+def test_rule_key_patterns_exempts_r_xxx():
     """R-XXX 通用规则键也豁免 (与 SSD-RULE 同级)"""
-    from reviewagent.commands.improve import _RULE_REF_REGEX
     for ref in ["R-RES", "R-PERF", "R-OTHER", "R-CLEAN", "R-NVME"]:
-        assert _RULE_REF_REGEX.search(f"命中 {ref} 规则"), f"应豁免 {ref}"
+        assert _rule_key_patterns().extract(f"命中 {ref} 规则"), f"应豁免 {ref}"
 
 
-def test_rule_ref_regex_exempts_r_other_with_subkey():
+def test_rule_key_patterns_exempts_r_other_with_subkey():
     """R-OTHER:<x> / R-OTHER-IMPACT:<x> 兜底前缀也豁免"""
-    from reviewagent.commands.improve import _RULE_REF_REGEX
     for ref in [
         "R-OTHER:magic_number",
         "R-OTHER:typo",
@@ -377,14 +381,13 @@ def test_rule_ref_regex_exempts_r_other_with_subkey():
         "R-OTHER-IMPACT:schema_drift",
         "R-OTHER-IMPACT:import_path",
     ]:
-        assert _RULE_REF_REGEX.search(f"命中 {ref}"), f"应豁免 {ref}"
+        assert _rule_key_patterns().extract(f"命中 {ref}"), f"应豁免 {ref}"
 
 
-def test_rule_ref_regex_does_not_exempt_plain_text():
+def test_rule_key_patterns_does_not_exempt_plain_text():
     """无规则键的普通文本不豁免"""
-    from reviewagent.commands.improve import _RULE_REF_REGEX
-    assert _RULE_REF_REGEX.search("普通代码风格建议") is None
-    assert _RULE_REF_REGEX.search("测试代码略") is None
+    assert _rule_key_patterns().extract("普通代码风格建议") == []
+    assert _rule_key_patterns().extract("测试代码略") == []
 
 
 def test_score_suggestion_label_cross_file_impact_high():

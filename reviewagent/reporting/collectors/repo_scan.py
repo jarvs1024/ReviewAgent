@@ -34,6 +34,31 @@ from reviewagent.llm import OpencodeError, get_client
 
 from .base import CollectorContext, SectionResult
 
+# profile `reporting.*` 缺失时的回退（与历史硬编码保持一致）
+_DEFAULT_REPO_SCAN_EXTENSIONS: tuple[str, ...] = (
+    ".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".sh",
+)
+_DEFAULT_REPO_SCAN_ENTRY_FILES: tuple[str, ...] = (
+    "__init__.py", "main.py", "app.py", "config.py", "settings.py",
+)
+
+
+def _reporting_scan_config() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """惰性解析激活 profile 的 `reporting.repo_scan_*`（缺省回退历史常量）."""
+    try:
+        from reviewagent.scenario.profile import active_or_load
+
+        reporting = active_or_load().reporting or {}
+    except Exception:  # noqa: BLE001
+        reporting = {}
+    extensions = tuple(
+        reporting.get("repo_scan_extensions") or _DEFAULT_REPO_SCAN_EXTENSIONS
+    )
+    entry_files = tuple(
+        reporting.get("repo_scan_entry_files") or _DEFAULT_REPO_SCAN_ENTRY_FILES
+    )
+    return extensions, entry_files
+
 
 class RepoScanCollector:
     """本周代码质量全量扫描 (基于本周 MR 变更数据的全局体检)."""
@@ -295,7 +320,7 @@ class RepoScanCollector:
             return {"modules": [], "key_file_snippets": [], "total_files": 0}
 
         # 2. 过滤代码文件、按 top-level 目录分组
-        code_exts = (".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".sh")
+        code_exts, priority_names = _reporting_scan_config()
         all_files: list[str] = []
         for item in tree:
             if item.get("type") == "blob":
@@ -320,8 +345,7 @@ class RepoScanCollector:
         # 3. 对核心模块的关键入口文件拉取摘要
         key_file_snippets: list[dict[str, Any]] = []
         used_chars = 0
-        # 优先 __init__.py, 其次 main.py / app.py / config.py 等
-        priority_names = ("__init__.py", "main.py", "app.py", "config.py", "settings.py")
+        # 优先 __init__.py, 其次 main.py / app.py / config.py 等 (profile 可配)
         candidates: list[str] = []
         for p in all_files:
             basename = p.rsplit("/", 1)[-1]

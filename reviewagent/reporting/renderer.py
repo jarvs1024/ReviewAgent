@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .artifact import WeeklyArtifact
 from .collectors.base import SectionResult
@@ -35,6 +38,48 @@ SECTION_TITLES: dict[str, str] = {
     "merged_mrs":  "二、本周 {branch} 变更汇总",
     "repo_scan":   "三、本周代码质量全量扫描",
 }
+
+# 规则 -> 具体跟进动作映射（来自 profile `reporting.actions_file`，按 profile 指纹缓存）
+_RULE_ACTIONS_CACHE: dict[str, dict[str, str]] = {}
+
+
+def load_rule_actions(profile: Any) -> dict[str, str]:
+    """读取 profile 声明的规则跟进动作表 (YAML: 规则键 -> 具体动作).
+
+    路径取 `profile.reporting["actions_file"]`（相对 profile.root）；
+    进程内按 `profile.fingerprint` 缓存，缺字段 / 读盘失败返回空映射.
+    """
+    fingerprint = getattr(profile, "fingerprint", "")
+    cached = _RULE_ACTIONS_CACHE.get(fingerprint)
+    if cached is not None:
+        return cached
+    reporting = getattr(profile, "reporting", None) or {}
+    rel = reporting.get("actions_file")
+    actions: dict[str, str] = {}
+    if rel:
+        path = Path(getattr(profile, "root", Path("."))) / str(rel)
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            data = None
+        if isinstance(data, dict):
+            actions = {
+                str(key): str(value)
+                for key, value in data.items()
+                if key is not None and value is not None
+            }
+    _RULE_ACTIONS_CACHE[fingerprint] = actions
+    return actions
+
+
+def _active_rule_actions() -> dict[str, str]:
+    """当前激活 profile 的规则动作表；profile 不可用时返回空映射."""
+    try:
+        from reviewagent.scenario.profile import active_or_load
+
+        return load_rule_actions(active_or_load())
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
@@ -472,23 +517,9 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
 
     # 跟进建议不再用"规范 CI / 正确性人工"这种万能套话, 改为基于
     # 本周 top_rules 给出针对性 1~3 条具体动作. 规则前缀 -> 具体建议的
-    # 映射可以持续扩展, 缺的类别退化到通用提示 (但不退化成套话).
-    _RULE_ACTIONS = {
-        "SSD-RULE-TYPEHINTS":              "启用 ruff `ANN`/mypy strict 加入 CI, 一次性消存量",
-        "SSD-RULE-DOCSTRING-REQUIRED":     "在 pre-commit 跑 ruff `D` 系列, docstring 缺失直接 fail",
-        "SSD-RULE-NO-LOG-EXC":             "用 ruff `BLE` + `S` (logging 规范) 加 CI, 对裸 `except Exception` 报错",
-        "SSD-RULE-NO-BARE-PRINT":          "用 ruff `T201` (禁止 print) 加入 CI 阻断列表",
-        "SSD-RULE-NO-MUTABLE-DEFAULT":     "用 ruff `B006` 拦截可变默认参数",
-        "SSD-RULE-RESOURCE-CONTEXT-MANAGER": "用 ruff `SIM`/`PTH123` 拦截裸 open/close, 强制 with 语句",
-        "SSD-RULE-FORBIDDEN-COMMENT":      "把无效注释扫一遍存 issue, 用 ruff `ERA` 抑制注释式代码",
-        "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT": "用 ruff `F401`/`F403` 拦截 `from foo import *`",
-        "R-LOOP":                          "把『循环边界/无限循环』作为 review checklist 红线条款",
-        "R-RES":                           "扫一遍 `open/requests/socket` 调用, 强制 `with` + 超时",
-        "R-ERR":                           "把裸 `except:` 与静默 `pass` 列为硬错误, 加入 review 范本",
-        "R-SHELL":                         "对所有 shell 调用加超时 + 异常类型细化 + sandbox 跑",
-        "R-CI":                            "对并行用例加临时目录 PID 隔离 / 串行锁, 修 flaky",
-        "R-OTHER-IMPACT":                  "对跨文件函数签名变化在 MR 描述里点出 caller, 拉对应 owner review",
-    }
+    # 映射来自 profile `reporting.actions_file`, 缺的类别退化到通用提示
+    # (但不退化成套话).
+    rule_actions = _active_rule_actions()
 
     follow_lines: list[str] = []
     seen_categories: set[str] = set()
@@ -496,9 +527,9 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
         if n <= 0:
             continue
         # 命中精确规则 → 命中前缀 (R-OTHER-IMPACT:caller_param 这种 long-form)
-        action = _RULE_ACTIONS.get(raw_key)
+        action = rule_actions.get(raw_key)
         if not action and raw_key.startswith("R-OTHER-IMPACT:"):
-            action = _RULE_ACTIONS["R-OTHER-IMPACT"]
+            action = rule_actions.get("R-OTHER-IMPACT")
         if not action and raw_key.startswith("R-OTHER:"):
             action = "针对新增『其他』类违规, 沉淀一条新规则到 AGENTS.md 规范清单"
         if not action:
@@ -712,6 +743,6 @@ def split_markdown(md: str, chunk_limit: int = 18000) -> list[str]:
 
 
 __all__ = [
-    "render_section", "render_markdown", "split_markdown",
+    "load_rule_actions", "render_section", "render_markdown", "split_markdown",
     "section_title", "SECTION_TITLES",
 ]

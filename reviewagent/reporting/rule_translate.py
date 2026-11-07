@@ -23,50 +23,53 @@ from typing import Any
 
 from reviewagent.config import config
 
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-
-
 # --------------------------------------------------------------------------
 # 通用规则 (R-*) + 跨文件 (R-OTHER-IMPACT:*) + 兜底 (R-OTHER:*)
-# 全部从提示词模板动态解析 (避免与 prompt 定义重复维护)
+# 全部从已装配规则集 + profile improve.md 动态解析 (避免与规则定义重复维护)
 # --------------------------------------------------------------------------
-_GENERIC_MAP_CACHE: dict[str, str] | None = None
+_GENERIC_MAP_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 
 def _load_generic_map() -> dict[str, str]:
-    """解析 _general_rules_block.md (R-*) 与 improve.md (R-OTHER-IMPACT:/R-OTHER:) 得到中文名映射."""
-    global _GENERIC_MAP_CACHE
-    if _GENERIC_MAP_CACHE is not None:
-        return _GENERIC_MAP_CACHE
+    """解析规则集 (R-*) 与 profile improve.md (R-OTHER-IMPACT:/R-OTHER:) 得到中文名映射.
+
+    缓存按 `RuleSet.fingerprint`（附带 profile 指纹，improve.md 变更同样失效）.
+    """
+    from reviewagent.scenario.profile import active_or_load
+    from reviewagent.scenario.rules.resolver import active_rule_set
+
+    profile = active_or_load()
+    rule_set = active_rule_set()
+    cache_key = (rule_set.fingerprint, profile.fingerprint)
+    cached = _GENERIC_MAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     m: dict[str, str] = {}
 
-    # 1) R-XXX: _general_rules_block.md 表格 `| `R-RES` | 资源句柄 | ... |`
-    gpath = _PROMPTS_DIR / "_general_rules_block.md"
-    if gpath.exists():
-        text = gpath.read_text(encoding="utf-8")
-        for mm in re.finditer(r"`(R-[A-Z]+)`\s*\|\s*([^|\n]+?)\s*\|", text):
-            m.setdefault(mm.group(1), mm.group(2).strip())
+    # 1) R-XXX: 规则集 index_by_key 的 title
+    for key, rule in rule_set.index_by_key.items():
+        if key.startswith("R-"):
+            m.setdefault(key, rule.title)
 
-    # 2) R-OTHER-IMPACT:xxx / R-OTHER:xxx: improve.md 列表
+    # 2) R-OTHER-IMPACT:xxx / R-OTHER:xxx: profile improve.md 列表
     #    `R-OTHER-IMPACT:caller_param` — caller 没传新参数
-    ipath = _PROMPTS_DIR / "improve.md"
-    if ipath.exists():
-        text = ipath.read_text(encoding="utf-8")
-        for pat in (
-            r"`(R-OTHER-IMPACT:[a-z_]+)`\s*[—\-]\s*([^\n,]+)",
-            r"`(R-OTHER:[a-z_]+)`\s*[—\-]\s*([^\n,]+)",
-        ):
-            for mm in re.finditer(pat, text):
-                m.setdefault(mm.group(1), mm.group(2).strip())
+    rel = (profile.prompts or {}).get("improve")
+    if rel:
+        ipath = (Path(profile.root) / str(rel)).expanduser()
+        if ipath.is_file():
+            text = ipath.read_text(encoding="utf-8")
+            for pat in (
+                r"`(R-OTHER-IMPACT:[a-z_]+)`\s*[—\-]\s*([^\n,]+)",
+                r"`(R-OTHER:[a-z_]+)`\s*[—\-]\s*([^\n,]+)",
+            ):
+                for mm in re.finditer(pat, text):
+                    m.setdefault(mm.group(1), mm.group(2).strip())
 
     # 3) 历史/幻觉规则兜底: LLM 偶尔会在 rule_keys 里塞不存在的键 (e.g.
     #    `R-XXX` 当占位符). 这种键如果不显式映射就会被 `_humanize` strip
     #    成 "XXX" 落到周报里很难看. 这里集中拦截所有 R-* 但不在前两步
     #    命中的键, 给一个有意义的"未分类"标签, 让翻阅周报的人知道是
     #    数据残留 / LLM 幻觉, 而不是新规则.
-    for k in list(m.keys()):
-        if k.startswith("R-"):
-            m.setdefault(f"{k}_UNUSED_MARKER", "")  # 仅占位, 不影响主逻辑
     # 显式兜底: 历史 telemetry.db 里发现过 `R-XXX` 大量残留, 直接给一条
     # "未分类 - 需人工核实" 标签, 比 strip 成 "XXX" 强.
     m.setdefault("R-XXX", "未分类违规 - 需人工核实规则归属")
@@ -74,10 +77,8 @@ def _load_generic_map() -> dict[str, str]:
     # 这里同步给 R-OTHER:unmapped 一条翻译, 否则回落到 _humanize
     # 会输出 "ROTHERunmapped" 难看的字面. 同时给任何 R-OTHER:xxx 兜底.
     m.setdefault("R-OTHER:unmapped", "未明确归类 - 需人工核实规则归属")
-    # 任何形如 `R-<大写字母>` 但不在 m 的"通用规则"键, 默认显示 "未明确分类"
-    # (注: 不能在此 loop 里覆盖 m 已有项, 所以用 setdefault 守住顺序)
 
-    _GENERIC_MAP_CACHE = m
+    _GENERIC_MAP_CACHE[cache_key] = m
     return m
 
 

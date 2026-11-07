@@ -54,7 +54,21 @@ class WeeklyReportConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls) -> "WeeklyReportConfig":
+    def from_env(cls, profile: Any = None) -> "WeeklyReportConfig":
+        """从 env 构造配置；未显式传 profile 时惰性解析激活场景包.
+
+        env 依旧优先；`profile.reporting["weekly_title"]` 只作为标题的 env 默认值，
+        没有 profile 数据时保持历史默认值.
+        """
+        if profile is None:
+            try:
+                from reviewagent.scenario.profile import active_or_load
+
+                profile = active_or_load()
+            except Exception:  # noqa: BLE001
+                profile = None
+        reporting = getattr(profile, "reporting", None) or {}
+        title_default = str(reporting.get("weekly_title") or "SSD自动化代码检视周报")
         return cls(
             enabled=_env_bool("REVIEWAGENT_WEEKLY_ENABLED", True),
             target_project_id=_env_int("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", 0),
@@ -76,7 +90,7 @@ class WeeklyReportConfig:
             dingtalk_retry_attempts=_env_int("REVIEWAGENT_WEEKLY_DINGTALK_RETRY", 3),
             markdown_chunk_limit=_env_int("REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT", 18000),
             cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 10:30"),
-            report_title=_env_str("REVIEWAGENT_WEEKLY_REPORT_TITLE", "SSD自动化代码检视周报"),
+            report_title=_env_str("REVIEWAGENT_WEEKLY_REPORT_TITLE", title_default),
             report_emoji=_env_str("REVIEWAGENT_WEEKLY_REPORT_EMOJI", "📊"),
             dashboard_url=_env_str("REVIEWAGENT_WEEKLY_DASHBOARD_URL", "http://127.0.0.1:8080/code-review"),
         )
