@@ -22,6 +22,7 @@ from typing import Any
 from reviewagent.gitlab.client import GitLabError, GitLabClient
 from reviewagent.commands._common import publish_overview
 from reviewagent.logging_setup import logger
+from reviewagent.review.policies.python import PYTHON_KEYWORDS
 from reviewagent.telemetry.store import get_store
 
 # ---------- 解析 ----------
@@ -100,6 +101,7 @@ def _late_detect_single(
     project_id: int,
     mr_iid: int,
     actor_username: str,
+    keywords: set[str] | None = None,
 ) -> str:
     """对单条 state='resolved' + resolution_source='gitlab_resolve' 的 suggestion
     重跑一次 exact_match / region_changed / token_fallback, 命中就翻 applied.
@@ -158,6 +160,7 @@ def _late_detect_single(
     project_id: int,
     mr_iid: int,
     actor_username: str,
+    keywords: set[str] | None = None,
 ) -> str:
     """对单条 state='resolved' + resolution_source='gitlab_resolve' 的 suggestion
     重跑一次 exact_match / region_changed / token_fallback, 命中就翻 applied.
@@ -214,6 +217,7 @@ def _late_detect_single(
                 line_end=target_line_end,
                 improved_code=sug_improved,
                 existing_code=existing_code or None,
+                keywords=keywords,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(
@@ -361,20 +365,17 @@ def _target_region_changed(
 # Fallback: token-level 采纳判定. 当 strip 严格比对失败时使用.
 # 适用: 用户改了格式/空白, 或用了等效写法 (如 if x is None vs if not x),
 # 但引入的关键标识符仍在目标行附近出现. 这种"采纳"严格文本比对看不出来.
-_KEYWORDS = {
-    "if", "else", "elif", "for", "while", "return", "def", "class",
-    "import", "from", "as", "with", "try", "except", "finally",
-    "raise", "pass", "in", "is", "not", "and", "or",
-    "True", "False", "None", "lambda", "yield", "global", "nonlocal",
-    "assert", "del", "break", "continue", "self", "cls",
-}
+# 默认排除集 = Python 关键字（与 PythonPolicy.keywords() 同源）；多语言场景由调用方
+# 经 `keywords=` 注入策略关键字集，None 时保持旧行为.
+_KEYWORDS = PYTHON_KEYWORDS
 
 
-def _extract_identifiers(code: str) -> set[str]:
-    """从代码中提取标识符, 排除 Python 关键字."""
+def _extract_identifiers(code: str, keywords: set[str] | None = None) -> set[str]:
+    """从代码中提取标识符, 排除语言关键字 (`keywords=None` → 默认 Python 集合)."""
     if not code:
         return set()
-    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code)) - _KEYWORDS
+    excluded = _KEYWORDS if keywords is None else keywords
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code)) - excluded
 
 
 def _exact_improved_code_near_target(
@@ -410,6 +411,7 @@ def _token_adoption_match(
     existing_code: str | None = None,
     context_lines: int = 5,
     threshold: float = 0.5,
+    keywords: set[str] | None = None,
 ) -> bool:
     """Fallback: improved_code 引入的"新 token"在 current 文件目标行 ±context_lines 范围内
     出现比例 >= threshold → 算采纳.
@@ -431,12 +433,12 @@ def _token_adoption_match(
     """
     if not improved_code or not current_content:
         return False
-    improved_tokens = _extract_identifiers(improved_code)
+    improved_tokens = _extract_identifiers(improved_code, keywords)
     if not improved_tokens:
         return False
     # 排除 existing_code 已有的 token, 只关注"建议新引入"
     if existing_code:
-        existing_tokens = _extract_identifiers(existing_code)
+        existing_tokens = _extract_identifiers(existing_code, keywords)
         new_tokens = improved_tokens - existing_tokens
     else:
         new_tokens = improved_tokens
@@ -450,7 +452,7 @@ def _token_adoption_match(
     if lo >= hi:
         return False
     window = "\n".join(current_lines[lo:hi])
-    window_tokens = _extract_identifiers(window)
+    window_tokens = _extract_identifiers(window, keywords)
     hit = len(new_tokens & window_tokens)
     return hit / len(new_tokens) >= threshold
 
@@ -466,6 +468,7 @@ def _strict_token_adoption_match(
     context_lines: int = 5,
     new_token_ratio: float = 0.8,
     coverage_floor: int = 2,
+    keywords: set[str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """严格版 token 采纳判定 — Batch1 收紧采纳口径使用.
 
@@ -480,11 +483,11 @@ def _strict_token_adoption_match(
     """
     if not improved_code or not current_content:
         return False, {"reason": "empty_input"}
-    improved_tokens = _extract_identifiers(improved_code)
+    improved_tokens = _extract_identifiers(improved_code, keywords)
     if not improved_tokens:
         return False, {"reason": "no_improved_tokens"}
     if existing_code:
-        existing_tokens = _extract_identifiers(existing_code)
+        existing_tokens = _extract_identifiers(existing_code, keywords)
     else:
         existing_tokens = set()
     new_tokens = improved_tokens - existing_tokens
@@ -499,7 +502,7 @@ def _strict_token_adoption_match(
     if lo >= hi:
         return False, {"reason": "empty_window"}
     window = "\n".join(current_lines[lo:hi])
-    window_tokens = _extract_identifiers(window)
+    window_tokens = _extract_identifiers(window, keywords)
     if old_tokens:
         old_remaining = old_tokens & window_tokens
         old_total = len(old_tokens)
@@ -667,6 +670,7 @@ def process_adopt(
     reason: str,
     file_path: str = "",
     target_line: int = 0,
+    keywords: set[str] | None = None,
 ) -> dict[str, Any]:
     """处理 /adopt 命令.
 
@@ -863,6 +867,7 @@ def process_adopt(
                 line=target_line, line_end=target_line_end,
                 improved_code=sug_improved,
                 existing_code=(sug.get("existing_code") or "").strip() or None,
+                keywords=keywords,
             )
 
     if not changed:
@@ -1205,6 +1210,7 @@ def auto_detect_applied(
     mr_iid: int,
     head_sha: str,
     actor_username: str = "auto-detect",
+    keywords: set[str] | None = None,
 ) -> dict[str, Any]:
     """当 head_sha 变化 (push / MR update) 时, 探测哪些 open suggestion
     已被用户在 GitLab UI "Apply suggestion" 了.
@@ -1306,6 +1312,7 @@ def auto_detect_applied(
                     line_end=target_line_end,
                     improved_code=sug_improved,
                     existing_code=existing_code or None,
+                    keywords=keywords,
                 )
                 if token_hit:
                     logger.info(
@@ -1477,6 +1484,7 @@ def auto_detect_applied(
             project_id=project_id,
             mr_iid=mr_iid,
             actor_username=actor_username,
+            keywords=keywords,
         )
         if late_result == "applied":
             result["late_apply"] += 1
