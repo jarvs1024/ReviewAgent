@@ -295,7 +295,8 @@ class ImproveCommand(BaseCommand):
         from reviewagent.security import hardening_prefix, normalize_untrusted, security_flag
 
         profile = active_or_load()
-        if security_flag(profile, "normalize_untrusted", default=True):
+        sec_profile = self._security_profile()
+        if security_flag(sec_profile, "normalize_untrusted", default=True):
             # diff 属不可信数据：控制字符会让行号/围栏解析错位，先清理再裁剪。
             file_diff = normalize_untrusted(file_diff)
 
@@ -364,7 +365,7 @@ class ImproveCommand(BaseCommand):
                 + "\n".join(_anchors) + "\n\n---\n\n"
             )
 
-        return hardening_prefix(profile) + build_chunk_prompt(
+        return hardening_prefix(sec_profile) + build_chunk_prompt(
             ChunkPromptParts(
                 cross_file_section=cross_file_section,
                 rules_block=rules_block,
@@ -389,6 +390,15 @@ class ImproveCommand(BaseCommand):
         )
 
     # ---------- helpers ----------
+    def _security_profile(self):
+        """安全开关 / 硬化段的唯一 profile 来源（显式注入优先，否则惰性加载）."""
+        profile = getattr(self, "_profile", None)
+        if profile is not None:
+            return profile
+        from reviewagent.scenario.profile import active_or_load
+
+        return active_or_load()
+
     @staticmethod
     def _make_token_summary(prompt_tokens: int, completion_tokens: int, model: str, cost_credits: float = 0.0):
         """创建汇总 token 统计的 LLMResult (仅用于 _last_oc_result 替代).
@@ -420,14 +430,16 @@ class ImproveCommand(BaseCommand):
         from reviewagent.security import security_flag
 
         if not security_flag(
-            getattr(self, "_profile", None), "worktree_containment", default=True
+            self._security_profile(), "worktree_containment", default=True
         ):
             return Path(root) / file_path
         try:
             return resolve_within(Path(root), file_path)
         except ValueError:
+            # repr() 保证换行/控制字符被转义，不会伪造日志行（loguru 无 {!r} 习惯）
             logger.warning(
-                "security.path_rejected path={} reason={}", file_path, "outside_worktree"
+                "security.path_rejected path={} reason={}",
+                repr(file_path), "outside_worktree",
             )
             return None
         except OSError:
@@ -652,7 +664,8 @@ class ImproveCommand(BaseCommand):
         from reviewagent.security import hardening_prefix, normalize_untrusted, security_flag
 
         profile = active_or_load()
-        normalize = security_flag(profile, "normalize_untrusted", default=True)
+        sec_profile = self._security_profile()
+        normalize = security_flag(sec_profile, "normalize_untrusted", default=True)
         rules_block = build_rules_block(
             self.repo_context, self._general_rules_text(), profile=profile
         )
@@ -702,7 +715,7 @@ class ImproveCommand(BaseCommand):
             )
 
         file_list = "\n".join(f"- `{fp}`" for fp in group)
-        return hardening_prefix(profile) + build_batch_prompt(
+        return hardening_prefix(sec_profile) + build_batch_prompt(
             BatchPromptParts(
                 rules_block=rules_block,
                 file_count=n,
@@ -924,7 +937,7 @@ class ImproveCommand(BaseCommand):
         try:
             if path.is_file():
                 return path.read_text(encoding="utf-8").splitlines(keepends=False)
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return []
         return []
 
@@ -950,10 +963,9 @@ class ImproveCommand(BaseCommand):
     def _build_user_prompt(self) -> str:
         """把 diff 的 valid new_line 集合 + 完整文件源码喂给 agent —
         严格约束它的 start_line 取值，让模型能精确数出文件行号。"""
-        from reviewagent.scenario.profile import active_or_load
         from reviewagent.security import hardening_prefix, normalize_untrusted, security_flag
 
-        profile = getattr(self, "_profile", None) or active_or_load()
+        profile = self._security_profile()
         normalize = security_flag(profile, "normalize_untrusted", default=True)
         line_map = self._diff_line_map()
 

@@ -11,8 +11,9 @@
 
 设计约束（spec §7.6 第 3 条）：
 
-* ``normalize_untrusted`` 只清理 C0 控制字符与 DEL，保留 ``\\n`` / ``\\t``；
-  干净文本原样返回**同一对象**（fast path），保证正常 prompt 逐字节不变；
+* ``normalize_untrusted`` 只清理 C0 控制字符与 DEL（**仅保留** ``\\n`` 与
+  ``\\t``，``\\r`` 同样剥离）；干净文本原样返回**同一对象**（fast path），
+  保证正常 prompt 逐字节不变；
 * ``fence_for`` 返回的围栏必须长于内容中最长连续反引号，防止提前闭合代码块；
 * ``security_flag`` / ``hardening_prefix`` 只读 profile 的 ``security`` 段，
   缺键回默认值（profile 可为 ``None``、对象或字典）。
@@ -29,8 +30,8 @@ __all__ = [
     "security_flag",
 ]
 
-# C0 控制字符（保留 \t=\x09 与 \n=\x0a）+ DEL(\x7f)
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0 控制字符（仅保留 \t=\x09 与 \n=\x0a；\r=\x0d 一并剥离）+ DEL(\x7f)
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0d\x0e-\x1f\x7f]")
 _BACKTICK_RUN = re.compile(r"`+")
 
 # prompt 硬化段（`security.prompt_hardening=true` 时前置到 prompt 最前面）

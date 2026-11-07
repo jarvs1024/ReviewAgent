@@ -3,7 +3,7 @@
 覆盖 brief 断言（控制字符剥离、围栏长于内容反引号）之外：
 
 * 干净字符串必须原样返回**同一对象**（fast path，保证 prompt 字节不变）；
-* ``\\n`` / ``\\t`` 保留，DEL(``\\x7f``) 与其他 C0 剥离；
+* 仅 ``\\n`` / ``\\t`` 保留；``\\r``、DEL(``\\x7f``) 与其他 C0 剥离；
 * ``fence_for`` 默认 3 反引号、按内容最长连续反引号 +1 自适应；
 * ``normalize_untrusted=false`` 开关：context 源码块 / 跨文件 section 保留控制字符；
 * 现网字节兼容：跨文件 section 与仓库指令文件围栏在正常内容下逐字节不变。
@@ -36,6 +36,11 @@ def test_strips_control_chars_but_keeps_newline_tab():
 def test_clean_text_returns_same_object():
     text = "def f():\n\treturn 1\n"
     assert normalize_untrusted(text) is text
+
+
+def test_strips_carriage_return():
+    """CR 同样属日志/prompt 注入面，必须剥离（仅保留 \\n 与 \\t）."""
+    assert normalize_untrusted("a\rb") == "ab"
 
 
 def test_strips_del_and_other_c0():
