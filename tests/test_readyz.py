@@ -69,6 +69,63 @@ def test_readyz_awaits_threadpool_offloaded_readiness(client, monkeypatch):
     assert observed == [False], "runtime_readiness 必须在 threadpool 执行，不能阻塞事件循环"
 
 
+# ---------------------------------------------------------------------------
+# RuleSet 探针
+# ---------------------------------------------------------------------------
+
+
+def _isolate_rule_set_check(monkeypatch) -> None:
+    """只跑 RuleSet 钩子，SQLite / Redis 视为通过（不依赖外部服务）."""
+    monkeypatch.setattr(bootstrap, "_readiness_checks", [bootstrap._check_rule_set_active])
+    monkeypatch.setattr(bootstrap, "_check_sqlite", lambda: [])
+    monkeypatch.setattr(bootstrap, "_check_redis", lambda: [])
+
+
+def test_default_checks_place_rule_set_after_instance():
+    names = [check.__name__ for check in bootstrap._DEFAULT_CHECKS]
+    assert names == [
+        "_check_config",
+        "_check_profile_active",
+        "_check_instance_bound",
+        "_check_rule_set_active",
+    ]
+
+
+def test_readyz_503_when_rule_set_is_empty(client, monkeypatch):
+    from types import SimpleNamespace
+
+    from reviewagent.scenario.rules import resolver
+
+    _isolate_rule_set_check(monkeypatch)
+    monkeypatch.setattr(resolver, "active_rule_set", lambda: SimpleNamespace(rules=()))
+
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "unready"
+    assert any("rule set" in reason for reason in body["reasons"])
+    assert any("no rules assembled" in reason for reason in body["reasons"])
+
+
+def test_readyz_503_when_rule_set_lookup_raises(client, monkeypatch):
+    from reviewagent.scenario.rules import resolver
+
+    _isolate_rule_set_check(monkeypatch)
+
+    def boom():
+        raise RuntimeError("rule set broken")
+
+    monkeypatch.setattr(resolver, "active_rule_set", boom)
+
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "unready"
+    assert body["reasons"] == ["rule set: RuntimeError: rule set broken"]
+
+
 def test_root_endpoint_mentions_readyz(client):
     body = client.get("/").json()
     assert body["endpoints"].get("readyz") == "GET /readyz"

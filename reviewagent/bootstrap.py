@@ -18,8 +18,8 @@ API（`reviewagent.main` lifespan）与 worker（`ReviewAgentSpawnWorker.bootstr
    `config.compat_env`。
 
 `readiness()` 返回 `(ok, reasons)`：只校验 profile 已激活、data_dir 已绑定、
-config 可解析（不连网、不建表）。`runtime_readiness()` 在其之后追加 SQLite /
-Redis 探针，供 `/readyz` 使用（探针失败只返回原因，不抛错）。
+config 可解析、RuleSet 已装配且非空（不连网、不建表）。`runtime_readiness()`
+在其之后追加 SQLite / Redis 探针，供 `/readyz` 使用（探针失败只返回原因，不抛错）。
 """
 from __future__ import annotations
 
@@ -106,10 +106,24 @@ def _check_instance_bound() -> list[str]:
     return []
 
 
+def _check_rule_set_active() -> list[str]:
+    """启动期 RuleSet 已装配且非空（空规则集意味着规则包引用失效）."""
+    try:
+        from reviewagent.scenario.rules.resolver import active_rule_set
+
+        rule_set = active_rule_set()
+    except Exception as exc:  # noqa: BLE001 — 探针故障也是"未就绪"的原因
+        return [f"rule set: {type(exc).__name__}: {exc}"]
+    if not rule_set.rules:
+        return ["rule set: no rules assembled"]
+    return []
+
+
 _DEFAULT_CHECKS: tuple[Callable[[], list[str]], ...] = (
     _check_config,
     _check_profile_active,
     _check_instance_bound,
+    _check_rule_set_active,
 )
 
 # 可替换钩子：Task 15 追加 SQLite / Redis 探针。每个 check 返回原因列表（空=通过）。

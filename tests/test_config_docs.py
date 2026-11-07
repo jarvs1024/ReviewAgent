@@ -60,13 +60,23 @@ def test_env_example_keeps_required_and_instance_keys():
         "RQ_WORKER_COUNT",
         "RQ_WORKER_TIMEOUT",
         "REVIEW_PROFILE",
-        "REVIEWAGENT_DATA_DIR",
         "REVIEWAGENT_LOG_LEVEL",
         "LOG_FORMAT",
         "REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL",
         "REVIEWAGENT_WEEKLY_DINGTALK_SECRET",
     ):
         assert key in assignments, key
+
+
+def test_env_example_does_not_override_data_dir():
+    """`EnvironmentFile` 晚于 `Environment=` 生效：未注释的 data_dir 会覆盖 unit 的生产路径."""
+    assignments = _env_example_assignments()
+    assert "REVIEWAGENT_DATA_DIR" not in assignments
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert not any(
+        line.strip().startswith("REVIEWAGENT_DATA_DIR=") for line in text.splitlines()
+    ), ".env.example must keep REVIEWAGENT_DATA_DIR commented out"
+    assert "# REVIEWAGENT_DATA_DIR=./data" in text
 
 
 def test_env_example_secrets_are_placeholders_only():

@@ -55,18 +55,31 @@ class RuleSet:
             mapped = self.alias_map.get(key, key)
             if mapped not in canonical:
                 canonical.append(mapped)
+        for to_key in self.promotion_keys(text):
+            if to_key not in canonical:
+                canonical.append(to_key)
+        return canonical
+
+    def promotion_keys(self, text: str) -> list[str]:
+        """仅按提升规则（`rule_key_promotions` 的 when_any / when_all）补充的键.
+
+        与 `normalize_keys` 的 promotion 段逐字同源；单独暴露给 record 路径，
+        使 promotion 的扫描文本（rationale + header）可以与精确键抽取
+        （只看 rationale）分开。
+        """
         lowered = (text or "").lower()
+        promoted: list[str] = []
         for promo in self.promotions:
             to_key = promo.get("to_key")
-            if not to_key or to_key in canonical:
+            if not to_key or to_key in promoted:
                 continue
             when_any = promo.get("when_any")
             when_all = promo.get("when_all")
             if when_any and any(str(word).lower() in lowered for word in when_any):
-                canonical.append(to_key)
+                promoted.append(to_key)
             elif when_all and all(str(word).lower() in lowered for word in when_all):
-                canonical.append(to_key)
-        return canonical
+                promoted.append(to_key)
+        return promoted
 
     def with_repo(self, overlay: tuple[Rule, ...]) -> RuleSet:
         """叠加请求级仓库规则（同键覆盖），返回新的不可变 `RuleSet`.

@@ -280,6 +280,31 @@ def test_generic_policy_hooks():
     ) == {"action": "post"}
 
 
+def test_generic_policy_code_shape_hooks():
+    """三钩子：read_lines 委托注入回调；fix_indent 透传；首行匹配只做 strip 相等."""
+    lines = ["int main() {", "  return 0;", "}"]
+    pol = GenericPolicy(profile=_profile(), cfg=current(), read_lines=lambda p: lines)
+
+    assert pol.read_lines("main.c") is lines
+
+    improved = "  x = 1\n  y = 2"
+    assert pol.fix_indent("    x = 1", improved) == improved
+    assert pol.fix_indent("", "") == ""
+
+    assert pol.code_first_line_matches("  x = 1", "x = 1  ") is True
+    assert pol.code_first_line_matches("x = 1", "y = 1") is False
+    assert pol.code_first_line_matches("", "") is False
+    assert pol.code_first_line_matches("   ", "x = 1") is False
+
+
+def test_language_policy_protocol_declares_code_shape_hooks():
+    """协议不得回退：三个代码形态钩子必须显式声明（防止只留在实现类里）."""
+    from reviewagent.review.policy import LanguagePolicy
+
+    declared = set(LanguagePolicy.__dict__)
+    assert {"read_lines", "fix_indent", "code_first_line_matches"} <= declared
+
+
 def test_generic_policy_without_test_paths_is_conservative():
     profile = SimpleNamespace(test_paths=None, scoring={}, rule_keys={})
     pol = GenericPolicy(profile=profile, cfg=current(), read_lines=lambda p: [])

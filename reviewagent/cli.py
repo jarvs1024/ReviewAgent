@@ -6,7 +6,8 @@
   退出码 2；成功时输出 profile / name / fingerprint / data_dir。
 * `config show` 供人工核对生效配置：`key: value`（稳定按字段名排序），
   `--sources` 追加 `# source=env|profile|preset|default`，`--diff-default`
-  只显示与 schema 默认不同的字段；secret 一律 `***`。
+  只显示与 schema 默认不同的字段；secret 一律 `***`，URL 内嵌密码与
+  query 凭证（`access_token` 等）同样脱敏。
 * `rules check` 面向规则作者：逐条打印 `key\tseverity\ttitle`，末尾输出
   `ruleset_fingerprint=` / `render_checksum=`；装配期校验失败同样收敛成
   一行 stderr + 退出码 2（校验逻辑只在 `assemble_base` 里，不在 CLI 复制）。
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,14 @@ from reviewagent.settings.schema import SCHEMA, FieldSpec
 
 _EXIT_CHECK_FAILED = 2
 _ENV_SOURCE = "env"
+
+# query 里按凭证处理的键名（`access_token=tok` → `access_token=***`）。
+_QUERY_SECRET_KEYS = frozenset({"access_token", "token", "secret", "sign", "key", "password"})
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+_URL_USERINFO_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)(?P<user>[^/\s:@]*):(?P<password>[^/\s@]*)@"
+)
+_QUERY_PAIR_RE = re.compile(r"(?P<sep>[?&])(?P<key>[^=&#]+)=(?P<value>[^&#]*)")
 
 
 def _resolve_config() -> Any:
@@ -93,6 +103,42 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
+def _mask_url_query(value: str) -> str:
+    """对 URL query 里的凭证键脱敏（只动 query，保留原始分隔符/顺序）."""
+
+    def _replace(match: re.Match[str]) -> str:
+        if match.group("key").lower() in _QUERY_SECRET_KEYS and match.group("value"):
+            return f"{match.group('sep')}{match.group('key')}=***"
+        return match.group(0)
+
+    head, sep, tail = value.partition("?")
+    if not sep:
+        return value
+    query, hash_sep, fragment = tail.partition("#")
+    # 正则要求键名前有 `?`/`&`；query 首对没有前缀，临时补一个再剥掉。
+    masked_query = _QUERY_PAIR_RE.sub(_replace, "?" + query)[1:]
+    return f"{head}?{masked_query}{hash_sep}{fragment}"
+
+
+def _mask_display_value(spec: FieldSpec, value: Any) -> Any:
+    """`config show` 展示值脱敏：secret 整值替换，URL 内嵌凭据/query 凭证遮盖.
+
+    * `spec.secret` → `***`（与旧行为一致）；
+    * 其它字符串若是 `scheme://...`：把 userinfo 里的密码改成 `user:***@host`，
+      并把 query 中 `access_token` / `token` / `secret` / `sign` / `key` /
+      `password` 的值改成 `***`；没有敏感成分时原样返回；
+    * 非字符串 / 非 URL 原样返回（由 `_format_value` 负责渲染）。
+    """
+    if spec.secret:
+        return "***"
+    if not isinstance(value, str) or "://" not in value or not _URL_SCHEME_RE.match(value):
+        return value
+    masked = _URL_USERINFO_RE.sub(
+        lambda match: f"{match.group('scheme')}{match.group('user')}:***@", value
+    )
+    return _mask_url_query(masked)
+
+
 def _cmd_config_check(args: argparse.Namespace) -> int:
     try:
         cfg, profile = _load(args)
@@ -120,7 +166,7 @@ def _cmd_config_show(args: argparse.Namespace) -> int:
         value = _effective_value(spec, cfg, profile)
         if args.diff_default and value == spec.default:
             continue
-        line = f"{spec.name}: {'***' if spec.secret else _format_value(value)}"
+        line = f"{spec.name}: {_format_value(_mask_display_value(spec, value))}"
         if args.sources:
             line += f"  # source={_source(spec, profile, explicit)}"
         print(line)

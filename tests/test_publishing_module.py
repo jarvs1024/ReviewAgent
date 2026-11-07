@@ -261,6 +261,16 @@ def test_record_rule_keys_ignores_header_only_keys():
     assert keys == []
 
 
+def test_record_rule_keys_promotes_from_header_only():
+    """header 含 `wildcard`（rationale 为空）仍需追加 wildcard 硬规则键（旧行为）."""
+    from reviewagent.review.publishing import record_rule_keys
+
+    rule_set = _real_rule_set()
+    normalised = {"rationale": "", "header": "Wildcard import detected"}
+    keys = record_rule_keys({}, normalised, rule_set=rule_set)
+    assert keys == ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
+
+
 def test_record_rule_keys_extracts_from_rationale_only():
     from reviewagent.review.publishing import record_rule_keys
 

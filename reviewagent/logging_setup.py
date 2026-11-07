@@ -25,6 +25,7 @@ from typing import Any
 from loguru import logger
 
 from reviewagent.config import config
+from reviewagent.settings.schema import SCHEMA
 
 # JSON 行 schema 版本；采集侧据此兼容演进（字段名一旦发布不随意改名）.
 SCHEMA_VERSION = 1
@@ -43,14 +44,13 @@ TEXT_FORMAT = _LOG_FORMAT + "{extra[_ctx_suffix]}"
 # json sink 的序列化结果放到 extra 的这个键；text 格式不使用.
 _JSON_LINE_KEY = "_json_line"
 
-# 需要整值脱敏的 secret 配置字段（按值替换，空值忽略）.
-_SECRET_FIELD_NAMES: tuple[str, ...] = (
-    "gitlab_pat",
-    "gitlab_webhook_secret",
-    "qoder_sdk_pat",
-    "opencode_password",
-    "weekly_dingtalk_secret",
-    "weekly_dingtalk_webhook_url",
+# 需要整值脱敏的 secret 配置字段（按值替换，空值忽略）。
+# 名单从唯一 schema 派生（避免第二份硬编码漂移）：`spec.secret` 字段 +
+# `weekly_dingtalk_webhook_url`（URL 内含 access_token，只在日志层面按凭证处理，
+# 不标 schema secret —— 否则 `config_fingerprint` 失去区分度）。
+_SECRET_FIELD_NAMES: tuple[str, ...] = tuple(
+    [spec.name for spec in SCHEMA if spec.secret]
+    + ["weekly_dingtalk_webhook_url"]
 )
 
 # `scheme://user:pass@host` → `scheme://***@host`

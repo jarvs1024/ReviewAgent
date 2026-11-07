@@ -1,4 +1,4 @@
-"""LanguagePolicy 协议（spec §7.3 的 9 个钩子）+ 跨语言共享评分表.
+"""LanguagePolicy 协议（spec §7.3 的 12 个钩子）+ 跨语言共享评分表.
 
 设计要点：
 
@@ -18,7 +18,7 @@ from reviewagent.review.types import FileContext, FileKind, RiskVerdict, Suggest
 
 
 class LanguagePolicy(Protocol):
-    """单一语言的检视策略（9 个钩子）."""
+    """单一语言的检视策略（12 个钩子）."""
 
     def classify_file(self, path: str) -> FileKind: ...
 
@@ -45,6 +45,14 @@ class LanguagePolicy(Protocol):
     def keywords(self) -> set[str]: ...
 
     def prompt_sections(self) -> dict[str, str]: ...
+
+    # ---- 代码形态钩子（validation 的惰性预读 / Apply 修正路径）----
+
+    def read_lines(self, path: str) -> list[str]: ...
+
+    def fix_indent(self, target_line: str, improved_code: str) -> str: ...
+
+    def code_first_line_matches(self, target_line: str, improved_first: str) -> bool: ...
 
 
 # ---------------------------------------------------------------------------

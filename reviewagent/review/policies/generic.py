@@ -91,6 +91,20 @@ class GenericPolicy:
     def normalize_suggestion(self, sug: Suggestion, ctx: FileContext) -> Suggestion:
         return sug
 
+    def read_lines(self, path: str) -> list[str]:
+        """读文件源码行（复用门面注入的惰性预读回调）."""
+        return self._read_lines(path)
+
+    def fix_indent(self, target_line: str, improved_code: str) -> str:
+        """通用语言不做缩进猜测：improved_code 原样返回."""
+        return improved_code
+
+    def code_first_line_matches(self, target_line: str, improved_first: str) -> bool:
+        """无语言语法知识时的保守判定：strip 后非空且相等才算同一行."""
+        target = (target_line or "").strip()
+        first = (improved_first or "").strip()
+        return bool(target) and target == first
+
     def validate_suggestion(
         self,
         sug: Suggestion,

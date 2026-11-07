@@ -70,6 +70,38 @@ def test_config_show_redacts_secret(tmp_path, monkeypatch, capsys):
     assert "***" in out
 
 
+def test_config_show_masks_url_credentials_and_query_tokens(tmp_path, monkeypatch, capsys):
+    """URL 内嵌密码与 query 凭证都必须脱敏（redis / 钉钉 webhook）."""
+    monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("REDIS_URL", "redis://user:pass@127.0.0.1:6379/1")
+    monkeypatch.setenv(
+        "REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL",
+        "https://oapi.dingtalk.com/robot/send?access_token=tok123",
+    )
+
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+
+    # 密码原值不得出现（字段名 `opencode_password` 含 "pass"，故按完整片段断言）。
+    assert "user:pass" not in out
+    assert ":pass@" not in out
+    assert "tok123" not in out
+    assert "redis_url: redis://user:***@127.0.0.1:6379/1" in out
+    assert "access_token=***" in out
+
+
+def test_config_show_keeps_url_without_credentials_intact(tmp_path, monkeypatch, capsys):
+    """无敏感成分的 URL（默认 redis）不得被改写."""
+    monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL", raising=False)
+
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+
+    assert "redis_url: redis://localhost:6379/0" in out
+
+
 def test_config_show_sources(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("IMPROVE_REVIEW_MODE", "test")

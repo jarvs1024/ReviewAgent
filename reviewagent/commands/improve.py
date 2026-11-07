@@ -190,7 +190,7 @@ class ImproveCommand(BaseCommand):
         return extract_identifiers(diff)
 
     def _dynamic_rule_params(self) -> dict[str, Any]:
-        """当前启用 `cross_file_refs` 规则的参数（缺省回退 legacy 常量）."""
+        """当前启用 `cross_file_refs` 规则的参数（缺省回退语言中立的数值默认）."""
         from reviewagent.review.dynamic.providers.cross_file_refs import DEFAULT_PARAMS
 
         params = dict(DEFAULT_PARAMS)

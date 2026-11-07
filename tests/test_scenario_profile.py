@@ -285,7 +285,8 @@ def test_missing_actions_file_rejected(tmp_path):
         load_profile("bad", root=tmp_path)
 
 
-def test_missing_rules_allowed_by_default_with_warning(tmp_path, monkeypatch):
+def test_missing_rules_fail_by_default(tmp_path, monkeypatch):
+    """规则包缺失默认 fail-fast；显式 `allow_missing_rules=True` 才降级为 WARNING."""
     import reviewagent.scenario.profile as sp
 
     warnings: list[tuple[str, tuple]] = []
@@ -295,11 +296,11 @@ def test_missing_rules_allowed_by_default_with_warning(tmp_path, monkeypatch):
         lambda message, *args, **kwargs: warnings.append((message, args)),
     )
     _write_profile(tmp_path, "alt", rules=["rules/general_rules.md"])
-    profile = load_profile("alt", root=tmp_path)
+    with pytest.raises(ValueError, match="rules"):
+        load_profile("alt", root=tmp_path)
+    profile = load_profile("alt", root=tmp_path, allow_missing_rules=True)
     assert profile.rules == ("rules/general_rules.md",)
     assert any("profile_missing_rule" in message for message, _ in warnings)
-    with pytest.raises(ValueError, match="rules"):
-        load_profile("alt", root=tmp_path, allow_missing_rules=False)
 
 
 def test_fingerprint_stable_and_sensitive_to_preset(tmp_path):

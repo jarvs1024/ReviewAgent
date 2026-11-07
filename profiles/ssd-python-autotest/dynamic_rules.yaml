@@ -12,4 +12,10 @@ rules:
       max_refs_per_file: 6
       hits_per_symbol: 2
       timeout_seconds: 35
+      excludes:
+        - "!reviewagent/**"
+        - "!tests/**"
+        - "!.venv/**"
+        - "!**/__pycache__/**"
+        - "!.git/**"
     limits: {max_files: 60}

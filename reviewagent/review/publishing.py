@@ -117,14 +117,19 @@ def record_rule_keys(
     """record_suggestion 落库的规则键（保留旧优先级，含 promotion 键）.
 
     - agent 显式 `rule_keys` 非空 → 以它为基，只追加 promotion 派生键；
-    - 为空 → 完全按 `rule_set.normalize_keys(rationale)`.
+    - 为空 → 精确键按 `rule_set.normalize_keys(rationale)`，再追加 promotion 键。
 
-    Why 只看 rationale：旧 record 正则不扫 header，header 里的键是展示文案，
-    不应写进待采纳键（否则与旧行为产生 parity 差异）.
+    精确键抽取仍只看 rationale（旧 record 正则不扫 header，header 里的普通规则键
+    是展示文案，写进待采纳键会与旧行为产生 parity 差异）；promotion 则扫描
+    rationale + header —— 旧实现只有 header 命中 `wildcard` 时也会追加
+    `SSD-RULE-FORBIDDEN-WILDCARD-IMPORT`。
     """
     raw_keys = _raw_rule_keys(raw)
     text = _record_rule_key_text(normalised)
     normalized = rule_set.normalize_keys(text)
+    for to_key in rule_set.promotion_keys(_rule_key_text(normalised)):
+        if to_key not in normalized:
+            normalized.append(to_key)
     if not raw_keys:
         return normalized
     extracted = set(rule_set.key_patterns.extract(text))

@@ -96,6 +96,23 @@ def test_redact_secrets():
     assert redact("pat=abc123", secrets={"abc123"}) == "pat=***"
 
 
+def test_secret_field_names_derived_from_schema():
+    """脱敏名单从 SCHEMA 派生：所有 secret 字段 + webhook URL（仅日志层）."""
+    from reviewagent.settings.schema import SCHEMA
+
+    names = logging_setup._SECRET_FIELD_NAMES
+    for spec in SCHEMA:
+        if spec.secret:
+            assert spec.name in names, spec.name
+    assert "gitlab_url" in names
+    assert "weekly_dingtalk_webhook_url" in names
+    # webhook URL 不标 schema secret（保持 config_fingerprint 区分度）。
+    assert "weekly_dingtalk_webhook_url" not in {
+        spec.name for spec in SCHEMA if spec.secret
+    }
+    assert len(names) == len(set(names))
+
+
 # ---------------------------------------------------------------- JsonFormatter
 
 

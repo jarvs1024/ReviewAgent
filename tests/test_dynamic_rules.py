@@ -113,6 +113,13 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
         "max_refs_per_file": 6,
         "hits_per_symbol": 2,
         "timeout_seconds": 35,
+        "excludes": [
+            "!reviewagent/**",
+            "!tests/**",
+            "!.venv/**",
+            "!**/__pycache__/**",
+            "!.git/**",
+        ],
     }
     assert rule.limits == {"max_files": 60}
     assert declared_ruleset.fingerprint

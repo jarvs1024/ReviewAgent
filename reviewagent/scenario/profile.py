@@ -230,8 +230,8 @@ def _check_referenced_files(
 ) -> None:
     """引用文件存在性 fail-fast（prompts / dynamic_rules / reporting.actions_file）.
 
-    `rules` 首期允许缺失（规则包由 Task 5/6 落地），但必须显式参数化；
-    缺失时记录 WARNING，并且仍计入 fingerprint。
+    `rules` 默认同样要求存在（启动即失败）；`allow_missing_rules=True` 仅供
+    迁移 / 测试临时放行，此时记录 WARNING，并且仍计入 fingerprint。
     """
     missing_prompts = [
         f"prompts.{key}={rel!r}"
@@ -278,15 +278,15 @@ def load_profile(
     name: str | None = None,
     *,
     root: Path | None = None,
-    allow_missing_rules: bool = True,
+    allow_missing_rules: bool = False,
 ) -> Profile:
     """加载（并应用场景配置）一个 profile.
 
     `name=None` 时读 `config.current().review_profile`（实例平面字段，不走
     `apply_scenario`）；为空则回退 `DEFAULT_PROFILE` 并 WARNING。
 
-    `allow_missing_rules` 首期为 True（规则包尚未落地）；Task 5 会把默认改为
-    False，届时缺失 `rules` 引用文件将直接启动失败。
+    `allow_missing_rules` 默认 False：`rules` 引用的规则包缺失即启动失败
+    （fail-fast）。显式传 True 只用于迁移 / 测试，缺失时降级为 WARNING。
     """
     profile_root = _resolve_root(root)
     if name is None:

@@ -3,9 +3,11 @@
 实现自 `reviewagent/commands/improve.py` 的 `_find_cross_file_refs` /
 `_collect_cross_file_refs_for_mr` 原样迁移；门面仅保留薄委托，行为逐字节一致。
 
-params（全部可选，缺省即 legacy 运行时常量）：
+params（全部可选；缺省值为语言中立的保守默认，语言相关的
+`rg_file_type` / `excludes` 必须由场景 profile 的 dynamic_rules 提供）：
 
-* `rg_file_type` — rg `-t` 参数；空 / None 时不传 `-t`；
+* `rg_file_type` — rg `-t` 参数；空 / None / 缺失时不传 `-t`；
+* `excludes` — rg `-g` 排除项；缺失时不传任何排除（由 profile 负责）；
 * `max_symbols_per_file` — 每个 diff 文件最多参与 rg 的标识符数（legacy 15）；
 * `max_refs_per_file` — 每个文件最多保留的 caller 引用数（legacy 6）；
 * `hits_per_symbol` — 每个标识符最多命中数（legacy 2）；
@@ -24,23 +26,17 @@ from typing import Any
 
 from reviewagent.logging_setup import logger
 
-# Legacy 运行时常量（profiles/*/dynamic_rules.yaml 的 legacy-truth 值）。
+# 语言中立的数值默认（与 legacy 运行时常量逐字一致；不含 `rg_file_type`）。
 DEFAULT_PARAMS: dict[str, Any] = {
-    "rg_file_type": "py",
     "max_symbols_per_file": 15,
     "max_refs_per_file": 6,
     "hits_per_symbol": 2,
     "timeout_seconds": 35,
 }
 
-# Legacy excludes（顺序与 improve.py 完全一致）。
-DEFAULT_EXCLUDES: tuple[str, ...] = (
-    "!reviewagent/**",
-    "!tests/**",
-    "!.venv/**",
-    "!**/__pycache__/**",
-    "!.git/**",
-)
+# 默认不排除任何路径：语言/项目相关的排除项由 profile 的 dynamic_rules 提供
+# （`profiles/ssd-python-autotest/dynamic_rules.yaml` 里有 legacy 的那 5 条）。
+DEFAULT_EXCLUDES: tuple[str, ...] = ()
 
 _STOP_IDENTS = {"self", "cls", "None", "True", "False", "args", "kwargs"}
 _BULK_TIMEOUT_S = 30
@@ -94,7 +90,8 @@ def _int_param(params: dict[str, Any], name: str) -> int:
 
 
 def _rg_type_args(params: dict[str, Any]) -> list[str]:
-    file_type = (params or {}).get("rg_file_type", DEFAULT_PARAMS["rg_file_type"])
+    """`-t <type>`；`rg_file_type` 缺失 / 空 → 不传（语言类型由 profile 声明）."""
+    file_type = (params or {}).get("rg_file_type") or ""
     return ["-t", str(file_type)] if file_type else []
 
 

@@ -141,14 +141,16 @@ def _g_values(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, arg in enumerate(argv) if arg == "-g"]
 
 
-def test_collect_refs_argv_uses_params_and_legacy_excludes(monkeypatch):
+def test_collect_refs_argv_uses_params_and_profile_excludes(monkeypatch):
     calls = _patch_run(monkeypatch, stdout="")
+    excludes = ["!reviewagent/**", "!tests/**", "!.venv/**"]
     params = {
         "rg_file_type": "py",
         "max_symbols_per_file": 1,
         "max_refs_per_file": 3,
         "hits_per_symbol": 2,
         "timeout_seconds": 35,
+        "excludes": excludes,
         "limits": {"max_files": 60},  # reserved：不得影响 argv
     }
     out = collect_refs(
@@ -162,7 +164,7 @@ def test_collect_refs_argv_uses_params_and_legacy_excludes(monkeypatch):
     # max_symbols_per_file=1 → 只保留排序后的第一个 ident。
     assert any("alpha" in arg for arg in argv)
     assert not any("beta" in arg for arg in argv)
-    assert _g_values(argv) == list(DEFAULT_EXCLUDES)
+    assert _g_values(argv) == excludes
     assert calls[0]["kwargs"]["timeout"] == 30
     assert calls[0]["kwargs"]["cwd"] == "/tmp/wt"
 
@@ -173,6 +175,36 @@ def test_collect_refs_argv_uses_params_and_legacy_excludes(monkeypatch):
         params={k: v for k, v in params.items() if k != "limits"},
     )
     assert calls_again[0]["argv"] == argv
+
+
+def test_collect_refs_default_has_no_type_or_exclude_flags(monkeypatch):
+    """共享层默认语言中立：不注入 `-t py`，也不注入任何 `-g` 排除项."""
+    assert DEFAULT_EXCLUDES == ()
+    calls = _patch_run(monkeypatch, stdout="")
+    collect_refs(["a.py"], {"a.py": _DIFF_TWO_IDENTS}, "/tmp/wt", params={})
+    argv = calls[0]["argv"]
+    assert "-t" not in argv
+    assert _g_values(argv) == []
+
+
+def test_collect_refs_profile_excludes_match_legacy_list(monkeypatch):
+    """默认 profile 的 dynamic_rules 提供与旧硬编码逐字一致的排除项."""
+    from reviewagent.scenario.dynamic import load_dynamic_rules
+    from reviewagent.scenario.profile import load_profile
+
+    params = dict(load_dynamic_rules(load_profile(None)).rules[0].params)
+    assert params["excludes"] == [
+        "!reviewagent/**",
+        "!tests/**",
+        "!.venv/**",
+        "!**/__pycache__/**",
+        "!.git/**",
+    ]
+    calls = _patch_run(monkeypatch, stdout="")
+    collect_refs(["a.py"], {"a.py": _DIFF_TWO_IDENTS}, "/tmp/wt", params=params)
+    argv = calls[0]["argv"]
+    assert _g_values(argv) == params["excludes"]
+    assert argv[argv.index("-t") + 1] == "py"
 
 
 def test_collect_refs_omits_type_flag_when_param_empty(monkeypatch):
@@ -202,7 +234,7 @@ def test_find_refs_argv_self_exclusion_timeout_and_hits(monkeypatch):
     # 每个 ident 只取 1 条命中。
     assert refs == [{"file": "b.py", "line": 3, "content": "alpha()", "ident": "alpha"}]
     argv = calls[0]["argv"]
-    assert _g_values(argv) == ["!a.py", *DEFAULT_EXCLUDES]
+    assert _g_values(argv) == ["!a.py"]
     assert calls[0]["kwargs"]["timeout"] == 8
 
 

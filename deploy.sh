@@ -65,17 +65,20 @@ if [ ! -f ".env" ]; then
     exit 0
 fi
 
-echo "==> [5/6] 数据目录"
-mkdir -p data/repos data/weekly_reports
-mkdir -p /tmp/reviewagent-worktrees
-chmod 700 data/repos
-
-echo "==> [6/6] 安装 systemd units (源: deploy/*.service / deploy/*.timer)"
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
 fi
 
+echo "==> [5/6] 数据目录"
+mkdir -p data/repos data/weekly_reports
+mkdir -p /tmp/reviewagent-worktrees
+chmod 700 data/repos
+# systemd unit 用 User=workflow + /var/lib/reviewagent（Environment= 覆盖 .env 默认），
+# 生产目录必须先以 workflow 属主建好，否则服务启动即 permission denied.
+${SUDO} install -d -o workflow -g workflow -m 750 /var/lib/reviewagent
+
+echo "==> [6/6] 安装 systemd units (源: deploy/*.service / deploy/*.timer)"
 # deploy/ 目录下的文件就是 systemd unit 的 source of truth；脚本只负责 cp + 改权限
 ${SUDO} install -m 0644 \
     deploy/reviewagent-weekly-enqueue.service \

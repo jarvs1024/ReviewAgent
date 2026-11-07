@@ -80,6 +80,13 @@ def test_declared_templates_and_params_match_legacy_profile(profile):
         "max_refs_per_file": 6,
         "hits_per_symbol": 2,
         "timeout_seconds": 35,
+        "excludes": [
+            "!reviewagent/**",
+            "!tests/**",
+            "!.venv/**",
+            "!**/__pycache__/**",
+            "!.git/**",
+        ],
     }
     assert rule.limits == {"max_files": 60}
 
