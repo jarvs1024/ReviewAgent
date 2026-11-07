@@ -33,6 +33,7 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 | 周报场景化 | **全量纳入场景包**：三个 weekly prompt、规则→动作映射、repo_scan 扩展名、标题 |
 | env 与 profile 优先级 | **显式 env > profile.yaml > 内置默认值** |
 | 首期实施范围 | **仅 Python 场景**：完成 Profile 架构、Python 场景包与全套兼容改造；C/C++ 仅预留接口与设计，稳定后再实施 |
+| 仓库自定义规则 | **独立模块 `review/repo_rules.py`** 处理被检仓库 AGENTS.md / `.agents/rules`，优先级第一（prompt 前置 + 冲突覆盖 + 过滤豁免 + 周报优先） |
 
 ## 3. 非目标
 
@@ -61,10 +62,12 @@ reviewagent/
 │   ├── policy.py                 # LanguagePolicy 接口 + 注册表（首期仅注册 python）
 │   ├── policies/python.py
 │   ├── policies/cpp.py           # 预留文件，首期不实现
+│   ├── repo_rules.py             # 被检仓库自定义规则（AGENTS.md / .agents/rules），第一优先
 │   ├── validation.py             # 语言无关防护：行号校验、去重指纹、锚定校验
 │   └── publishing.py             # GitLab suggestion 构造与发布
 ├── profile.py                    # 新：profile 加载器（yaml 解析 + 校验 + env 合并 + 单例）
 ├── commands/improve.py           # 瘦身为命令入口 + 兼容门面（委托壳）
+├── repo_context.py               # 保留为兼容 re-export（实现迁入 review/repo_rules.py）
 └── prompts/loader.py             # 改为按当前 profile 解析模板路径
 ```
 
@@ -94,6 +97,10 @@ prompts:
   weekly_quality_scan: prompts/weekly_quality_scan.md
 rules:                        # 列表，支持相对 profile 目录与 ../_shared/ 引用
   - rules/general_rules.md
+repo_context:                 # 被检仓库自定义规则（第一优先），字段名沿用现 config
+  files: [AGENTS.md]
+  rules_dir: .agents/rules
+  max_lines: 500
 rule_keys:                    # 规则键命名与解析，替代写死正则
   builtin_regex: 'R-[A-Z]+(?:-[A-Z0-9_]+)*'
   repo_prefix: SSD-RULE       # 被检仓库自定义规则前缀（repo_context 抽取用）
@@ -122,7 +129,7 @@ reporting:
 ```
 
 - `REVIEW_PROFILE` 之外，通用配置（GitLab/Redis/LLM/超时/队列/数据目录）仍走 `config.py`。
-- **边界**：`config.py` = 凭据与运行参数；`profile.yaml` = 场景内容。迁移进 profile 的字段保留 env 读取，**显式 env 值覆盖 profile 值**（见 §5.5）。
+- **边界**：`config.py` = 凭据与运行参数；`profile.yaml` = 场景内容。迁移进 profile 的字段保留 env 读取，**显式 env 值覆盖 profile 值**（见 §5.6）。
 
 ### 5.3 prompt 模板
 
@@ -138,11 +145,33 @@ reporting:
 - **规则键解析统一配置化**（修复核查发现的断裂点）：
   - `_RULE_REF_REGEX` 由 profile `rule_keys.builtin_regex` 动态构建——`CPP-R-LEAK` 不再被截断为 `R-LEAK`；
   - `_RULE_EXEMPT_REGEX` 由 `rule_keys.repo_prefix` 构建——C++ 场景 `CPP-RULE-*` 同样享受严重度豁免与加分；
-  - `repo_context.py` 抽取前缀改用 `rule_keys.repo_prefix`，C++ 仓库的 `.agents/rules` 不再提取为空；
+  - 项目规则提取由 `review/repo_rules.py` 按 `rule_keys.repo_prefix` 完成——C++ 仓库的 `.agents/rules` 不再提取为空；
   - `reporting/rule_translate.py` 的通用映射与 `_shared` 默认模版从当前 profile 的规则文件读取；`translate_rule_key` 的 `SSD-RULE-` 写死改为 `repo_prefix`。
 - `reporting/renderer.py` 的 `_RULE_ACTIONS`（ruff 映射）改为 profile `reporting.rule_actions`，未命中时使用通用建议文案。
 
-### 5.5 env 与 profile 合并规则
+### 5.5 仓库自定义规则模块（`review/repo_rules.py`，第一优先）
+
+被检仓库自身定义的检视规则（AGENTS.md、`.agents/rules/*.md`）由独立模块负责，不与其他规则处理逻辑混杂。
+
+**模块职责**
+
+1. **获取**：从被检仓库**默认分支**读取（不信任 PR head，沿用现有安全约束）AGENTS.md 等 context files + `rules_dir` 下所有 `.md`；保留现有 LRU + TTL 缓存（15 分钟）。
+2. **解析**：按 `rule_keys.repo_prefix`（SSD 场景 `SSD-RULE`）提取规则键与所属规则段落，产出结构化 `RepoRule(key, title, body, source_path)`；AGENTS.md 中非规则内容保留为项目上下文，不误判为规则。
+3. **渲染**：输出独立 `<project_rules priority="1">` 块，**置于 profile 内建规则之前**，并附明确指令：与内建规则冲突时以项目规则为准。
+4. **供周报复用**：`reporting/rule_translate.py` 的动态规则映射直接调用本模块，不再自行读 `.agents/rules`。
+
+**第一优先的四处落地**
+
+| 位置 | 语义 |
+|---|---|
+| prompt 装配（`assembly.py`） | 项目规则块排在 profile 规则之前，标注最高优先级 |
+| 规则冲突 | 同一问题上项目规则覆盖内建规则（模板中显式声明） |
+| 严重度/分数过滤（`validation.py`） | 项目规则键命中 `repo_prefix` 时豁免过滤并加分（现有 `_RULE_EXEMPT_REGEX` 语义） |
+| 周报（`reporting/`） | 项目规则优先翻译/归类，未被 profile `rule_actions` 覆盖时使用通用文案 |
+
+**配置**：`repo_context` 移入 `profile.yaml`（`files` / `rules_dir` / `max_lines`），显式 env 仍可覆盖（§5.6）。缺失 AGENTS.md 或读取失败 → 视为无项目规则，WARNING 日志，不阻塞检视（沿用现有行为）。
+
+### 5.6 env 与 profile 合并规则
 
 - 顺序：显式设置的环境变量 > `profile.yaml` > 代码内置默认值。
 - `config.py` 中迁往 profile 的字段（`improve_test_feature_keywords`、`improve_skip_test_paths`、`improve_priority_weight_*`、`improve_review_mode`、`improve_test_sample_*`、`improve_keyword_paths`、`rule_key_prefix`、周报标题/目录等）保留 env 读取；profile 加载器将「已显式设置的 env」覆盖到 profile 值上，`config` 对象字段指向合并结果，现有部署不改 env 行为不变。
@@ -159,6 +188,7 @@ reporting:
 | `_collect_defined_names`、`_safe_parse_defs`、apply 风险检查（:1975-2300） | `review/policies/python.py` |
 | `rg -t py` 跨文件检索（:718,795）、pytest 密度打分（:1520）、测试文件判定 | `review/policies/python.py` |
 | 行号校验/规范化、去重指纹（:34-70）、规则键正则（:86-96） | `review/validation.py`（正则从 profile 注入） |
+| `repo_context.py` 的取文件/解析/渲染（:148-245） | `review/repo_rules.py`（`repo_context.py` 保留兼容 re-export） |
 | `_publish`、suggestion 块构造（:2423, :2666-2670, :3211-3225） | `review/publishing.py` |
 | 命令入口/依赖组装 | `commands/improve.py` 薄壳 |
 
@@ -197,7 +227,7 @@ class LanguagePolicy(Protocol):
 
 1. `ssd-python-autotest` 的 prompt/规则逐字节迁移（文件移动不改内容）。
 2. 现有 548 个测试：靠 §6.2 兼容门面保持零改动，全绿是验收标准；`tests/conftest.py` 不设 `REVIEW_PROFILE`，走默认回退。
-3. `config.py` 迁走的项按 §5.5 保留 env 读取与覆盖语义，现有部署不改 env 行为不变。
+3. `config.py` 迁走的项按 §5.6 保留 env 读取与覆盖语义，现有部署不改 env 行为不变。
 4. `_call_chunk` 的模型选择、qodercli 128KB argv 预算逻辑随迁 `assembly.py`，行为不变。
 5. `prompts/loader.py` 改为 profile 解析后，4 个测试文件 36 处 `provider.run(agent="improve"/"describe")` 走默认 profile，断言（含 `improve.md` frontmatter `tools_disabled`）继续通过。
 
@@ -226,7 +256,7 @@ class LanguagePolicy(Protocol):
 ## 9. 测试策略
 
 1. **兼容性铁律**：现有测试零改动全绿（§6.2 门面 + §5.1 默认回退保障）——行为严格兼容的验收标准。
-2. 新增：profile 加载器（默认回退/非法值/env 覆盖/共享规则引用）、模板渲染变量齐全性、规则键正则（`R-*` 完整匹配、`SSD-RULE-*` 豁免生效、repo_context 抽取）、`policies/python.py` 行为对齐测试、ssd-python-autotest 端到端 fake-LLM 流程（复用 fakeredis / mock provider 模式）。
+2. 新增：profile 加载器（默认回退/非法值/env 覆盖/共享规则引用）、模板渲染变量齐全性、规则键正则（`R-*` 完整匹配、`SSD-RULE-*` 豁免生效）、`review/repo_rules.py`（规则段落解析、`repo_prefix` 提取、prompt 前置顺序、冲突覆盖指令、缓存）、`policies/python.py` 行为对齐测试、ssd-python-autotest 端到端 fake-LLM 流程（复用 fakeredis / mock provider 模式）。
 3. 新增：RQ job profile 校验测试（场景不匹配拒绝执行）、周报链路 profile 化测试（标题/动作映射/扩展名/规则翻译，python 场景输出与现有快照一致）。
 4. 新增结构测试：`ssd-python-autotest` 的 output_schema 与解析器兼容（防漂移）。
 5. prompt 正文内容不做断言（与现状一致）。
@@ -236,7 +266,7 @@ class LanguagePolicy(Protocol):
 
 1. profile 加载器 + `ssd-python-autotest` 包（纯迁移 + 默认回退 + env 覆盖，现有测试全绿）；
 2. improve.py 拆分 + 兼容门面（engine / assembly / validation / publishing，测试零改动全绿）；
-3. 规则键正则 / `repo_context` / `suggestion_actions` 的 profile 化（python 键行为不变）；
+3. 仓库自定义规则模块独立化（`review/repo_rules.py`，含规则键正则 / `suggestion_actions` 的 profile 化，python 键行为不变）；
 4. LanguagePolicy 接口 + `policies/python.py`（行为对齐，全绿）；
 5. 周报链路 profile 化（三个 weekly prompt、rule_translate、renderer、repo_scan、标题），python 场景输出不变；
 6. 部署与文档更新（`.env.example`、systemd、README、DEPLOYMENT.md）。
