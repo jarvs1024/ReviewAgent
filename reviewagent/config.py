@@ -166,6 +166,23 @@ class Config:
     improve_batch_max_total_lines: int = 300  # 单批次累计 diff 行数上限
     improve_clip_diff_lines: int = 800  # 单文件 diff 行数超过此值时截断 (0=不截断)
 
+    # ---- 周报 (instance 平面；迁移自 reporting/config.py，唯一 schema 见 settings/schema.py) ----
+    weekly_enabled: bool = True
+    weekly_target_project_id: int = 0
+    weekly_target_branch: str = "main"
+    weekly_timezone: str = "Asia/Shanghai"
+    weekly_collectors: tuple[str, ...] = ("telemetry", "merged_mrs", "repo_scan")
+    weekly_notifier: str = "dingtalk"
+    weekly_dingtalk_webhook_url: str = ""  # 空 = dry_run；别名 DINGTALK_WEBHOOK 兼容
+    weekly_dingtalk_secret: str = ""
+    weekly_dingtalk_dry_run: bool = True
+    weekly_dingtalk_retry: int = 3
+    weekly_md_chunk_limit: int = 18000
+    weekly_report_title: str = ""  # 空 = 用 profile.reporting.weekly_title
+    weekly_report_emoji: str = "📊"
+    weekly_cron_schedule: str = "Mon 10:30"
+    weekly_dashboard_url: str = "http://127.0.0.1:8080/code-review"
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:

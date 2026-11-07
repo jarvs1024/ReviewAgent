@@ -1,36 +1,22 @@
-"""Weekly report 配置 — env override + dataclass.
+"""Weekly report 配置 — 唯一 schema 的投影（spec §5.5.2）.
 
-参考 pr-agent: WeeklyReportConfig (frozen dataclass + env 覆盖).
+env 解析统一由 `settings.binder` 完成，本模块只从 `reviewagent.config.current()`
+映射字段，不再直接读环境变量（T20 迁移掉最后一处配置边界例外）：
+
+* `collectors` 的 schema 形态是逗号分隔 tuple；binder 只按逗号切，因此这里再按
+  空白切一次，兼容 `telemetry merged_mrs` 这种历史写法；
+* `weekly_report_title` 的 schema 默认是空串，真正生效的标题取
+  `profile.reporting["weekly_title"]`（缺省 "SSD自动化代码检视周报"），
+  这样 profile 才能覆盖标题；
+* `DINGTALK_WEBHOOK` 短名由 schema 的 `aliases` 承接，不再手写 or 回退；
+* 空串 env 由 binder 视为"未提供"并回退 schema 默认值，与旧 `_env_str` 一致。
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_str(name: str, default: str) -> str:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    return raw
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+from reviewagent.config import current
 
 
 @dataclass(frozen=True)
@@ -54,11 +40,11 @@ class WeeklyReportConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, profile: Any = None) -> "WeeklyReportConfig":
-        """从 env 构造配置；未显式传 profile 时惰性解析激活场景包.
+    def from_env(cls, profile: Any = None) -> WeeklyReportConfig:
+        """从生效配置构造；未显式传 profile 时惰性解析激活场景包.
 
-        env 依旧优先；`profile.reporting["weekly_title"]` 只作为标题的 env 默认值，
-        没有 profile 数据时保持历史默认值.
+        env 已由 binder 在进程启动时解析进 `current()`；profile 只影响标题回退，
+        没有 profile 数据时保持历史默认标题.
         """
         if profile is None:
             try:
@@ -69,30 +55,24 @@ class WeeklyReportConfig:
                 profile = None
         reporting = getattr(profile, "reporting", None) or {}
         title_default = str(reporting.get("weekly_title") or "SSD自动化代码检视周报")
+        cfg = current()
         return cls(
-            enabled=_env_bool("REVIEWAGENT_WEEKLY_ENABLED", True),
-            target_project_id=_env_int("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", 0),
-            target_branch=_env_str("REVIEWAGENT_WEEKLY_TARGET_BRANCH", "main"),
-            timezone=_env_str("REVIEWAGENT_WEEKLY_TIMEZONE", "Asia/Shanghai"),
-            collectors=tuple(
-                # 默认全 3 段 (对齐 pr_agent), 用户可通过 env 覆盖
-                _env_str("REVIEWAGENT_WEEKLY_COLLECTORS", "telemetry,merged_mrs,repo_scan")
-                .replace(",", " ").split()
-            ),
-            notifier=_env_str("REVIEWAGENT_WEEKLY_NOTIFIER", "dingtalk"),
-            # 兼容两种 env 命名: 命名空间前缀 vs 短名 (向后兼容 .env 老配置)
-            dingtalk_webhook_url=(
-                _env_str("REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL", "")
-                or _env_str("DINGTALK_WEBHOOK", "")
-            ),
-            dingtalk_secret=_env_str("REVIEWAGENT_WEEKLY_DINGTALK_SECRET", ""),
-            dingtalk_dry_run=_env_bool("REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN", True),
-            dingtalk_retry_attempts=_env_int("REVIEWAGENT_WEEKLY_DINGTALK_RETRY", 3),
-            markdown_chunk_limit=_env_int("REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT", 18000),
-            cron_schedule=_env_str("REVIEWAGENT_WEEKLY_CRON_SCHEDULE", "Mon 10:30"),
-            report_title=_env_str("REVIEWAGENT_WEEKLY_REPORT_TITLE", title_default),
-            report_emoji=_env_str("REVIEWAGENT_WEEKLY_REPORT_EMOJI", "📊"),
-            dashboard_url=_env_str("REVIEWAGENT_WEEKLY_DASHBOARD_URL", "http://127.0.0.1:8080/code-review"),
+            enabled=cfg.weekly_enabled,
+            target_project_id=cfg.weekly_target_project_id,
+            target_branch=cfg.weekly_target_branch,
+            timezone=cfg.weekly_timezone,
+            # binder 只按逗号切；这里再按空白切一次，兼容 "a b" 写法。
+            collectors=tuple(" ".join(cfg.weekly_collectors).replace(",", " ").split()),
+            notifier=cfg.weekly_notifier,
+            dingtalk_webhook_url=cfg.weekly_dingtalk_webhook_url,
+            dingtalk_secret=cfg.weekly_dingtalk_secret,
+            dingtalk_dry_run=cfg.weekly_dingtalk_dry_run,
+            dingtalk_retry_attempts=cfg.weekly_dingtalk_retry,
+            markdown_chunk_limit=cfg.weekly_md_chunk_limit,
+            report_title=cfg.weekly_report_title or title_default,
+            report_emoji=cfg.weekly_report_emoji,
+            cron_schedule=cfg.weekly_cron_schedule,
+            dashboard_url=cfg.weekly_dashboard_url,
         )
 
 

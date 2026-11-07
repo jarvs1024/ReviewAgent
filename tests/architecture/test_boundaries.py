@@ -15,10 +15,10 @@ import 方向（§7.5 第 1 条）：
 
 配置边界（§7.5 第 4 条）：``settings/**`` 之外直接读环境变量一律失败。
 兼容期例外按**完整相对路径**放行（禁止 ``path.name == "config.py"`` 这类
-同名绕过）：``reviewagent/config.py``（现网 env 入口）、
-``reviewagent/reporting/config.py``（周报 env 平面尚未入 schema）、
+同名绕过），且只剩 3 条：``reviewagent/config.py``（现网 env 入口）、
 ``reviewagent/llm/qoder_sdk_provider.py``（代理透传）、
 ``reviewagent/workers/rq_worker.py``（RQ 子进程环境传播）。
+周报配置（原第 4 条例外）已在 T20 并入 ``settings/schema.py``。
 """
 from __future__ import annotations
 
@@ -38,7 +38,6 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "architecture_violations"
 ENV_READER_ALLOWLIST: frozenset[str] = frozenset(
     {
         "reviewagent/config.py",
-        "reviewagent/reporting/config.py",
         "reviewagent/llm/qoder_sdk_provider.py",
         "reviewagent/workers/rq_worker.py",
     }
@@ -222,7 +221,6 @@ def test_env_reader_allowlist_is_exact():
     assert ENV_READER_ALLOWLIST == frozenset(
         {
             "reviewagent/config.py",
-            "reviewagent/reporting/config.py",
             "reviewagent/llm/qoder_sdk_provider.py",
             "reviewagent/workers/rq_worker.py",
         }

@@ -128,6 +128,29 @@ SCHEMA: tuple[FieldSpec, ...] = (
     FieldSpec("improve_batch_max_files", int, 5, env="IMPROVE_BATCH_MAX_FILES", scope="scenario", minimum=1),
     FieldSpec("improve_batch_max_total_lines", int, 300, env="IMPROVE_BATCH_MAX_TOTAL_LINES", scope="scenario", minimum=1),
     FieldSpec("improve_clip_diff_lines", int, 800, env="IMPROVE_CLIP_DIFF_LINES", scope="scenario", minimum=0),
+    # ---- 周报（instance 平面；周报进程独立于检视链，配置不随场景包切换）----
+    # 迁移自 `reporting/config.py` 的 16 个 env 读取（spec §5.5.2）；`weekly_report_title`
+    # 默认空串，由 `WeeklyReportConfig.from_env` 回退到 `profile.reporting.weekly_title`。
+    FieldSpec("weekly_enabled", bool, True, env="REVIEWAGENT_WEEKLY_ENABLED", scope="instance"),
+    FieldSpec("weekly_target_project_id", int, 0, env="REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", scope="instance"),
+    FieldSpec("weekly_target_branch", str, "main", env="REVIEWAGENT_WEEKLY_TARGET_BRANCH", scope="instance"),
+    FieldSpec("weekly_timezone", str, "Asia/Shanghai", env="REVIEWAGENT_WEEKLY_TIMEZONE", scope="instance"),
+    FieldSpec("weekly_collectors", tuple, ("telemetry", "merged_mrs", "repo_scan"),
+              env="REVIEWAGENT_WEEKLY_COLLECTORS", scope="instance"),
+    FieldSpec("weekly_notifier", str, "dingtalk", env="REVIEWAGENT_WEEKLY_NOTIFIER", scope="instance"),
+    FieldSpec("weekly_dingtalk_webhook_url", str, "", env="REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL",
+              scope="instance", aliases=("DINGTALK_WEBHOOK",)),
+    FieldSpec("weekly_dingtalk_secret", str, "", env="REVIEWAGENT_WEEKLY_DINGTALK_SECRET",
+              scope="instance", secret=True),
+    FieldSpec("weekly_dingtalk_dry_run", bool, True, env="REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN", scope="instance"),
+    FieldSpec("weekly_dingtalk_retry", int, 3, env="REVIEWAGENT_WEEKLY_DINGTALK_RETRY", scope="instance", minimum=0),
+    FieldSpec("weekly_md_chunk_limit", int, 18000, env="REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT", scope="instance", minimum=1),
+    FieldSpec("weekly_report_title", str, "", env="REVIEWAGENT_WEEKLY_REPORT_TITLE", scope="instance",
+              doc="空 = 用 profile.reporting.weekly_title"),
+    FieldSpec("weekly_report_emoji", str, "📊", env="REVIEWAGENT_WEEKLY_REPORT_EMOJI", scope="instance"),
+    FieldSpec("weekly_cron_schedule", str, "Mon 10:30", env="REVIEWAGENT_WEEKLY_CRON_SCHEDULE", scope="instance"),
+    FieldSpec("weekly_dashboard_url", str, "http://127.0.0.1:8080/code-review",
+              env="REVIEWAGENT_WEEKLY_DASHBOARD_URL", scope="instance"),
 )
 
 SCHEMA_BY_NAME: dict[str, FieldSpec] = {spec.name: spec for spec in SCHEMA}
