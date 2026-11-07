@@ -24,6 +24,7 @@ from reviewagent.review.dynamic.providers.cross_file_refs import (
     collect_refs,
     find_refs,
 )
+from reviewagent.review.policies.python import extract_identifiers as _py_idents
 from reviewagent.scenario.dynamic import load_dynamic_rules
 from reviewagent.scenario.profile import Profile, load_profile
 
@@ -195,6 +196,8 @@ def test_find_refs_argv_self_exclusion_timeout_and_hits(monkeypatch):
     refs = find_refs(
         "a.py", "+def alpha():", "/tmp/wt",
         params={"hits_per_symbol": 1, "max_refs_per_file": 6},
+        # 生产路径由门面注入当前策略提取器；这里显式注入 Python 版。
+        extract_symbols=_py_idents,
     )
     # 每个 ident 只取 1 条命中。
     assert refs == [{"file": "b.py", "line": 3, "content": "alpha()", "ident": "alpha"}]
@@ -272,6 +275,7 @@ def test_find_refs_clamps_non_positive_hits(monkeypatch, logs):
     refs = find_refs(
         "a.py", "+def alpha():", "/tmp/wt",
         params={"hits_per_symbol": -2, "max_refs_per_file": 0},
+        extract_symbols=_py_idents,
     )
     # 默认 hits=2 / max_refs=6 → 两条命中，而不是 1 条或空。
     assert [r["file"] for r in refs] == ["b.py", "c.py"]
@@ -321,8 +325,9 @@ def _facade_cmd(*, rule_max_refs: int = 2):
 def _capture_collect(monkeypatch) -> dict[str, Any]:
     seen: dict[str, Any] = {}
 
-    def _fake_collect(files, diff_by_file, worktree, *, params=None):
+    def _fake_collect(files, diff_by_file, worktree, *, params=None, extract_symbols=None):
         seen["params"] = params
+        seen["extract_symbols"] = extract_symbols
         return {fp: [] for fp in files}
 
     monkeypatch.setattr(mod, "collect_refs", _fake_collect)

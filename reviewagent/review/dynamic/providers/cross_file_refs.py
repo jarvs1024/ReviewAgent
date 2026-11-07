@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from reviewagent.logging_setup import logger
-from reviewagent.review.policies.python import extract_identifiers
 
 # Legacy 运行时常量（profiles/*/dynamic_rules.yaml 的 legacy-truth 值）。
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -46,6 +46,22 @@ _STOP_IDENTS = {"self", "cls", "None", "True", "False", "args", "kwargs"}
 _BULK_TIMEOUT_S = 30
 _SINGLE_TIMEOUT_S = 8
 _MAX_CONTENT_CHARS = 500
+
+# 语言中立的 added-line 标识符提取（与 `GenericPolicy.extract_symbols` 同形状）。
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+_MAX_DEFAULT_SYMBOLS = 15
+
+
+def _default_extract_symbols(diff: str) -> list[str]:
+    """语言中立的 added-line 标识符提取（无注入回调时使用）."""
+    if not diff:
+        return []
+    added = "\n".join(
+        ln[1:]
+        for ln in diff.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    )
+    return sorted(set(_IDENTIFIER_RE.findall(added)))[:_MAX_DEFAULT_SYMBOLS]
 
 
 def _int_param(params: dict[str, Any], name: str) -> int:
@@ -91,15 +107,23 @@ def _exclude_args(params: dict[str, Any]) -> list[str]:
 
 
 def find_refs(
-    file_path: str, diff: str, worktree: Any, *, params: dict[str, Any] | None = None,
+    file_path: str,
+    diff: str,
+    worktree: Any,
+    *,
+    params: dict[str, Any] | None = None,
+    extract_symbols: Callable[[str], list[str]] | None = None,
 ) -> list[dict]:
     """在 worktree 找 diff 改动的标识符在其他文件的 caller 引用（单文件回退路径）.
 
     用 rg 排除当前文件, 每个 ident 限 ``hits_per_symbol`` 条命中, 总数限
     ``max_refs_per_file``. 返回 ``[{"file": rel, "line": N, "content": "...", "ident": ident}]``.
+    ``extract_symbols`` 由门面注入当前语言策略的提取器；缺省回退模块内
+    语言中立实现（仅供直接调用 / 测试）。
     """
     params = params or {}
-    idents = extract_identifiers(diff)[: _int_param(params, "max_symbols_per_file")]
+    extract = extract_symbols or _default_extract_symbols
+    idents = extract(diff)[: _int_param(params, "max_symbols_per_file")]
     if not idents or not worktree:
         return []
     workdir = str(Path(worktree))
@@ -174,8 +198,12 @@ def collect_refs(
     worktree: Any,
     *,
     params: dict[str, Any] | None = None,
+    extract_symbols: Callable[[str], list[str]] | None = None,
 ) -> dict[str, list[dict]]:
     """对整个 MR 一次性 rg 找所有 diff 文件的标识符在仓库的 caller 引用.
+
+    ``extract_symbols`` 由门面注入当前语言策略的提取器；缺省回退模块内
+    语言中立实现（仅供直接调用 / 测试）。
 
     Returns: ``{file_path: [{file, line, content, ident}, ...]}``
     - 一次 rg 用所有 ident 的并集作为 pattern, 避免每个文件重启 subprocess
@@ -183,6 +211,7 @@ def collect_refs(
     - 比 per-file 调用更全: file A 的 ident 在 file B 的 caller 也会被发现
     """
     params = params or {}
+    extract = extract_symbols or _default_extract_symbols
     if not worktree:
         return {fp: [] for fp in files}
     workdir = str(Path(worktree))
@@ -194,7 +223,7 @@ def collect_refs(
     idents_by_file: dict[str, set[str]] = {}
     all_idents: set[str] = set()
     for fp in files:
-        idents = set(extract_identifiers(diff_by_file.get(fp, ""))[:max_symbols])
+        idents = set(extract(diff_by_file.get(fp, ""))[:max_symbols])
         idents_by_file[fp] = idents
         all_idents |= idents
     # 排除短 ident + 常见噪音

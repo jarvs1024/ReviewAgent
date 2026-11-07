@@ -216,7 +216,10 @@ class ImproveCommand(BaseCommand):
         params = self._dynamic_rule_params()
         if max_refs is not None:
             params["max_refs_per_file"] = max_refs
-        return find_refs(file_path, diff, worktree_path, params=params)
+        return find_refs(
+            file_path, diff, worktree_path,
+            params=params, extract_symbols=self._prompt_policy().extract_symbols,
+        )
 
     def _collect_cross_file_refs_for_mr(
         self,
@@ -237,7 +240,10 @@ class ImproveCommand(BaseCommand):
         params = self._dynamic_rule_params()
         if max_refs_per_file is not None:
             params["max_refs_per_file"] = max_refs_per_file
-        return collect_refs(files, diff_by_file, worktree_path, params=params)
+        return collect_refs(
+            files, diff_by_file, worktree_path,
+            params=params, extract_symbols=self._prompt_policy().extract_symbols,
+        )
 
     def _render_cross_file_section(self, refs: list[dict]) -> str:
         """把 cross-file 引用渲染成 chunk prompt 段.
