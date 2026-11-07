@@ -2,7 +2,7 @@
 
 - 日期：2026-11-07
 - 分支：new_review_v2（基于 main 新建）
-- 状态：已与需求方分段确认；已完成完整性/矛盾核查、分层评审、规则层评审、静态/动态规则分治、Python/C++ 解耦评审与严格兼容性审计，并补齐信任边界/安全、可复现指纹、启动与回滚、质量门禁与可专利性梳理；首期仅 Python 场景（C/C++ 仅预留接口），待审阅
+- 状态：已与需求方分段确认；已完成完整性/矛盾核查、分层评审、规则层评审、静态/动态规则分治、Python/C++ 解耦评审、严格兼容性审计，并补齐信任边界/安全、可复现指纹、启动与回滚、配置三平面收敛、日志治理、质量门禁与可专利性梳理；首期仅 Python 场景（C/C++ 仅预留接口），待审阅
 
 ## 1. 背景与问题
 
@@ -38,7 +38,10 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 | 测试耦合处理 | **兼容门面**：`ImproveCommand` 保留同名私有方法（仅委托）与模块级 `config` 引用，现有测试耦合零改动 |
 | 检视数据存储 | **一实例一库**：文档强制 `REVIEWAGENT_DATA_DIR` 按实例隔离，schema 不改 |
 | 周报场景化 | **全量纳入场景包**：三个 weekly prompt、规则→动作映射、repo_scan 扩展名、标题 |
-| env 与 profile 优先级 | **显式 env > profile.yaml > 内置默认值** |
+| env 与 profile 优先级 | **显式 env（兼容覆盖）> profile.yaml > preset > schema 默认值** |
+| 配置复杂度 | **三平面 + 单一 schema + preset**：实例 env 只保留密钥/端点/并发/日志等运维项；场景行为全部在 profile（最小表面 + 一级 `extends`）；规则内容在规则包。一个开关只有一个家，默认值只定义一次 |
+| 配置兼容与观测 | 既有约 70 个 env 首期全部继续生效（映射为覆盖项，启动记 `config.compat_env`）；`config check/show --sources`、启动 `config.resolved`、manifest `config_fingerprint`；未知 YAML 字段/类型/范围/跨字段冲突启动失败 |
+| 日志 | loguru 保留，`LOG_FORMAT` 支持 text/json（默认 text 兼容现网）；run/pipeline 级上下文字段；schema 驱动脱敏，禁止 prompt/源码/密钥入日志；`diagnose=False` 作为安全修复 |
 | 首期实施范围 | **仅 Python 场景**：C/C++ 仅预留接口与设计，稳定后再实施 |
 | 分层修正 | 新增 `scenario/` 共享层；`review/` 拆 planner/context/runner；`reporting` 不依赖 `review` |
 | 语言隔离原则 | **语言差异唯一出口**：只允许出现在 `review/policies/` 与 `profiles/`；共享引擎禁止语言分支与语言字面量（`.py` / `-t py` / `ast` / `if language ==`） |
@@ -59,6 +62,7 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 4. **数据可回滚**：场景行为只由 `profiles/` 数据与代码版本决定；回滚不需要改代码或迁库。
 5. **不可信内容不改变契约**：仓库代码/注释/动态证据只能作为数据进入 prompt，不能改变输出 schema、规则键、行号锚定或其他文件的判定。
 6. **静态/动态分治**：静态规则只描述「查什么」，动态规则只提供「依据什么上下文」，二者的模型、生命周期、失败语义永不混用。
+7. **配置单一归属**：一个开关在定义层面只属于一个平面，默认值只定义一次，解析结果必须带来源；兼容期的 env 仅作为覆盖入口、不计为第二处定义，禁止 profile 与 preset 各自维护同义默认值。
 
 ## 3. 非目标
 
@@ -72,6 +76,8 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 - 探针场景只是 `tests/fixtures/profiles/` 下的测试夹具，不进入 `profiles/`、不参与部署，也不属于 C/C++ 实施。
 - 不做跨场景规则的运行时合并：RuleSet 一次只装配当前 profile，实例间互不可见。
 - 不改 webhook / RQ / GitLab / LLM provider 的外部接口；telemetry 表结构不变（靠一实例一库隔离场景）。
+- **不做配置中心与热加载**：不引入 Consul/etcd/Apollo，不支持进程内改配置；变更一律改数据/环境变量后重启，靠指纹保证一致性与可复现。
+- **不做按仓库/按 MR 的动态配置**：profile 仍由实例级 `REVIEW_PROFILE` 决定；仓库只能提供规则内容，不能改运行参数。
 
 ## 4. 分层架构
 
@@ -83,7 +89,7 @@ L4 命令任务层  commands/ · workers/
 L3 检视引擎层  review/（types · planner · context · assembly · runner · policy · manifest · validation · publishing · dynamic）
 L2 场景装配层  scenario/（profile · prompts · rules 子系统 · dynamic 动态规则加载）
 L1 场景数据层  profiles/（profile.yaml · dynamic_rules.yaml · prompts/ · rules/）
-L0 平台层      config · logging · metrics · telemetry · gitlab · llm · git（凭据与运行参数）
+L0 平台层      settings(schema/binder) · config · logging · metrics · telemetry · gitlab · llm · git（凭据与运行参数）
 L6 报告层      reporting/（依赖 L1/L2；禁止 import review）
 ```
 
@@ -104,7 +110,11 @@ L6 报告层      reporting/（依赖 L1/L2；禁止 import review）
 
 ```
 reviewagent/
+├── settings/                     # L0 配置 schema 与 binder（默认值唯一来源）
+│   ├── schema.py                 # FieldSpec：类型/范围/scope/env/secret/doc
+│   └── binder.py                 # env 解析、preset/profile 合并、校验、来源标注
 ├── profiles/                     # L1 场景数据（纯数据）
+│   ├── _presets/                 # 场景默认值包（仅一级继承，供 profile extends）
 │   ├── _shared/
 │   │   ├── rules/                # 共享领域规则库（必须声明 languages）
 │   │   └── prompts/              # 可选默认模板（未配置时回退）
@@ -236,7 +246,8 @@ flowchart TD
 
 | 模块 | 只负责 | 允许因何变更 | 不得包含 |
 |---|---|---|---|
-| `profiles/` | 场景数据 | 新增/调整场景 | 代码 |
+| `settings/*` | schema 定义、默认值、env/preset/profile 解析、校验、来源标注 | 配置规范演进 | 业务逻辑、读 YAML 以外的 IO、import 上层 |
+| `profiles/` | 场景数据 | 新增/调整场景 | 代码、密钥 |
 | `scenario/profile.py` | 加载、校验、env 合并 | profile 规范演进 | 检视流程 |
 | `scenario/prompts.py` | 模板加载与变量校验 | 模板机制演进 | LLM 调用 |
 | `scenario/rules/*` | 规则解析、装配、渲染、键索引、仓库规则 | 规则层演进 | 语言实现细节 |
@@ -255,30 +266,63 @@ flowchart TD
 
 ### 4.6 新增场景接入清单
 
-1. 新建 `profiles/<scenario>/profile.yaml`：`language`、prompts、rules、`dynamic_rules`、rule_keys、capabilities、file_filter、scoring、reporting。
+1. 新建 `profiles/<scenario>/profile.yaml`：先 `extends` 一个 preset，再只写差异（`language`、prompts、rules、`dynamic_rules`、必要的 reporting）；不要复制整份完整字段。
 2. 放入 `prompts/`：improve、describe、三个 weekly 模板（可复用 `_shared/prompts/`）。
 3. 放入 `rules/`：规则包声明 `applies_to` 与 `render` 模式；共享包只从 `_shared/` 引用。
 4. 新建 `dynamic_rules.yaml`：声明证据类型、provider、限额、排除项、prompt 模板、失败策略；不需要动态证据时显式留空（`rules: []`）。
 5. 新增 `review/policies/<language>.py`：只覆盖有差异的钩子，并在 registry 注册；新增证据类型时另加 provider 并在 `review/dynamic/registry.py` 注册。
 6. 声明 `security` 与 `schema_version`；确认 worktree 约束、不可信内容规范化与 prompt 硬化开关符合该场景要求。
 7. 不改共享模块；确需新增通用能力时按 §7.5 执行。
-8. 跑架构守卫 + 场景端到端 + golden/回放（静态规则与动态证据各一组）+ 安全样本，然后部署（独立实例与数据目录）。
+8. 跑 `config check` + 架构守卫 + 场景端到端 + golden/回放（静态规则与动态证据各一组）+ 安全样本，然后部署（独立实例与数据目录）。
 
 ## 5. Profile（场景包）规范
 
 ### 5.1 目录与选择
 
-- 场景 = 一个目录，含 `profile.yaml` + `dynamic_rules.yaml` + `prompts/` + `rules/`。
+- 场景 = 一个目录，含 `profile.yaml` + `dynamic_rules.yaml` + `prompts/` + `rules/`；`_presets/` 存放多个场景共享的默认值包（仅由 profile `extends` 引用，不直接部署）。
 - 实例选择：环境变量 `REVIEW_PROFILE`（场景目录名或绝对路径）。
   - 未设置 → 载入 `ssd-python-autotest`，日志 WARNING；
   - 设置为不存在的目录 → 启动即失败，列出可用场景及 `description`；
   - 必填字段缺失 → 启动即失败，列出缺失字段；
   - `language` 未注册 → 由入口启动期调用 `review/policies/registry.py` 校验，失败中止启动（`scenario` 不 import `review`）。
-- 加载时机：`config` 先完成 env 解析，随后由入口显式初始化 `scenario/profile.py` 单例（API `main.py` lifespan、`rq_worker.py` bootstrap、CLI）；`config` 不得 import `scenario`，避免循环依赖。
+- 加载时机：`settings` 先完成 env 解析，随后由入口显式初始化 `scenario/profile.py` 单例（API `main.py` lifespan、`rq_worker.py` bootstrap、CLI）；`settings`/`config` 不得 import `scenario`，避免循环依赖。
 - 启动时同步装配并校验当前 profile 的 RuleSet（场景包 + 共享包 + 覆盖/禁用：解析、命名空间、共享包声明）；任何错误 fail-fast。同时加载 `dynamic_rules.yaml` 并校验 provider 注册、`DYN-*` 键与模板文件；动态规则配置错误同样 fail-fast。仓库规则在每次 MR 执行时获取，合并为请求级 RuleSet（priority=1000），失败按 §9 降级。
-- **双进程一致性**：RQ job 载荷新增 `profile` 与 `profile_fingerprint`（profile.yaml + prompts + rules + dynamic_rules 的内容哈希）；worker 执行前校验名称与指纹都与自身一致，不一致标记失败并记录双方指纹。仅比名称不足以发现「一边已更新、一边未重启」的部署漂移。
+- **双进程一致性**：RQ job 载荷新增 `profile`、`profile_fingerprint` 与 `config_fingerprint`；worker 执行前校验名称与两个指纹都与自身一致，不一致标记失败并记录双方指纹。仅比名称不足以发现「一边已更新、一边未重启」的部署漂移。
 
-### 5.2 profile.yaml 示例
+### 5.2 profile.yaml：最小表面与完整展开
+
+**用户实际维护的 profile（推荐形态）**——只写场景差异，其余由 preset 与 schema 默认值提供：
+
+```yaml
+schema_version: 1
+name: ssd-python-autotest
+description: SSD 自动化测试 Python 代码检视（现网行为）
+extends: python-autotest              # 解析为 profiles/_presets/python-autotest.yaml
+language: python
+prompts:
+  improve: prompts/improve.md
+  describe: prompts/describe.md
+  weekly_inspection_summary: prompts/weekly_inspection_summary.md
+  weekly_change_summary: prompts/weekly_change_summary.md
+  weekly_quality_scan: prompts/weekly_quality_scan.md
+rules:
+  - rules/general_rules.md            # render: verbatim，正文逐字节兼容
+dynamic_rules: dynamic_rules.yaml
+reporting:
+  weekly_title: "SSD自动化代码检视周报"
+  actions_file: reporting/rule_actions.yaml   # 规则→动作映射（原 renderer.py:477-484）
+```
+
+最小表面的语义：
+
+- 除 `schema_version` / `name` / `language` / `prompts` / `rules` 外，其余字段**全部可选**；缺省即取 `extends` preset 或 schema 默认值，不需要从旧配置整份复制。
+- 合并规则：映射深度合并，标量/列表整体替换；`null` = 继承，`[]`/`{}` = 显式清空；未知字段、未知 preset、`extends` 多级继承一律启动失败。
+- `rule_actions`、`repo_scan_*` 等长尾数据从 profile 移出到独立数据文件或 preset，profile 只保留引用；数据文件与规则包一样参与指纹。
+- 现网仍可通过既有环境变量覆盖任一字段（兼容层，见 §5.5）；但文档与 `.env.example` 只推荐实例级运维项，场景差异一律写 profile。
+
+#### 5.2.1 完整展开（迁移参考，不是手写内容）
+
+以下为解析后的完整字段视图，用于迁移核对、兼容审计与 `config show` 输出示例；新场景不应复制整份文件，只需按需覆盖。
 
 ```yaml
 schema_version: 1
@@ -354,6 +398,8 @@ reporting:
   repo_scan_entry_files: [__init__.py, main.py, app.py, config.py, settings.py]  # 与现网 priority_names 一致
 ```
 
+展开视图中的 `reporting.rule_actions` 在源 profile 中由 `actions_file` 引用；本节展示的是解析后的结果，不是需要手写的字段。
+
 `file_filter` 语义：`include_extensions: null` → 不做白名单，只按 `exclude_extensions` 排除（与现网一致）；非 `null` 时先白名单后排除。`skip_paths` / `priority_paths` 沿用现网子串匹配（`pattern in path or basename.startswith(pattern.rstrip("/"))`），避免迁移时改变命中集合。
 
 `security` 语义：`worktree_containment` 与 `normalize_untrusted` 默认开启，对正常输入不改变任何字节；`prompt_hardening` 首期关闭以保证 Python prompt 逐字节一致，新场景建议开启；任何开启/关闭切换都必须更新 golden 并留下签字记录。
@@ -369,15 +415,85 @@ reporting:
 
 ### 5.4 env 与 profile 合并规则
 
-- 顺序：显式环境变量 > `profile.yaml` > 代码内置默认值。
-- profile 字段缺省或显式 `null` → 继承 `config` 当前值；空列表 / 空映射（`[]` / `{}`）→ 显式空值。两者语义不同，避免「占位空值」静默清空现网配置。
-- `config` 暴露「显式设置的 env 键」集合，profile 加载器据此只覆盖真正显式设置的值；不会把默认值误判为显式配置。
-- 合并结果由 profile 加载器调用 L0 的 `config.apply_profile(merged)` 回写；`config` 不 import `scenario`，依赖方向保持单向。
+- 顺序：显式环境变量（兼容覆盖）> `profile.yaml` > `extends` preset > schema 默认值；实例平面字段没有 profile 来源，只有 env 与 schema 默认值。
+- profile 字段缺省或显式 `null` → 继承 preset/默认值；空列表 / 空映射（`[]` / `{}`）→ 显式空值。两者语义不同，避免「占位空值」静默清空现网配置。
+- `config` 暴露「显式设置的 env 键」集合，profile 加载器据此只覆盖真正显式设置的值；不会把默认值误判为显式配置，也不会让兼容 env 被 profile 默认值反向覆盖。
+- 合并结果由 profile 加载器通过 `settings` binder 解析并回写 `config.apply_scenario(resolved)`；`config` 不 import `scenario`，依赖方向保持单向。
 - `rule_key_prefix` / `repo_prefix` 的默认值保持现有 `SSD`（`config.py:105,237`）；`repo_context.py:66` 的 `or "ZLG"` 只是空值兜底，不是默认值。env 显式设置时以其为准，未设置时 profile 与代码默认一致，实例行为不变。
 - 已知且**有意**的差异：现有 `_RULE_REF_REGEX`（`improve.py:86-91`）把 `SSD-RULE-` 写死，而 `_RULE_EXEMPT_REGEX` 跟随 `config.rule_key_prefix`；迁移后两者统一由 `repo_prefix` 生成，并保留原有 `\b` 词边界。默认配置下**匹配行为等价**（不要求模式字符串逐字节相同）；仅在显式设置 `RULE_KEY_PREFIX` 时行为由「不一致」变为「一致」，属修正而非回归，需在迁移记录中注明。
-- 现有 `Config` 类属性默认值与 `Config.from_env()` 回退值不一致（`improve_review_mode`、优先级权重、`improve_skip_test_paths`、`improve_keyword_paths`）。profile 一律以 **`from_env()` 回退值**为准（这才是无 env 时的现网真实行为）；部署环境显式设置的 env 仍优先。`config.from_env()` 的 env 往返测试保持通过。
+- 现有 `Config` 类属性默认值与 `Config.from_env()` 回退值不一致（`improve_review_mode`、优先级权重、`improve_skip_test_paths`、`improve_keyword_paths`）。迁移后默认值统一收敛到 `settings/schema.py`（§5.5.2），以**现网无 env 时的真实行为**为唯一基线；`config.from_env()` 的 env 往返测试保持通过。
 - `schema_version`：只接受当前支持的版本；更高主版本 → 启动失败并提示升级服务；更低版本按显式迁移函数处理，禁止静默猜测字段语义。
 - `dynamic_rules`：字段缺省或 `null` → 不启用动态规则（prompt 无动态证据段）；显式引用文件时必须存在且通过 schema 校验；文件内 `rules: []` 表示「已声明但无规则」，用于显式关闭而不删除文件。
+
+### 5.5 配置分层与复杂度收敛
+
+现状的复杂度不是「字段多」本身，而是**同一语义没有唯一归属**：`config.py` 约 70 个环境变量、`WeeklyReportConfig` 又一套 `from_env`，dataclass 默认值与 `from_env` 回退值还不一致；新方案再叠 profile 与 dynamic_rules，很容易变成三处配置、互相覆盖。收敛原则：**一个开关只有一个家；用户只写差异；默认值只定义一次；所有来源可追溯**。
+
+#### 5.5.1 三个配置平面
+
+| 平面 | 载体 | 只放什么 | 禁止 |
+|---|---|---|---|
+| **实例平面** | 环境变量（密钥只在此） | 端点、凭据、实例身份、并发/超时、日志、周报投递 | 场景行为、规则内容 |
+| **场景平面** | `profile.yaml` + `profiles/_presets/*.yaml` | 语言、prompts、规则引用、动态规则引用、过滤/打分/限额/报告默认值 | 任何密钥、具体规则正文 |
+| **规则平面** | Markdown 规则包、`dynamic_rules.yaml`、`actions.yaml` | 规则内容、动态证据配置、规则→动作映射 | 端点、并发、日志等运行参数 |
+
+- **实例平面**文档化后约 15 项：GitLab（URL/PAT/webhook secret）、LLM（provider/model/PAT/timeout）、Redis/RQ（URL/并发/job timeout）、实例（`REVIEW_PROFILE`、`REVIEWAGENT_DATA_DIR`、`LOG_LEVEL`、`LOG_FORMAT`）、周报投递（webhook/secret/schedule）。其余运行参数进入场景平面的 `limits`/`context`，由 preset 给默认值。
+- **场景平面**不出现任何密钥；schema 启动期做 scope 校验，profile/preset 中出现 `secret=True` 字段即失败。
+- **规则平面**沿用 §6：规则包是内容，不承载运行参数；`dynamic_rules.yaml` 的 `limits` 是该证据类型的领域限额，不是实例并发。
+- **同一语义禁止多处维护默认值**：兼容 env 只是覆盖入口；若实例与场景都需要（如超时），实例值是硬上限，场景值只能更小；装配期取 `min` 并记录 `config.clamped`，禁止两套独立默认值。
+
+#### 5.5.2 单一 schema：默认值与解析只写一次
+
+新增 L0 `reviewagent/settings/schema.py`（纯数据 + 校验，不 import 上层）：
+
+```python
+FieldSpec(
+    name="improve_max_suggestions",
+    type=int, default=15, minimum=0,
+    scope="scenario", env="IMPROVE_MAX_SUGGESTIONS",   # 兼容映射，不是主入口
+    restart_required=True, doc="单次最大 inline 建议数",
+)
+```
+
+- **一个 binder** 同时服务：`settings.from_env()`（新入口；`Config.from_env()` 保留为兼容别名）、profile/preset 校验、`config show`、`docs/CONFIG.md` 生成、manifest `config_fingerprint`。默认值只在 `FieldSpec` 出现一次，彻底消除「dataclass 默认值 ≠ from_env 回退值」这类历史缺陷。
+- `WeeklyReportConfig` 并入同一 schema 的实例平面，保留同名兼容视图（属性与 `from_env()` 签名不变），不再维护第二套 env 解析；周报测试零改动。
+- 校验分层：YAML 未知字段/未知 preset/多级 `extends` → 启动失败；env 未知键 → 仅 WARNING（共享主机常带无关变量）；类型、范围、枚举、跨字段不变量 → 启动失败。
+- **跨字段不变量**（启动期统一校验）：`RQ_WORKER_TIMEOUT ≥ max(LLM timeout) + 300`；`max_suggestions_per_file ≤ max_suggestions`（均为正时）；`test_sample_max > 0` 必须同时配置 `test_sample_paths`；include/exclude 扩展名不相交；权重非负、限额为正；`language` 必须有已注册 policy；`REVIEW_PROFILE` 与 `REVIEWAGENT_DATA_DIR` 必须成对固定。
+- 配置对象启动后 **frozen**；不做热加载、不引入配置中心。变更 = 改数据 + 重启 + 指纹变化，保证可复现与双进程一致。
+
+#### 5.5.3 preset：把「几十个默认值」变成一行 `extends`
+
+- `profiles/_presets/` 是纯数据：`python-autotest`、`python-business`、`generic` 等，承载 `file_filter`、`scoring`、`capabilities`、`security`、`limits`、`reporting`、语言默认扩展名等**成套默认值**。
+- **只允许一级继承**：profile → preset；preset 不得再 `extends`，禁止链式继承与多继承，避免「配置考古」。
+- 典型场景 profile 控制在 15–20 行；需要偏离时只写少量覆盖，例如：`scoring.weights.keyword: 30`。现有 `review_mode`、四个权重、测试特征关键词、扩展名、skip/priority 路径、抽样、batch/clip 等全部收进 preset 与 policy 默认值，profile 不再逐项展开。
+- 新场景接入 = 最小 profile + prompts + 规则包 + dynamic_rules；不需要枚举 60 个字段，也不需要从旧场景复制整份 YAML。
+- preset 与 profile 一样参与 `profile_fingerprint`；改 preset 等同改场景，必须过 golden 与回放门禁。
+
+#### 5.5.4 兼容与收敛路径
+
+- **首期兼容**：既有 70 个环境变量全部继续生效，由 schema 的 `env=` 映射读取，行为与现网一致；场景类 env 只作为覆盖项，启动时若检测到使用，记录一次 `config.compat_env`（键名，不含值）。
+- **文档收敛**：`.env.example`、README、DEPLOYMENT 只列实例平面约 15 项；场景字段以 `config show` 与自动生成的 `docs/CONFIG.md` 为准，避免文档与代码漂移。
+- **后续移除**：至少一个发布周期后，依据 `config.compat_env` 统计确认无人使用，再移除场景类 env（保留实例类）；移除属于显式版本变更，不静默忽略。
+- 可选 `REVIEWAGENT_CONFIG_STRICT=1`：把「使用了已弃用/未知 env」从 WARNING 升级为启动失败，供 CI 与规范化部署使用。
+
+#### 5.5.5 自检与可观测
+
+| 能力 | 行为 |
+|---|---|
+| `reviewagent config check --profile <name>` | 只校验不启动；类型/范围/不变量/规则引用/policy 注册一次跑完，非零退出码供 CI 与 `ExecStartPre` 使用 |
+| `reviewagent config show --profile <name> [--sources] [--diff-default]` | 输出解析后的配置；标出每项来源（`env` / `profile` / `preset` / `default`），密钥按 schema 脱敏；`--diff-default` 只显示偏离默认的项 |
+| 启动日志 | 只打一条 `config.resolved`：`profile`、`config_fingerprint`、非默认项键名（值脱敏），不逐项刷 70 行 |
+| manifest | 新增 `config_fingerprint`（解析后非密钥配置的 canonical 哈希），与 `profile_fingerprint` 并列；行为差异可按「配置/规则/prompt/模型」四维定位 |
+| 指标 | `config_compat_env_total{key}`、`config_clamped_total{field}`、`config_fingerprint_mismatch_total` |
+
+#### 5.5.6 反模式（评审直接判缺陷）
+
+- profile 与 preset 同时维护同一默认值，或把兼容 env 当作主配置入口；
+- 在 `settings/schema.py` 之外直接 `os.environ.get(...)`（架构守卫扫描）；
+- profile/preset/规则包中出现密钥、端口、并发等实例参数；
+- 每次请求重新读 env/YAML，或运行期修改 frozen 配置；
+- preset 多级继承、多 preset 合并、按仓库动态拼配置；
+- 为「灵活」新增一个只有单个场景使用的开关——先证明它属于规则数据或 preset，再考虑入 schema。
 
 ## 6. 规则层（独立子系统）
 
@@ -716,13 +832,14 @@ class LanguagePolicy(Protocol):
 
 ### 7.5 解耦硬边界与探针验收
 
-**三条硬边界**（由 `tests/architecture/` 自动校验，命中即 CI 失败）：
+**四条硬边界**（由 `tests/architecture/` 自动校验，命中即 CI 失败）：
 
 > 守卫自身必须有**负向测试**：用 fixture 构造一次越界 import、一次语言字面量、一个跨命名空间规则包，断言守卫会失败；否则守卫可能长期空转而不自知。
 
 1. **import 方向**：`review` 共享模块不得 import `review/policies/*`；`scenario` 不得 import `review`；`reporting` 不得 import `review`。
 2. **语言字面量**：`review` 共享模块（planner/context/assembly/runner/validation/publishing/policy/types/**dynamic**）与 `scenario`（含 `scenario/dynamic.py`）中不得出现 `.py`、`-t py`、`import ast`、`if language ==` 等语言分支或字面量（扫描 import 与可执行字符串，忽略注释和 docstring）；扫描范围**排除 `review/policies/**`**，它是语言差异的唯一出口；profile 下的 `prompts/dynamic/*` 是场景数据，允许出现语言文案。
 3. **规则命名空间**：当前 profile 只能装配匹配 `builtin_pattern` / `repo_prefix` 的规则包，跨场景包一律拒绝。
+4. **配置边界**：除 `settings/**` 外禁止 `os.environ` / 直接读 YAML 配置；`profile`/`preset` 不得声明 `secret=True` 字段；`config` 不得 import `scenario`；`settings` 不得 import `review`/`reporting`。
 
 **探针场景**：`tests/fixtures/profiles/probe-scenario/` 是仅测试注册的最小场景（不同扩展名、不同缩进、不同规则键），跑通 fake-LLM 全流程；其 policy 通过 registry 的测试注册接口注入，生产代码不感知该场景。它验证「新增场景只需新增数据与 policy，共享代码零改动」，本身不是 C/C++ 实现，也不参与部署。
 
@@ -768,13 +885,14 @@ class LanguagePolicy(Protocol):
 **启动顺序**（同步、fail-fast，任何一步失败都不进入服务循环）：
 
 ```text
-config.from_env()
-  → 加载 profile.yaml（safe_load / schema_version / 未知字段拒绝）
-  → env > profile > 默认值合并并回写 config
+settings.from_env()（schema binder：类型/范围/跨字段/未知键）
+  → 解析 profile.yaml + extends preset（safe_load / schema_version / 未知字段 / 仅一级继承）
+  → env > profile > preset > schema 默认值合并，记录每项 sources 并回写 config
+  → config.validate() + scope 校验（密钥只允许实例平面）
   → 装配静态 RuleSet（包解析、命名空间、覆盖/禁用、共享包语言声明）
   → 加载 dynamic_rules.yaml（provider 注册、DYN 键、模板存在且不越界）
   → 加载 LanguagePolicy（registry；未注册即失败）
-  → 生成 profile/RuleSet/DynamicRuleSet 指纹
+  → 生成 config/profile/RuleSet/DynamicRuleSet 指纹
   → 启动 API 或 RQ worker（job 校验 profile + 指纹）
 ```
 
@@ -785,7 +903,7 @@ config.from_env()
 - 模板渲染：占位符缺失/多余 → 报错带 profile 与模板路径。
 - RQ job 场景不匹配：worker 拒绝执行并标记失败。
 - cpp suggestion 校验失败（后续）：丢弃该条并计入 telemetry，不阻塞其余建议。
-- 部署约定：`.env.example`、`deploy/*.service`、`README.md`、`docs/DEPLOYMENT.md` 增加 `REVIEW_PROFILE` 与一实例一库的 `REVIEWAGENT_DATA_DIR`；默认值保持 `ssd-python-autotest`。切换场景需同时重启 API 与 worker（不支持进程内热切换），并确认两边 `REVIEW_PROFILE` 与 `profile_fingerprint` 一致。
+- 部署约定：`.env.example`、`deploy/*.service`、`README.md`、`docs/DEPLOYMENT.md` 增加 `REVIEW_PROFILE` 与一实例一库的 `REVIEWAGENT_DATA_DIR`；`.env.example` 只列实例平面约 15 项，场景字段由 `config show` 与自动生成的 `docs/CONFIG.md` 提供；`config check` 作为 `ExecStartPre` / 部署前置门禁；默认值保持 `ssd-python-autotest`。切换场景需同时重启 API 与 worker（不支持进程内热切换），并确认两边 `REVIEW_PROFILE`、`config_fingerprint` 与 `profile_fingerprint` 一致。
 - 回滚：只恢复 `profiles/<scenario>/` 目录（或把动态规则置为 `enabled: false`）并重启两个进程；指纹变化会使在途 RQ job 被拒绝，需要重投；不需要改代码、不改库结构。
 - 灰度/对比：新 profile 先部署到独立实例 + 独立数据目录，用历史 MR 回放与线上只读样本对比，通过质量门禁后再切换生产实例。
 
@@ -796,6 +914,7 @@ config.from_env()
 | 字段 | 含义 |
 |---|---|
 | `profile` / `schema_version` | 场景名与数据版本 |
+| `config_fingerprint` | 解析后非密钥配置的 canonical 哈希（含 preset 合并与来源解析结果） |
 | `profile_fingerprint` | profile.yaml + prompts + rules + dynamic_rules 的内容哈希（由 `scenario` 加载器在读取时计算并随装配结果传入；规范排序，无时间戳） |
 | `ruleset_fingerprint` | 装配后 RuleSet 的 canonical 哈希（键/严重度/权重/来源/优先级） |
 | `dynamic_fingerprint` | 动态规则配置 + 模板内容哈希 |
@@ -803,7 +922,7 @@ config.from_env()
 | `model` / `provider` | 实际调用的模型与提供方 |
 | `head_sha` / `worktree` | 被检版本与工作区标识 |
 
-- 同一 manifest + 同一 worktree + fake LLM 必须产生同一 prompt；golden 以 `prompt_fingerprint` 为索引，回放差异可按维度定位到 profile / ruleset / dynamic / prompt / model。
+- 同一 manifest（含 `config_fingerprint`）+ 同一 worktree + fake LLM 必须产生同一 prompt；golden 以 `prompt_fingerprint` 为索引，回放差异可按维度定位到 config / profile / ruleset / dynamic / prompt / model。
 - manifest 只记录哈希与枚举值，不记录 prompt 正文、源码、规则正文或凭据（§7.6 最小数据留存）。
 
 **核心指标**（新增指标不改现有 telemetry 表）：
@@ -815,7 +934,70 @@ config.from_env()
 | `dynamic_rule_duration_ms{rule}` / `dynamic_rule_hits_total{rule}` | 动态证据成本与命中 |
 | `dynamic_rule_degraded_total{rule,reason}` | 超时/工具缺失/越界等降级，按原因告警 |
 | `prompt_bytes{stage}` / `prompt_fingerprint_mismatch_total` | prompt 体积与 golden 漂移 |
+| `config_compat_env_total{key}` / `config_clamped_total{field}` | 兼容 env 使用与实例/场景上限收敛，迁移期观测 |
+| `config_fingerprint_mismatch_total` | API 与 worker 配置不一致（部署漂移） |
 | `suggestion_total{rule,severity}` / `suggestion_dropped_total{reason}` | 产出与丢弃（锚定/规则键/重复） |
+
+### 9.2 日志治理
+
+现状是 loguru + text 格式（stderr + 文件，50MB/30 天，多进程 `enqueue`）。主要问题不在「有没有日志」，而在：文件 sink 开了 `diagnose=True`，异常时会打印局部变量，可能带出 PAT/webhook/prompt；缺少统一关联字段，API→worker、describe→improve 难以串成一条链路；事件名与字段随意，无法稳定告警；没有机读格式；per-file INFO 噪声大。
+
+目标：**一条 MR 全链路可追、默认零泄密、低噪声、可机读**；日志只负责因果，不承担审计与统计（分别由 telemetry 与 metrics 负责）。
+
+#### 9.2.1 格式与 sink
+
+- `LOG_FORMAT=text|json`：默认 `text`（保持现网观感与 journalctl 习惯），生产采集建议 `json`；两个 sink 共用同一事件 schema，不需要改代码即可切换。
+- sink 仍为 stderr + `{data_dir}/log/reviewagent.log`；`enqueue=True`；所有 sink **`diagnose=False`**（这是安全修复，不是风格调整），文件 sink 保留 `backtrace=True`。
+- `LOG_ROTATION` / `LOG_RETENTION` / `LOG_COMPRESSION` 可配，默认保持 50MB / 30 天 / gz。
+- JSON 行固定包含 `ts`、`level`、`event`、`component`、`message` 与上下文字段；text 格式在现有前缀后追加 `k=v`，无上下文字段时不追加，保持旧日志可读。
+
+#### 9.2.2 关联上下文
+
+- 入口统一绑定：`component`（api/worker/weekly/reconciler）、`project_id`、`mr_iid`、`pipeline_id`、`run_id`、`job_id`、`profile`、`stage`、`attempt`。
+- 同一 MR 的 describe→improve chain 共享 `pipeline_id`；每次实际执行一个 `run_id`；重试递增 `attempt`。日志与 telemetry 通过 `run_id` 关联，manifest 通过指纹关联。
+- 使用 loguru `contextualize` / `bind` 注入，禁止在各模块手工拼字符串前缀；禁止把 diff、prompt、源码或证据正文放进 message/extra。
+
+#### 9.2.3 事件命名与级别
+
+事件统一 `<domain>.<verb>`，字段稳定，message 只作人类摘要：
+
+| 事件 | 关键字段 | 级别 |
+|---|---|---|
+| `review.start` / `review.end` | `run_id`、文件数、批次数、耗时、`outcome` | INFO |
+| `review.plan` | `files_total`、`review`、`reuse`、`skip`、`truncated` | INFO |
+| `llm.call` / `llm.retry` / `llm.fail` | `provider`、`model`、`latency_ms`、`tokens`、`attempt`、`error_code` | INFO / WARNING / ERROR |
+| `dynamic.collect` / `dynamic.degrade` | `rule`、`hits`、`duration_ms`、`reason` | INFO / WARNING |
+| `suggestion.publish` / `suggestion.drop` | `rule`、`severity`、`reason` | INFO / WARNING |
+| `config.resolved` / `config.compat_env` / `config.clamped` | `profile`、`fingerprint`、键名（值脱敏） | INFO / WARNING |
+| `telemetry.write_fail` | `table`、`error_code` | WARNING |
+
+- 级别口径：INFO = 生命周期与结果；WARNING = 降级、重试、兼容覆盖、可恢复异常；ERROR = 需要人处理（MR 失败、发布失败）；DEBUG = 逐文件决策，生产默认关闭。
+- 禁止每文件 INFO；聚合为 `review.plan` / `review.end` 的计数。重复告警按窗口合并并带 `count`，避免 MR 风暴刷屏。
+- 错误码固定集合：`E_CONFIG`、`E_PROFILE`、`E_RULESET`、`E_DYNAMIC_DEGRADE`、`E_LLM_TIMEOUT`、`E_LLM_FAIL`、`E_VALIDATE`、`E_PUBLISH`、`E_TELEMETRY`，告警规则只依赖错误码与事件名。
+
+#### 9.2.4 脱敏与最小留存
+
+- schema 中 `secret=True` 的字段由日志 sink 统一 redact（GitLab PAT、webhook secret、LLM PAT/password、钉钉 secret）；正则兜底 `Authorization`、`token`、`password`、`secret`、带凭据的 URL。
+- 不记录 prompt 正文、diff、源码、动态证据正文；只记录长度、哈希、规则键、文件数与命中数。
+- 异常只记录类型、message 与堆栈；`diagnose=False` 保证不输出局部变量；对可能内嵌凭据的 message 做二次脱敏。
+- `tests/security/` 增加脱敏用例：构造带 PAT/webhook/prompt 的异常与上下文，断言 text/json 两种输出均不含原文。
+
+#### 9.2.5 与 telemetry / metrics 的分工
+
+| 通道 | 职责 | 禁止 |
+|---|---|---|
+| 日志 | 因果链、排障、错误码 | 不落业务明细、不做统计口径 |
+| telemetry DB | 审计与业务事实（run、suggestion、adoption） | 不存 prompt/源码 |
+| metrics | 聚合计数与耗时，供告警/看板 | 不携带高基数标签（MR IID、路径） |
+
+- 不从日志解析看板数据；不为统计在日志里重复写 suggestion 行。
+- `run_id` 是日志与 telemetry 的唯一关联键；manifest 指纹是配置/规则/prompt/模型维度的关联键。
+
+#### 9.2.6 兼容与迁移
+
+- 首期保持 text 默认、`REVIEWAGENT_LOG_LEVEL` 语义不变；现有日志调用无需一次性重写，先补上下文与事件名，再逐步替换自由文本。
+- JSON 先以 opt-in 上线，经过一个发布周期后再评估是否默认开启；切换不改变审计数据。
+- 日志改造属于步骤 7（安全与可复现），与配置 schema 同批落地；不得为了日志格式改动检视输出或 prompt。
 
 ## 10. 测试策略
 
@@ -825,22 +1007,24 @@ config.from_env()
 4. **动态规则**：`scenario/dynamic.py`（加载/字段校验/未知 provider/重复或非法 `DYN-*`/语言过滤/模板缺失）；provider（rg 参数、排除项、限额、空结果、超时与工具缺失降级、单文件与批量结果一致）；`review/context.py` 渲染（空/非空两段与现网逐字节 golden）；门面回调（实例 patch 生效，且只以 `(files, diff_by_file, wt)` 调用）。
 5. **引擎层**：planner（过滤/打分/抽样/分批/增量复用符号判定）、context（三种 source 块 + 动态证据段）、assembly（golden prompt）、runner（合并/预算/动态证据分发）、validation（锚定/去重/键豁免）、python policy（`extract_symbols`/ast/密度/缩进/打分）。
 6. **集成**：ssd-python-autotest 端到端 fake-LLM 流程（fakeredis/mock provider）；RQ job 的 `profile` + `profile_fingerprint` 校验；周报链路 profile 化（标题/动作/扩展名/翻译，python 输出与现有快照一致）。
-7. **架构守卫**：AST 扫描 import 方向、语言字面量（含 `review/dynamic/**`）、规则命名空间（§7.5 三条边界）；每条守卫配负向 fixture，断言违规样本会被拦截。
+7. **架构守卫**：AST 扫描 import 方向、语言字面量（含 `review/dynamic/**`）、规则命名空间、配置边界（§7.5 四条边界）；每条守卫配负向 fixture，断言违规样本会被拦截。
 8. **探针场景**：`probe-scenario` 端到端 fake-LLM，证明第二场景零改共享代码接入（含一条最小动态规则）。
 9. **安全**：`tests/security/` 覆盖 worktree 逃逸（`..`、绝对路径、符号链接）、围栏提前闭合、控制字符、恶意注释注入样本、仓库规则来自默认分支（MR head 修改无效）、telemetry/日志不含 prompt 正文与源码。
 10. **质量基线**：选取 N 个历史 MR，用新旧装配各跑一次 fake/replay，对比建议数、严重度分布、规则命中；动态证据分别覆盖「有命中 / 无命中 / rg 失败降级」三种 prompt 形态。**发布门禁**：golden 100% 一致；规则 checksum 不变；高风险（severity=high）建议在标注集上零漏检；总建议数偏差 ≤10%；严重度分布偏差 ≤2 个百分点；超出阈值需人工签字并记录原因。
-11. C/C++ 测试随 C/C++ 实施一并新增。
+11. 配置：schema binder（默认值唯一、env 兼容映射、preset 一级继承、深度合并与 null/空值语义）、`config check/show`（来源标注与密钥脱敏）、未知字段/范围/跨字段不变量、`config_fingerprint` 稳定性、`WeeklyReportConfig` 兼容视图。
+12. 日志：text/json 双格式字段一致、上下文传播（`run_id`/`pipeline_id`）、`diagnose=False`、脱敏（PAT/webhook/prompt/源码）、事件名与错误码稳定、重复告警合并。
+13. C/C++ 测试随 C/C++ 实施一并新增。
 
 ## 11. 实施顺序（首期：Python 场景）
 
-1. `scenario/` 基础：profile 加载器 + prompts 加载器 + `ssd-python-autotest` 数据迁移（默认回退/env 覆盖，现有测试全绿）；
+1. 配置与场景基础：`settings/schema.py`（默认值唯一 + env 兼容映射 + `config check/show`）+ preset 机制 + `scenario/` profile/prompts 加载器 + `ssd-python-autotest` 最小 profile 与完整字段迁移（默认回退/env 覆盖，现有测试全绿）；
 2. 静态规则层：model/parser/resolver/render/keys/repo + 加载时命名空间校验 + `aliases/normalize_keys` + `repo_context.py` 兼容 re-export；
 3. `review/` 拆分 + 扩展缝：`types.py` / `policy.py` 协议 / `GenericPolicy` / `registry` + planner/context/assembly/runner + `policies/python.py`（`extract_symbols` / AST / 密度 / 缩进 / 打分 / 关键字全部迁入）+ improve 兼容门面（测试零改动全绿）；
 4. **动态规则分治**：`scenario/dynamic.py`（`dynamic_rules.yaml` 加载/校验）+ `review/dynamic/{model,registry,runner,providers/cross_file_refs}.py` + profile 动态模板；单文件/批量两条路径与现网逐字节等价，失败降级；
 5. validation + `suggestion_actions`：所有调用点改为注入 policy，校验/豁免/采纳判定完成去 Python 关键字；
 6. publishing 合并（键归一）+ 周报链路 profile 化（三个 weekly prompt、rule_translate、renderer、repo_scan、标题），python 输出不变；
-7. 安全与可复现：`review/manifest.py` 指纹 + 启动顺序/双进程校验 + worktree 约束 + 不可信内容规范化 + `tests/security/` 样本；默认配置下正常 prompt 不变；
-8. 解耦守卫：`tests/architecture/` 三条边界（含负向 fixture）+ `probe-scenario` 端到端 + prompt golden / 规则 checksum / 动态证据三态 golden / 历史 MR 回放基线；
+7. 安全与可复现：`review/manifest.py` 指纹 + 启动顺序/双进程校验 + worktree 约束 + 不可信内容规范化 + 日志治理（JSON opt-in、上下文、脱敏、`diagnose=False`）+ `tests/security/` 样本；默认配置下正常 prompt 不变；
+8. 解耦守卫：`tests/architecture/` 四条边界（含负向 fixture）+ `probe-scenario` 端到端 + prompt golden / 规则 checksum / 动态证据三态 golden / 历史 MR 回放基线；
 9. 部署与文档更新（`.env.example`、systemd、README、DEPLOYMENT.md、回滚 runbook）。
 
 每步独立可验收、可提交。首期稳定后，再按第 8 节新增 `cpp-generic-dev` 场景包与 `policies/cpp.py`；预期零改共享代码，若需新增能力按 §7.5 执行。
@@ -849,7 +1033,7 @@ config.from_env()
 
 > 以下为工程创新点的结构化梳理，便于后续做现有技术检索与专利评估，不构成法律意见。
 
-1. **场景包化的检视质量工程**：把「检视什么、怎么检视、输出什么」拆成部署级可切换的数据包（profile + prompts + 静态规则 + 动态规则 + 报告配置），引擎保持语言无关；同一语言可派生多个场景，检视效果成为可版本化、可回滚的数据资产。
+1. **场景包化的检视质量工程**：把「检视什么、怎么检视、输出什么」拆成部署级可切换的数据包（profile + prompts + 静态规则 + 动态规则 + 报告配置），引擎保持语言无关；同一语言可派生多个场景，检视效果成为可版本化、可回滚的数据资产。配置采用「单一 schema + preset 最小表面 + 来源可追溯」，使新增场景不必复制整份配置。
 2. **静态/动态双轨规则**：静态规则描述「查什么」（Markdown 规则包，启动期不可变 RuleSet），动态规则在请求期采集「依据什么上下文」（证据 provider，独立模型与降级语义），二者在 suggestion 校验/发布层收敛；动态证据不进入静态规则装配，避免生命周期与失败语义互相污染。
 3. **可证明的等价迁移**：`verbatim`/`structured` 双渲染 + 兼容门面 + prompt golden / 规则 checksum / 历史 MR 回放三重基线，使「重构不改检视行为」从口头承诺变成可执行、可审计的验收条件。
 4. **加性扩展的可验证性**：架构守卫（import 方向、语言字面量、规则命名空间）+ 探针场景 + 运行指纹 manifest，使「新增场景/语言只加数据与 policy」可被自动验证，而非依赖约定。
@@ -867,8 +1051,11 @@ config.from_env()
 | 外部工具缺失/超时 | 运行环境无 rg、仓库过大 | 动态证据缺失 | 降级为空证据 + fallback 文案 + 告警；不阻塞 MR |
 | 巨型 MR 参数超限 | 符号并集过大 | rg/子进程 E2BIG | `max_symbols_global` / `max_pattern_bytes` 分批，正常 MR 不触发 |
 | 顺序不确定 | set 迭代/哈希种子 | prompt 抖动、回放困难 | 冻结现有排序语义；golden 固定 `PYTHONHASHSEED`；manifest 指纹定位 |
-| 双进程部署漂移 | 只重启 API 或 worker | 行为不一致 | job 携带 `profile` + `profile_fingerprint`，不一致拒绝 |
+| 双进程部署漂移 | 只重启 API 或 worker | 行为不一致 | job 携带 `profile` + `profile_fingerprint` + `config_fingerprint`，不一致拒绝 |
 | 规则冲突 | 同键同优先级或命名空间混装 | 结果不可预期 | 启动期冲突裁决失败；共享包强制语言声明 |
 | 规则/模板误改 | 误删、拼写错误、版本不匹配 | 检视质量下降 | `schema_version`、未知字段拒绝、checksum、回放门禁 |
 | 场景数据混库 | 多场景共用一个 telemetry DB | 统计与周报串场景 | 一实例一库；manifest 记录 profile；不跨实例复用缓存 |
 | 模型漂移 | provider/模型版本变化 | 输出分布变化 | manifest 记录 model/provider；金标准回放对比后再放量 |
+| 配置源漂移 | env/profile/preset 同义字段不一致 | 行为难解释、回滚失效 | 单一 schema、来源标注、`config show --sources`、未知字段拒绝、合法上限取 `min` 并记录 |
+| 日志泄密 | 异常局部变量、带 token 的 URL、prompt 被写入日志 | 凭据或源码外泄 | `diagnose=False`、schema 驱动脱敏、禁止正文、`tests/security/` 泄漏样本 |
+| 日志噪声/成本 | 每文件 INFO、MR 风暴、重复告警 | 磁盘与排障成本上升 | 事件聚合、级别口径、窗口合并、轮转/保留可配 |
