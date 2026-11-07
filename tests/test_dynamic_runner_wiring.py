@@ -100,8 +100,9 @@ def _ctx(tmp_path, *, dynamic_rules, callbacks=None, **callback_overrides) -> Ru
         cfg=cfg,
         profile=SimpleNamespace(
             name="test-profile", language="fake", scoring={}, rule_keys={},
+            fingerprint="profile-fp",
         ),
-        rule_set=SimpleNamespace(verbatim_body=""),
+        rule_set=SimpleNamespace(verbatim_body="", fingerprint="ruleset-fp"),
         dynamic_rules=dynamic_rules,
         policy=SimpleNamespace(
             score_suggestion=lambda s: 100,

@@ -132,6 +132,8 @@ CREATE TABLE IF NOT EXISTS reviewed_file_state (
     blob_sha        TEXT,                  -- 文件内容指纹 (sha1 of raw bytes at head); NULL=未知
     head_sha        TEXT,                   -- 记录时的 MR head_sha
     suggestion_count INTEGER DEFAULT 0,    -- 该文件本轮产出的建议数 (0=无建议也记录, 避免重检空跑)
+    profile_fingerprint TEXT,              -- 记录时的 profile 指纹; NULL=未知 (旧库/旧行)
+    ruleset_fingerprint TEXT,              -- 记录时的 RuleSet 指纹; NULL=未知 (旧库/旧行)
     reviewed_at     TIMESTAMP NOT NULL,
     PRIMARY KEY (project_id, mr_iid, file_path)
 );
@@ -228,6 +230,21 @@ class Store:
             action_columns = {row[1] for row in conn.execute("PRAGMA table_info(suggestion_actions)")}
             if "adoption_source" not in action_columns:
                 conn.execute("ALTER TABLE suggestion_actions ADD COLUMN adoption_source TEXT")
+            # reviewed_file_state: Task 15 增量复用需感知 profile / RuleSet 变化.
+            # 旧库缺列 → NULL（"未知 → 不因指纹拒绝复用"），升级后首次写入补全.
+            file_state_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(reviewed_file_state)")
+            }
+            for column, sql in {
+                "profile_fingerprint": (
+                    "ALTER TABLE reviewed_file_state ADD COLUMN profile_fingerprint TEXT"
+                ),
+                "ruleset_fingerprint": (
+                    "ALTER TABLE reviewed_file_state ADD COLUMN ruleset_fingerprint TEXT"
+                ),
+            }.items():
+                if column not in file_state_columns:
+                    conn.execute(sql)
             conn.execute(
                 """
                 UPDATE suggestion_actions
@@ -1304,36 +1321,45 @@ class Store:
     def upsert_file_review_state(
         self, *, project_id: int, mr_iid: int, file_path: str,
         blob_sha: str | None, head_sha: str | None, suggestion_count: int = 0,
+        profile_fingerprint: str | None = None,
+        ruleset_fingerprint: str | None = None,
     ) -> None:
-        """V9 增量复用: 记录某文件本轮被检视时的内容指纹 + head_sha.
+        """V9 增量复用: 记录某文件本轮被检视时的内容指纹 + head_sha + 场景指纹.
 
         每个文件每轮 UPSERT 一行 (主键 project_id+mr_iid+file_path).
-        即使本轮 0 建议也记录 (避免下一轮对"上次没产出建议"的文件重跑 LLM).
+        即使本轮 0 建议也记录 (避免下一轮对"上次没产出建议"的文件重跑 LLM)。
+        场景指纹让 planner 在 profile / RuleSet 变化时失效复用。
         """
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO reviewed_file_state
-                    (project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count, reviewed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count,
+                     profile_fingerprint, ruleset_fingerprint, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id, mr_iid, file_path) DO UPDATE SET
                     blob_sha=excluded.blob_sha,
                     head_sha=excluded.head_sha,
                     suggestion_count=excluded.suggestion_count,
+                    profile_fingerprint=excluded.profile_fingerprint,
+                    ruleset_fingerprint=excluded.ruleset_fingerprint,
                     reviewed_at=excluded.reviewed_at
                 """,
                 (project_id, mr_iid, file_path, blob_sha, head_sha,
-                 suggestion_count, _fmt_dt(_utcnow())),
+                 suggestion_count, profile_fingerprint, ruleset_fingerprint,
+                 _fmt_dt(_utcnow())),
             )
 
     def get_file_review_states(self, project_id: int, mr_iid: int) -> dict[str, dict[str, str | None]]:
-        """V9: 返回 {file_path: {blob_sha, head_sha, suggestion_count}} — 每文件上次检视状态.
+        """V9: 返回 {file_path: {blob_sha, head_sha, suggestion_count, 指纹...}} — 每文件上次检视状态.
 
         复用决策: 当前文件 blob == 上次 blob → 内容未变 → 复用 (跨文件影响检测后).
+        `profile_fingerprint` / `ruleset_fingerprint` 为 NULL 表示旧行未知 → 不因指纹拒绝复用.
         """
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT file_path, blob_sha, head_sha, suggestion_count "
+                "SELECT file_path, blob_sha, head_sha, suggestion_count, "
+                "profile_fingerprint, ruleset_fingerprint "
                 "FROM reviewed_file_state WHERE project_id=? AND mr_iid=?",
                 (project_id, mr_iid),
             ).fetchall()
@@ -1342,6 +1368,8 @@ class Store:
                 "blob_sha": row["blob_sha"],
                 "head_sha": row["head_sha"],
                 "suggestion_count": row["suggestion_count"] or 0,
+                "profile_fingerprint": row["profile_fingerprint"],
+                "ruleset_fingerprint": row["ruleset_fingerprint"],
             }
             for row in rows
         }

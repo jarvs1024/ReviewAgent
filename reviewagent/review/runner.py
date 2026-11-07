@@ -113,6 +113,8 @@ def _upsert_file_review_states(
                 project_id=ctx.project_id, mr_iid=ctx.mr_iid,
                 file_path=fp, blob_sha=ctx.callbacks.blob_sha(fp, ctx.ws),
                 head_sha=head_sha, suggestion_count=per_file_counts.get(fp, 0),
+                profile_fingerprint=ctx.profile.fingerprint,
+                ruleset_fingerprint=ctx.rule_set.fingerprint,
             )
     except Exception as e:
         logger.warning("improve.upsert_file_state_failed (non-fatal): {}", e)
@@ -157,8 +159,8 @@ def run(ctx: RunContext) -> dict[str, Any]:
         head_sha=publish_head_sha,
         blob_sha=lambda fp: callbacks.blob_sha(fp, ctx.ws),
         rule_block_bytes=rule_block_bytes,
-        profile_fingerprint=None,
-        ruleset_fingerprint=None,
+        profile_fingerprint=ctx.profile.fingerprint,
+        ruleset_fingerprint=ctx.rule_set.fingerprint,
         new_files=new_files,
         overflow_set=ctx.overflow_files,
         line_map=line_map,

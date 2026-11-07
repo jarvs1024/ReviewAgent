@@ -14,6 +14,7 @@ provider 注册与执行骨架在 `review/dynamic/`。
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -70,11 +71,13 @@ class DynamicRuleSet:
         return replace(self, rules=merged, fingerprint=f"{self.fingerprint}:{rule.key}")
 
 
-def _read_mapping(path: Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+def _read_mapping(path: Path) -> tuple[dict[str, Any], bytes]:
+    """读取并解析 dynamic_rules（原始字节一并返回，供内容指纹使用）."""
+    raw = path.read_bytes()
+    data = yaml.safe_load(raw.decode("utf-8"))
     if not isinstance(data, dict) or data.get("schema_version") != _SCHEMA_VERSION:
         raise ValueError(f"unsupported dynamic_rules schema in {path}")
-    return data
+    return data, raw
 
 
 def _template_path(raw: Any, field_name: str, root: Path) -> str | None:
@@ -134,7 +137,7 @@ def load_dynamic_rules(profile) -> DynamicRuleSet:
     path = (root / str(rel)).resolve()
     if root not in path.parents:
         raise ValueError(f"dynamic_rules escapes profile root: {rel}")
-    data = _read_mapping(path)
+    data, raw = _read_mapping(path)
     unknown = set(data) - _ALLOWED_TOP
     if unknown:
         raise ValueError(f"unknown dynamic_rules fields {sorted(unknown)}")
@@ -142,5 +145,7 @@ def load_dynamic_rules(profile) -> DynamicRuleSet:
     if not isinstance(raw_rules, list):
         raise ValueError(f"dynamic_rules field rules must be a list: {path}")
     seen: set[str] = set()
-    rules = tuple(_parse_rule(raw, seen, root) for raw in raw_rules)
-    return DynamicRuleSet(rules=rules, fingerprint=str(path.stat().st_mtime_ns))
+    rules = tuple(_parse_rule(item, seen, root) for item in raw_rules)
+    # 内容指纹（不是 mtime）：相同内容 → 相同指纹，与文件修改时间无关.
+    fingerprint = hashlib.sha256(raw).hexdigest()[:12]
+    return DynamicRuleSet(rules=rules, fingerprint=fingerprint)

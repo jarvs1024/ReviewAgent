@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -114,9 +116,20 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
     }
     assert rule.limits == {"max_files": 60}
     assert declared_ruleset.fingerprint
-    assert str((base_profile.root / "dynamic_rules.yaml").stat().st_mtime_ns) == (
-        declared_ruleset.fingerprint
-    )
+    # R5: 指纹是内容摘要（sha256 前 12 位），不是 mtime.
+    raw = (base_profile.root / "dynamic_rules.yaml").read_bytes()
+    assert declared_ruleset.fingerprint == hashlib.sha256(raw).hexdigest()[:12]
+    assert re.fullmatch(r"[0-9a-f]{12}", declared_ruleset.fingerprint) is not None
+
+
+def test_fingerprint_is_content_hash_not_mtime(tmp_path, base_profile):
+    """相同内容写在不同文件（不同 mtime）→ 同一指纹."""
+    payload = {"schema_version": 1, "rules": [_one_rule()]}
+    first = _ruleset(tmp_path, base_profile, payload, rel="a.yaml")
+    second = _ruleset(tmp_path, base_profile, payload, rel="b.yaml")
+
+    assert first.fingerprint == second.fingerprint
+    assert re.fullmatch(r"[0-9a-f]{12}", first.fingerprint) is not None
 
 
 def test_missing_dynamic_rules_file_fails(base_profile: Profile):

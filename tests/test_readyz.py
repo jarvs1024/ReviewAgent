@@ -1,0 +1,146 @@
+"""Task 15: `/readyz` 端点与 SQLite / Redis 运行时探针."""
+from __future__ import annotations
+
+import pytest
+import redis
+from fastapi.testclient import TestClient
+
+from reviewagent import bootstrap
+from reviewagent import main as main_module
+
+
+@pytest.fixture
+def client() -> TestClient:
+    # 不进入 `with` → 不触发 lifespan，避免依赖真实 profile / data_dir / Redis.
+    return TestClient(main_module.app)
+
+
+# ---------------------------------------------------------------------------
+# /readyz
+# ---------------------------------------------------------------------------
+
+
+def test_readyz_returns_ok_when_runtime_ready(client, monkeypatch):
+    monkeypatch.setattr(
+        main_module.bootstrap, "runtime_readiness", lambda: (True, [])
+    )
+
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_readyz_returns_503_with_reasons_when_unready(client, monkeypatch):
+    monkeypatch.setattr(
+        main_module.bootstrap,
+        "runtime_readiness",
+        lambda: (False, ["sqlite: boom", "redis: boom"]),
+    )
+
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "status": "unready",
+        "reasons": ["sqlite: boom", "redis: boom"],
+    }
+
+
+def test_root_endpoint_mentions_readyz(client):
+    body = client.get("/").json()
+    assert body["endpoints"].get("readyz") == "GET /readyz"
+
+
+# ---------------------------------------------------------------------------
+# SQLite 探针
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_probe_passes_with_working_store(tmp_path, monkeypatch):
+    from reviewagent.telemetry import store as store_module
+
+    monkeypatch.setattr(store_module, "_store", store_module.Store(tmp_path / "probe.db"))
+
+    assert bootstrap._check_sqlite() == []
+
+
+def test_sqlite_probe_reports_failure(monkeypatch):
+    from reviewagent.telemetry import store as store_module
+
+    def boom():
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(store_module, "get_store", boom)
+
+    reasons = bootstrap._check_sqlite()
+    assert len(reasons) == 1
+    assert reasons[0].startswith("sqlite:")
+    assert "db unavailable" in reasons[0]
+
+
+# ---------------------------------------------------------------------------
+# Redis 探针
+# ---------------------------------------------------------------------------
+
+
+def test_redis_probe_passes_with_fake_client(monkeypatch):
+    calls: list[dict] = []
+
+    class _FakeRedis:
+        def ping(self):
+            return True
+
+    def from_url(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _FakeRedis()
+
+    monkeypatch.setattr(redis.Redis, "from_url", from_url)
+
+    assert bootstrap._check_redis() == []
+    assert calls and calls[0]["socket_connect_timeout"] == 1
+    assert calls[0]["socket_timeout"] == 1
+
+
+def test_redis_probe_reports_failure(monkeypatch):
+    def from_url(_url, **_kwargs):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis.Redis, "from_url", from_url)
+
+    reasons = bootstrap._check_redis()
+    assert len(reasons) == 1
+    assert reasons[0].startswith("redis:")
+    assert "redis down" in reasons[0]
+
+
+# ---------------------------------------------------------------------------
+# runtime_readiness 组合
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_readiness_ok(monkeypatch):
+    monkeypatch.setattr(bootstrap, "readiness", lambda: (True, []))
+    monkeypatch.setattr(bootstrap, "_check_sqlite", lambda: [])
+    monkeypatch.setattr(bootstrap, "_check_redis", lambda: [])
+
+    assert bootstrap.runtime_readiness() == (True, [])
+
+
+def test_runtime_readiness_includes_sqlite_and_redis_reasons(monkeypatch):
+    monkeypatch.setattr(bootstrap, "readiness", lambda: (True, []))
+    monkeypatch.setattr(bootstrap, "_check_sqlite", lambda: ["sqlite: boom"])
+    monkeypatch.setattr(bootstrap, "_check_redis", lambda: ["redis: boom"])
+
+    ok, reasons = bootstrap.runtime_readiness()
+    assert ok is False
+    assert any(reason.startswith("sqlite:") for reason in reasons)
+    assert any(reason.startswith("redis:") for reason in reasons)
+
+
+def test_runtime_readiness_keeps_base_reasons(monkeypatch):
+    monkeypatch.setattr(bootstrap, "readiness", lambda: (False, ["profile not initialized"]))
+
+    ok, reasons = bootstrap.runtime_readiness()
+    assert ok is False
+    assert "profile not initialized" in reasons

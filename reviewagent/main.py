@@ -8,7 +8,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from reviewagent import bootstrap
 from reviewagent.api.router import router as telemetry_router
@@ -88,6 +88,15 @@ async def metrics_endpoint() -> Response:
     )
 
 
+@app.get("/readyz", tags=["meta"])
+async def readyz() -> JSONResponse:
+    """运行时就绪探针：profile/RuleSet/instance + SQLite + Redis 全部通过才 200."""
+    ok, reasons = bootstrap.runtime_readiness()
+    if ok:
+        return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "unready", "reasons": reasons}, status_code=503)
+
+
 @app.get("/", tags=["meta"])
 async def root() -> dict:
     return {
@@ -96,6 +105,7 @@ async def root() -> dict:
         "endpoints": {
             "webhook": "POST /webhook",
             "health": "GET /health",
+            "readyz": "GET /readyz",
             "docs": "GET /docs",
         },
     }

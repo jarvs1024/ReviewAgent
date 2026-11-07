@@ -20,6 +20,7 @@ from rq import Queue, Retry
 
 from reviewagent.config import config
 from reviewagent.logging_setup import logger, setup_logging
+from reviewagent.review.manifest import manifest_for_active, verify_job
 from reviewagent.telemetry.store import get_store
 from reviewagent.webhook.locks import locks
 
@@ -53,6 +54,27 @@ def get_weekly_queue() -> Queue:
 
 
 # ---------- 入队辅助（按命令） ----------
+def _manifest_kwargs() -> dict[str, str]:
+    """计算入队 manifest 的扁平指纹字段（RQ job 函数只接受扁平 kwargs）."""
+    manifest = manifest_for_active(
+        cfg=config,
+        # 与 commands/_common.py 的模型选择保持一致
+        model=(
+            config.qodercli_model
+            if config.llm_provider == "qodercli"
+            else config.opencode_model
+        ),
+        provider=config.llm_provider,
+    )
+    return {
+        "profile": manifest["profile"],
+        "profile_fingerprint": manifest["profile_fingerprint"],
+        "config_fingerprint": manifest["config_fingerprint"],
+        "ruleset_fingerprint": manifest["ruleset_fingerprint"],
+        "dynamic_rules_fingerprint": manifest["dynamic_rules_fingerprint"],
+    }
+
+
 def _enqueue(
     command: str,
     *,
@@ -61,7 +83,7 @@ def _enqueue(
     triggered_by: str,
     actor_username: str,
 ) -> str:
-    """内部 — 把命令对应的 rq 函数入队 (含重试)."""
+    """内部 — 把命令对应的 rq 函数入队 (含重试 + 运行指纹)."""
     q = get_queue()
     job = q.enqueue(
         f"reviewagent.workers.tasks.run_{command}",
@@ -69,6 +91,7 @@ def _enqueue(
         mr_iid=mr_iid,
         triggered_by=triggered_by,
         actor_username=actor_username,
+        **_manifest_kwargs(),
         job_timeout=config.rq_worker_timeout,
         result_ttl=3600,
         failure_ttl=86400,
@@ -238,6 +261,7 @@ def enqueue_mr_chain(
         mr_iid=mr_iid,
         triggered_by=triggered_by,
         actor_username=actor_username,
+        **_manifest_kwargs(),
         # 并行后 timeout 不再乘以命令数 — 取最慢命令 + 300s buffer + 600s 等锁余量
         job_timeout=config.rq_worker_timeout + 300 + 600,
         result_ttl=3600,
@@ -278,8 +302,25 @@ def _run_command(
     mr_iid: int,
     triggered_by: str,
     actor_username: str,
+    profile: str = "",
+    profile_fingerprint: str = "",
+    config_fingerprint: str = "",
+    ruleset_fingerprint: str = "",
+    dynamic_rules_fingerprint: str = "",
 ) -> dict[str, Any]:
-    """共用的 RQ job 体，按 command 字符串 import + invoke."""
+    """共用的 RQ job 体，按 command 字符串 import + invoke.
+
+    运行指纹校验必须在任何 store 读写 / 命令 import 之前：入队与执行环境
+    （profile / 规则 / 配置）不一致时 job 直接失败，不做半截动作。缺字段的
+    老 job（滚动升级）只记 WARNING 后继续。
+    """
+    verify_job({
+        "profile": profile,
+        "profile_fingerprint": profile_fingerprint,
+        "config_fingerprint": config_fingerprint,
+        "ruleset_fingerprint": ruleset_fingerprint,
+        "dynamic_rules_fingerprint": dynamic_rules_fingerprint,
+    })
     # 兜底: 清理全局超时孤儿 running (精确 per-MR sweep 在 run_mr_chain 锁后已处理主路径).
     # 用时间阈值 (rq_worker_timeout + buffer) 兜底单命令/无锁场景, 不会误清刚启动的 run.
     try:
@@ -375,6 +416,11 @@ def run_mr_chain(
     mr_iid: int,
     triggered_by: str,
     actor_username: str,
+    profile: str = "",
+    profile_fingerprint: str = "",
+    config_fingerprint: str = "",
+    ruleset_fingerprint: str = "",
+    dynamic_rules_fingerprint: str = "",
 ) -> list[dict[str, Any]]:
     """执行命令链 — 多命令并行 (describe + improve 无数据依赖), 单命令直接跑.
 
@@ -397,6 +443,13 @@ def run_mr_chain(
     # 阻塞锁: 等到拿到锁才执行. blocking_timeout=300 (5 分钟) 兜底防 worker 卡死.
     # 不同 MR 并行: 锁 key 包含 project_id + mr_iid, 互不阻塞.
     # redis-py 8.x 签名: acquire(blocking=True, blocking_timeout=...)
+    manifest_kwargs = dict(
+        profile=profile,
+        profile_fingerprint=profile_fingerprint,
+        config_fingerprint=config_fingerprint,
+        ruleset_fingerprint=ruleset_fingerprint,
+        dynamic_rules_fingerprint=dynamic_rules_fingerprint,
+    )
     lock = locks.get_lock(project_id, mr_iid)
     if not lock.acquire(blocking=True, blocking_timeout=300):
         logger.warning(
@@ -429,6 +482,7 @@ def run_mr_chain(
                     mr_iid=mr_iid,
                     triggered_by=triggered_by,
                     actor_username=actor_username,
+                    **manifest_kwargs,
                 )
                 return [{"command": cmd, "status": "success", "result": result}]
             except Exception as e:
@@ -450,6 +504,7 @@ def run_mr_chain(
                     mr_iid=mr_iid,
                     triggered_by=triggered_by,
                     actor_username=actor_username,
+                    **manifest_kwargs,
                 ): cmd
                 for cmd in commands
             }

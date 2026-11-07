@@ -52,8 +52,11 @@ def _ctx(tmp_path: Path, *, diff_line_map, cfg=None, **callback_overrides) -> Ru
         ws=SimpleNamespace(worktree=tmp_path, diff_file=diff_file),
         repo_context="",
         cfg=cfg or dataclasses.replace(current(), review_exclude_extensions=()),
-        profile=SimpleNamespace(name="test-profile", language="fake", scoring={}, rule_keys={}),
-        rule_set=SimpleNamespace(verbatim_body=""),
+        profile=SimpleNamespace(
+            name="test-profile", language="fake", scoring={}, rule_keys={},
+            fingerprint="profile-fp",
+        ),
+        rule_set=SimpleNamespace(verbatim_body="", fingerprint="ruleset-fp"),
         dynamic_rules=None,
         policy=SimpleNamespace(),
         callbacks=_callbacks(diff_line_map=diff_line_map, **callback_overrides),

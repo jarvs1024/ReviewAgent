@@ -107,3 +107,80 @@ def test_worker_launchers_do_not_inherit_terminal_stdin(script):
     content = (ROOT / script).read_text(encoding="utf-8")
 
     assert content.count("</dev/null") >= 2
+
+
+# ---------------------------------------------------------------------------
+# Task 15: RQ job manifest 校验必须先于任何 store / 命令动作
+# ---------------------------------------------------------------------------
+
+
+def test_run_command_rejects_mismatched_manifest_before_command(monkeypatch):
+    """manifest 指纹不一致 → 校验阶段即失败，命令 run() 不会被调用."""
+    import reviewagent.commands.improve as improve_module
+    from reviewagent.workers import tasks
+
+    touched: list[str] = []
+
+    def fake_get_store():
+        touched.append("store")
+        raise AssertionError("store must not be touched before manifest verification")
+
+    monkeypatch.setattr(tasks, "get_store", fake_get_store)
+
+    class _SentinelCommand:
+        def __init__(self, **_kwargs):
+            touched.append("command")
+
+        def run(self):
+            touched.append("run")
+            return {}
+
+    monkeypatch.setattr(improve_module, "ImproveCommand", _SentinelCommand)
+
+    with pytest.raises(RuntimeError, match="job.profile_mismatch"):
+        tasks._run_command(
+            "improve",
+            project_id=1,
+            mr_iid=2,
+            triggered_by="webhook",
+            actor_username="tester",
+            profile="not-the-active-profile",
+            profile_fingerprint="deadbeef",
+            config_fingerprint="deadbeef",
+        )
+
+    assert touched == []
+
+
+def test_run_command_without_manifest_still_runs(monkeypatch):
+    """滚动升级: 老 payload（无指纹字段）→ 只 WARNING，命令照常执行."""
+    import reviewagent.commands.improve as improve_module
+    from reviewagent.workers import tasks
+
+    called: list[str] = []
+
+    class _FakeStore:
+        def sweep_orphaned_runs(self, **_kwargs):
+            called.append("sweep")
+
+    class _FakeCommand:
+        def __init__(self, **_kwargs):
+            called.append("init")
+
+        def run(self):
+            called.append("run")
+            return {"ok": True}
+
+    monkeypatch.setattr(tasks, "get_store", lambda: _FakeStore())
+    monkeypatch.setattr(improve_module, "ImproveCommand", _FakeCommand)
+
+    result = tasks._run_command(
+        "improve",
+        project_id=1,
+        mr_iid=2,
+        triggered_by="webhook",
+        actor_username="tester",
+    )
+
+    assert result == {"ok": True}
+    assert called == ["sweep", "init", "run"]

@@ -10,18 +10,23 @@ API（`reviewagent.main` lifespan）与 worker（`ReviewAgentSpawnWorker.bootstr
    同一 data_dir 换 profile 直接失败（跨场景数据隔离）；
 4. 装配基础 RuleSet（`assemble_base(profile)`）并设为激活规则集；
    `BootstrapResult.rule_set` 携带该快照，`bootstrap.ready` 记录其指纹；
-5. 一条 `config.resolved` + 一条 `bootstrap.ready` 日志（含 profile 与
-   config fingerprint）；显式出现的场景 env 追加一条 `config.compat_env`。
+5. 注册动态 provider 工厂、加载动态规则（模板缺失/越界即启动失败），并对
+   **每条**规则（含 disabled）校验 provider 已注册，未知 provider 直接
+   `ValueError`（运行期不静默降级）；
+6. 一条 `config.resolved` + 一条 `bootstrap.ready` 日志（含 profile /
+   config / 规则 / 动态规则指纹）；显式出现的场景 env 追加一条
+   `config.compat_env`。
 
-`readiness()` 返回 `(ok, reasons)`：本任务只校验 profile 已激活、data_dir 已
-绑定、config 可解析；SQLite / Redis 探针留待 Task 15 通过
-`register_readiness_check()` 追加（钩子可替换，本任务不连网、不建表）。
+`readiness()` 返回 `(ok, reasons)`：只校验 profile 已激活、data_dir 已绑定、
+config 可解析（不连网、不建表）。`runtime_readiness()` 在其之后追加 SQLite /
+Redis 探针，供 `/readyz` 使用（探针失败只返回原因，不抛错）。
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from reviewagent.config import current
 from reviewagent.logging_setup import logger, setup_logging
@@ -53,6 +58,8 @@ class BootstrapResult:
     kind: str = ""
     config_fingerprint: str = ""
     rule_set: RuleSet | None = None
+    dynamic_rules: Any = None
+    dynamic_rules_fingerprint: str = ""
 
 
 # ---------------- readiness ----------------
@@ -125,6 +132,47 @@ def readiness() -> tuple[bool, list[str]]:
     return (not reasons, reasons)
 
 
+# ---------------- runtime readiness (SQLite / Redis) ----------------
+
+
+def _check_sqlite() -> list[str]:
+    """SQLite 探针：取 store 并在真实连接上执行 `SELECT 1`."""
+    try:
+        from reviewagent.telemetry.store import get_store
+
+        store = get_store()
+        with store._conn() as conn:
+            conn.execute("SELECT 1").fetchone()
+    except Exception as exc:  # noqa: BLE001 — 探针失败即原因
+        return [f"sqlite: {type(exc).__name__}: {exc}"]
+    return []
+
+
+def _check_redis() -> list[str]:
+    """Redis 探针：新建短超时连接 ping，绝不触碰 `get_redis()` 共享单例."""
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            current().redis_url,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
+        client.ping()
+    except Exception as exc:  # noqa: BLE001 — 探针失败即原因
+        return [f"redis: {type(exc).__name__}: {exc}"]
+    return []
+
+
+def runtime_readiness() -> tuple[bool, list[str]]:
+    """`readiness()` + SQLite / Redis 探针；任一失败即未就绪（附原因）."""
+    ok, reasons = readiness()
+    reasons = list(reasons)
+    reasons.extend(_check_sqlite())
+    reasons.extend(_check_redis())
+    return (not reasons, reasons)
+
+
 # ---------------- startup ----------------
 
 _state: BootstrapResult | None = None
@@ -145,6 +193,21 @@ def startup(kind: str) -> BootstrapResult:
     bind_instance(profile, data_dir)
     rule_set = assemble_base(profile)
     set_active_rule_set(rule_set)
+
+    # 动态规则：先注册 provider 工厂（导入即注册），再加载规则（模板缺失 /
+    # 越界即失败），最后对每条规则（含 disabled）校验 provider 已注册 ——
+    # 配置错误必须启动即暴露，不在运行期静默降级。
+    import reviewagent.review.dynamic.providers  # noqa: F401  注册工厂
+    from reviewagent.review.dynamic.registry import get as get_provider
+    from reviewagent.scenario.dynamic import load_dynamic_rules
+
+    dynamic_rules = load_dynamic_rules(profile)
+    for rule in dynamic_rules.rules:
+        try:
+            get_provider(rule.provider, fetch_callback=None)
+        except KeyError as exc:
+            raise ValueError(f"unknown dynamic provider: {rule.provider}") from exc
+
     values = {spec.name: getattr(current(), spec.name) for spec in SCHEMA}
     result = BootstrapResult(
         profile.name,
@@ -153,6 +216,8 @@ def startup(kind: str) -> BootstrapResult:
         config_fingerprint=config_fingerprint(values),
         data_dir=data_dir,
         rule_set=rule_set,
+        dynamic_rules=dynamic_rules,
+        dynamic_rules_fingerprint=dynamic_rules.fingerprint,
     )
     logger.info(
         "config.resolved kind={} profile={} profile_fingerprint={} config_fingerprint={}",
@@ -166,12 +231,13 @@ def startup(kind: str) -> BootstrapResult:
         logger.info("config.compat_env keys={}", compat)
     logger.info(
         "bootstrap.ready kind={} profile={} profile_fingerprint={} config_fingerprint={} "
-        "rule_fingerprint={} data_dir={}",
+        "rule_fingerprint={} dynamic_fingerprint={} data_dir={}",
         kind,
         profile.name,
         profile.fingerprint,
         result.config_fingerprint,
         rule_set.fingerprint,
+        dynamic_rules.fingerprint,
         data_dir,
     )
     _state = result
