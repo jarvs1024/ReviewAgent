@@ -157,6 +157,7 @@ def enqueue_suggestion_action(
         reason=reason,
         file_path=file_path,
         target_line=target_line,
+        **_manifest_kwargs(),
         job_timeout=120,
         result_ttl=3600,
         failure_ttl=86400,
@@ -187,6 +188,7 @@ def enqueue_weekly_report(
         output_dir=output_dir,
         push=push,
         project_id=project_id,
+        **_manifest_kwargs(),
         job_timeout=config.rq_worker_timeout * 2,  # 含两次 LLM 调用
         result_ttl=3600,
         failure_ttl=86400,
@@ -205,12 +207,27 @@ def run_weekly_report_job(
     output_dir: str | None = None,
     push: bool = False,
     project_id: int | None = None,
+    profile: str = "",
+    profile_fingerprint: str = "",
+    config_fingerprint: str = "",
+    ruleset_fingerprint: str = "",
+    dynamic_rules_fingerprint: str = "",
 ) -> dict[str, Any]:
     """RQ job 体 — 在 worker 内跑整份周报 (含 opencode LLM 调用).
 
     不直接 pickle WeeklyReportConfig, 而是按 env 重建 (与 improve worker 一致),
     支持可选的 project_id 覆盖.
+
+    运行指纹校验必须最先执行（先于 reporting 模块 import / 任何副作用）：
+    周报只读当前 data_dir 的 telemetry，场景错配时不能混入其他 profile 的历史.
     """
+    _verify_job_manifest(
+        profile=profile,
+        profile_fingerprint=profile_fingerprint,
+        config_fingerprint=config_fingerprint,
+        ruleset_fingerprint=ruleset_fingerprint,
+        dynamic_rules_fingerprint=dynamic_rules_fingerprint,
+    )
     from pathlib import Path
 
     from reviewagent.reporting.config import WeeklyReportConfig
@@ -428,13 +445,28 @@ def run_suggestion_action(
     file_path: str = "",
     target_line: int = 0,
     policy: Any = None,
+    profile: str = "",
+    profile_fingerprint: str = "",
+    config_fingerprint: str = "",
+    ruleset_fingerprint: str = "",
+    dynamic_rules_fingerprint: str = "",
 ) -> dict[str, Any]:
     """处理 /adopt 或 /dismiss — 不调用 opencode, 直接 resolve discussion + record telemetry.
 
     file_path / target_line 透传给 process_*, 让其在 note_id 查不到时降级到
     file:line 兜底 (Fix C). `policy`（可选）仅透传给 /adopt 的采纳判定
     （多语言关键字注入），/dismiss 不消费关键字.
+
+    运行指纹校验必须最先执行（先于任何 store / GitLab 副作用）：入队与执行
+    环境的 profile / 规则 / 配置不一致时 job 直接失败，不做半截动作.
     """
+    _verify_job_manifest(
+        profile=profile,
+        profile_fingerprint=profile_fingerprint,
+        config_fingerprint=config_fingerprint,
+        ruleset_fingerprint=ruleset_fingerprint,
+        dynamic_rules_fingerprint=dynamic_rules_fingerprint,
+    )
     from reviewagent.commands.suggestion_actions import process_adopt, process_dismiss
     logger.info(
         "worker.run_suggestion_action action={} project={} mr={} discussion={} actor={} file={} line={}",
