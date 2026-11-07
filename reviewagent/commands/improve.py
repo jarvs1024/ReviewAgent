@@ -229,6 +229,7 @@ class ImproveCommand(BaseCommand):
                 set_token_summary=lambda p, c, m, cost: setattr(
                     self, "_last_oc_result", type(self)._make_token_summary(p, c, m, cost),
                 ),
+                budget_fn=self._full_source_budget_bytes,
             ),
             overflow_files=overflow_files,
         )

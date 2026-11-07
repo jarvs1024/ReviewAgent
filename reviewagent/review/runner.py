@@ -15,7 +15,6 @@ from typing import Any
 from reviewagent.logging_setup import logger
 from reviewagent.review.planner import (
     Plan,
-    full_source_budget_bytes,
     group_files_for_batching,
 )
 from reviewagent.review.planner import (
@@ -43,6 +42,7 @@ class Callbacks:
     build_user_prompt: Callable[[], str]
     super_call_agent: Callable[[Any], dict]
     set_token_summary: Callable[[int, int, str, float], None]
+    budget_fn: Callable[[int], int]
 
 
 @dataclass
@@ -128,22 +128,18 @@ def run(ctx: RunContext) -> dict[str, Any]:
     except Exception:
         rule_block_bytes = 0
 
-    publish_head_sha = callbacks.head_sha() or ""
+    publish_head_sha = ""
     file_states: dict[str, dict] = {}
-    if publish_head_sha:
-        from reviewagent.telemetry.store import get_store
+    if line_map:
+        publish_head_sha = callbacks.head_sha() or ""
+        if publish_head_sha:
+            from reviewagent.telemetry.store import get_store
 
-        try:
-            file_states = get_store().get_file_review_states(ctx.project_id, ctx.mr_iid)
-        except Exception as e:
-            logger.warning("improve.incremental_lookup_failed (non-fatal, full review): {}", e)
-            file_states = {}
-
-    def _budget(diff_lines: int) -> int:
-        return full_source_budget_bytes(
-            diff_lines, cfg=ctx.cfg, rule_bytes=rule_block_bytes,
-            repo_context=ctx.repo_context,
-        )
+            try:
+                file_states = get_store().get_file_review_states(ctx.project_id, ctx.mr_iid)
+            except Exception as e:
+                logger.warning("improve.incremental_lookup_failed (non-fatal, full review): {}", e)
+                file_states = {}
 
     planned: Plan = plan_files(
         files,
@@ -162,7 +158,7 @@ def run(ctx: RunContext) -> dict[str, Any]:
         new_files=new_files,
         overflow_set=ctx.overflow_files,
         line_map=line_map,
-        budget_fn=_budget,
+        budget_fn=callbacks.budget_fn,
         repo_context=ctx.repo_context,
         project_id=ctx.project_id,
         mr_iid=ctx.mr_iid,
@@ -209,7 +205,7 @@ def run(ctx: RunContext) -> dict[str, Any]:
             "improve.full_source_budget_downgrade project={} mr={} file={} "
             "file_bytes={} est_source_bytes={} budget={} -> strategy path (single-file)",
             ctx.project_id, ctx.mr_iid, fp, file_bytes,
-            file_bytes + file_lines * 7, _budget(diff_lines),
+            file_bytes + file_lines * 7, callbacks.budget_fn(diff_lines),
         )
 
     if planned.reused:
@@ -310,6 +306,13 @@ def run(ctx: RunContext) -> dict[str, Any]:
         groups = [list(g) for g in planned.batches]
     else:
         groups = _groups(files_llm, diff_by_file, planned.strategies, ctx.cfg)
+        _batched = sum(1 for g in groups if len(g) > 1)
+        _merged_files = sum(len(g) for g in groups if len(g) > 1)
+        if _batched:
+            logger.info(
+                "improve.batch project={} mr={} files={} llm_calls={} batched_groups={} merged_files={}",
+                ctx.project_id, ctx.mr_iid, len(files_llm), len(groups), _batched, _merged_files,
+            )
 
     workers = min(len(groups), ctx.cfg.improve_parallel_workers)
 

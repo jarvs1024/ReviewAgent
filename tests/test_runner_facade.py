@@ -38,6 +38,7 @@ def _callbacks(**overrides) -> Callbacks:
         build_user_prompt=lambda: "",
         super_call_agent=lambda ws: {},
         set_token_summary=lambda p, c, m, cost: None,
+        budget_fn=lambda diff_lines: 0,
     )
     kwargs.update(overrides)
     return Callbacks(**kwargs)
@@ -118,3 +119,49 @@ def test_facade_merge_chunks_delegates(monkeypatch):
         "## 改进总览\n\n- **`a.py`**L3 — **h** [MEDIUM/potential bug]: why"
     )
     assert [s["file"] for s in kept["suggestions"]] == ["a.py"]
+
+
+def test_facade_budget_override_reaches_runner(tmp_path, monkeypatch):
+    """门面注入的 `_full_source_budget_bytes` 覆盖必须经 Callbacks 抵达 runner.
+
+    预算被替换成 1 字节 → 唯一文件必然超预算 → 不走基类整源码捷径, 走 strategy 路径.
+    """
+    from reviewagent.llm.base import LLMResult
+
+    (tmp_path / "small.py").write_text("x = 1\n", encoding="utf-8")
+    ws = SimpleNamespace(worktree=tmp_path, diff_file=tmp_path / ".diff")
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id, cmd.mr_iid = 34, 999
+    cmd.ws = ws
+    cmd.repo_context = ""
+    cmd._last_oc_result = None
+
+    monkeypatch.setattr(cmd, "_diff_line_map", lambda: {"small.py": {1}})
+    monkeypatch.setattr(cmd, "_split_diff_by_file", lambda df, files: {fp: "" for fp in files})
+    monkeypatch.setattr(
+        cmd, "_collect_cross_file_refs_for_mr",
+        lambda files, dbf, wt: {fp: [] for fp in files},
+    )
+
+    chunk_calls: list[str] = []
+
+    def _fake_chunk(prompt, w, fp):
+        chunk_calls.append(fp)
+        return LLMResult(
+            data={"summary_md": "", "suggestions": []},
+            prompt_tokens=1, completion_tokens=1, model="test",
+        )
+
+    monkeypatch.setattr(cmd, "_call_chunk", _fake_chunk)
+
+    def _no_base_prompt():
+        raise AssertionError("超预算单文件不应走基类整源码路径")
+
+    monkeypatch.setattr(cmd, "_build_user_prompt", _no_base_prompt)
+    monkeypatch.setattr(cmd, "_full_source_budget_bytes", lambda n: 1)
+
+    result = cmd._call_agent(ws)
+
+    assert "summary_md" in result and "suggestions" in result
+    assert len(chunk_calls) == 1
