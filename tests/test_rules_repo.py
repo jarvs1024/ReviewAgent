@@ -55,6 +55,27 @@ def test_instruction_files_render_empty_and_tight_budget():
     assert render_instruction_files({"a.md": "x\n"}, max_lines=8) == tight
 
 
+def test_instruction_files_render_escapes_path_and_scope():
+    text = render_instruction_files({'weird&<"dir/AGENTS.md': "# hi\n"})
+    assert 'path="weird&amp;&lt;&quot;dir/AGENTS.md"' in text
+    assert 'scope="weird&amp;&lt;&quot;dir"' in text
+
+
+def test_instruction_files_render_escalates_fence_when_content_has_default():
+    content = "before\n`````\nafter\n"
+    text = render_instruction_files({"AGENTS.md": content})
+    lines = text.splitlines()
+    assert "``````markdown" in lines
+    assert lines.count("``````") == 1
+    # 内容里的默认围栏原样保留
+    assert "`````" in lines
+
+
+def test_instruction_files_render_empty_below_min_budget():
+    assert render_instruction_files({"a.md": "x\n"}, max_lines=2) == ""
+    assert render_instruction_files({"a.md": "x\n"}, max_lines=0) == ""
+
+
 def test_extract_rule_keys_in_order_without_duplicates():
     text = (
         "先看 SSD-RULE-NO-LOG-EXC，再看 SSD-RULE-OTHER。\n"
@@ -87,6 +108,31 @@ def test_repo_overlay_structured_entry_overrides_scenario_rule():
     assert merged.fingerprint != base.fingerprint
     # overlay 只换索引，不得泄漏到 rules 顺序之外（R-LOG 在原位）
     assert [rule.key for rule in merged.rules] == [rule.key for rule in base.rules]
+
+
+def test_repo_overlay_override_preserves_base_rule_fields():
+    profile = load_profile(None)
+    base = assemble_base(profile)
+    original = base.index_by_key["R-LOG"]
+    overlay = parse_repo_overlay(
+        {"AGENTS.md": "| `R-LOG` | high | 仓库要求 |\n"}, profile=profile, base=base
+    )
+    assert len(overlay) == 1
+    rule = overlay[0]
+    # 只换元信息，基础规则的其余字段必须保留
+    assert (rule.weight, rule.applies_to, rule.body) == (
+        original.weight,
+        original.applies_to,
+        original.body,
+    )
+    assert (rule.examples, rule.actions, rule.aliases, rule.detect_hints) == (
+        original.examples,
+        original.actions,
+        original.aliases,
+        original.detect_hints,
+    )
+    assert (rule.severity, rule.title, rule.priority) == ("high", "仓库要求", 1000)
+    assert rule.source == {"kind": "repo", "path": "AGENTS.md"}
 
 
 def test_repo_overlay_adds_repo_prefixed_rule():
@@ -141,6 +187,21 @@ def test_repo_free_text_is_not_a_rule():
     assert overlay == ()
 
 
+def test_repo_overlay_ignores_fenced_table_rows():
+    profile = load_profile(None)
+    base = assemble_base(profile)
+    content = (
+        "示例：\n"
+        "````markdown\n"
+        "| R-LOG | low | example |\n"
+        "````\n"
+        "\n"
+        "| `SSD-RULE-UNFENCED` | high | 围栏外生效 |\n"
+    )
+    overlay = parse_repo_overlay({"AGENTS.md": content}, profile=profile, base=base)
+    assert [rule.key for rule in overlay] == ["SSD-RULE-UNFENCED"]
+
+
 def test_repo_overlay_ignores_unknown_builtin_and_unrelated_tables():
     profile = load_profile(None)
     base = assemble_base(profile)
@@ -160,6 +221,22 @@ def test_with_repo_empty_returns_self():
     base = assemble_base(load_profile(None))
     assert base.with_repo(()) is base
     assert base.fingerprint == assemble_base(load_profile(None)).fingerprint
+
+
+def test_with_repo_fingerprint_distinguishes_same_key_overlay_fields():
+    profile = load_profile(None)
+    base = assemble_base(profile)
+    low = parse_repo_overlay(
+        {"AGENTS.md": "| `R-LOG` | low | 低 |\n"}, profile=profile, base=base
+    )
+    high = parse_repo_overlay(
+        {"AGENTS.md": "| `R-LOG` | high | 高 |\n"}, profile=profile, base=base
+    )
+    low_fp = base.with_repo(low).fingerprint
+    high_fp = base.with_repo(high).fingerprint
+    assert low_fp != high_fp
+    assert low_fp.startswith(base.fingerprint + ":repo:")
+    assert high_fp.startswith(base.fingerprint + ":repo:")
 
 
 def test_repo_overlay_does_not_change_scenario_verbatim_checksum():

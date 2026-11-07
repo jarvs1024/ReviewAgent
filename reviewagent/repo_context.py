@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from reviewagent.scenario.rules.repo import (  # noqa: F401
     INSTRUCTION_FILES_INTRO,
+    MARKDOWN_FENCE,
     TRUNCATION_MARKER,
     build_repo_context,
     extract_rule_keys,
@@ -17,6 +18,7 @@ from reviewagent.scenario.rules.repo import (  # noqa: F401
 
 __all__ = [
     "INSTRUCTION_FILES_INTRO",
+    "MARKDOWN_FENCE",
     "TRUNCATION_MARKER",
     "build_repo_context",
     "extract_rule_keys",

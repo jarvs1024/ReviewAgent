@@ -13,14 +13,17 @@
 
 `parse_repo_overlay` 把仓库规则表（Markdown 表格行）转成请求级 `Rule` 覆盖：
 * 仓库新规则：键命中 `base.key_patterns.is_repo(key)`，任意键均可新增；
-* 场景规则覆盖：键是内置键且已在 `base.index_by_key` 中（同键覆盖，spec §6.4）；
-* 其余键（自由文本 / 无关表格）静默忽略——不把叙事内容误判成规则。
+* 场景规则覆盖：键是内置键且已在 `base.index_by_key` 中（同键覆盖，spec §6.4），
+  只换 severity/title/priority/source，其余字段沿用基础规则；
+* 其余键（自由文本 / 无关表格）静默忽略——不把叙事内容误判成规则；
+* 围栏代码块内的表格行（示例）不参与解析。
 """
 from __future__ import annotations
 
 import re
 import time
 from collections import OrderedDict
+from dataclasses import replace
 from html import escape
 from typing import TYPE_CHECKING, Any
 
@@ -279,20 +282,27 @@ def parse_repo_overlay(
 
     * `base.key_patterns.is_repo(key)` — 仓库新增规则（任意键，`priority=1000`）；
     * `base.key_patterns.is_builtin(key)` 且键已存在于 `base.index_by_key`
-      — 同键覆盖场景规则（只换 severity/title，正文仍走 `{{repo_rules}}`）。
+      — 同键覆盖场景规则（只换 severity/title/priority/source，其余字段与
+      正文仍走基础规则 / `{{repo_rules}}`）。
+
+    围栏代码块（```）内的行视为示例，不参与解析。
 
     `profile` 只为接口稳定（后续按语言过滤仓库规则时使用），当前不参与判定。
     """
     rules: dict[str, Rule] = {}
     for path, content in files.items():
+        in_fence = False
         for line in content.splitlines():
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
             if not line.lstrip().startswith("|"):
                 continue
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             key = cells[0].strip("`").strip() if cells else ""
             if not key:
-                continue
-            if not _is_overlay_key(key, base):
                 continue
             severity = (
                 cells[1]
@@ -300,19 +310,22 @@ def parse_repo_overlay(
                 else "medium"
             )
             title = (cells[2] if len(cells) > 2 else "") or key
-            rules[key] = Rule(
-                key=key,
-                title=title,
-                severity=severity,
-                priority=_REPO_RULE_PRIORITY,
-                source={"kind": "repo", "path": path},
-            )
+            source = {"kind": "repo", "path": path}
+            if base.key_patterns.is_repo(key):
+                rules[key] = Rule(
+                    key=key,
+                    title=title,
+                    severity=severity,
+                    priority=_REPO_RULE_PRIORITY,
+                    source=source,
+                )
+            elif base.key_patterns.is_builtin(key) and key in base.index_by_key:
+                # 同键覆盖只换元信息，weight/applies_to/body 等沿用基础规则。
+                rules[key] = replace(
+                    base.index_by_key[key],
+                    severity=severity,
+                    title=title,
+                    priority=_REPO_RULE_PRIORITY,
+                    source=source,
+                )
     return tuple(rules.values())
-
-
-def _is_overlay_key(key: str, base: RuleSet) -> bool:
-    """仓库新规则键，或已装配场景规则键（同键覆盖）."""
-    patterns = base.key_patterns
-    if patterns.is_repo(key):
-        return True
-    return patterns.is_builtin(key) and key in base.index_by_key

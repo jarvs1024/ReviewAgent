@@ -81,8 +81,13 @@ class RuleSet:
         index = dict(self.index_by_key)
         for rule in overlay:
             index[rule.key] = rule
+        # 不变量：index 插入顺序与 assemble_base 产出的 rules 顺序一致
+        # （覆盖键保持原位、新键追加末尾），故下方 index.values() 即目标顺序。
+        payload = sorted(
+            [rule.key, rule.severity, rule.title, rule.priority] for rule in overlay
+        )
         digest = hashlib.sha256(
-            ":".join(sorted(rule.key for rule in overlay)).encode()
+            json.dumps(payload, ensure_ascii=False).encode()
         ).hexdigest()[:12]
         return replace(
             self,
