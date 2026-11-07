@@ -5,7 +5,8 @@ Task 14 审查 Major 1 —— 三条路径必须由 `run()` 级测试区分：
 * 显式 `DynamicRuleSet` + 启用规则 + 非空回调 → builder 收到该文件的 refs
   （`review_file` 标注已被剥离）且 `cross_file_enabled=True`；
 * 规则全部禁用 → `cross_file_enabled=False`、refs 为空、回调不被调用；
-* 降级证据（超时）→ refs 为空、section 仍启用、只记一条 `dynamic.degraded`。
+* 降级证据（超时）→ refs 为空、section 仍启用、只记一条 `dynamic.timeout`
+  （`dynamic.degraded` 不再重复记录）。
 
 全部使用假回调 / 假 policy，不触 LLM、网络与 SQLite。
 """
@@ -200,7 +201,9 @@ def test_degraded_evidence_keeps_section_and_logs_once(tmp_path, logs):
     assert sorted(seen) == ["a.py", "b.py"]
     assert all(item["refs"] == [] for item in seen.values())
     assert all(item["enabled"] is True for item in seen.values())
+    # 超时只记一条 dynamic.timeout（dynamic runner），runner 不再重复 dynamic.degraded.
+    timeouts = [m for m in logs if "dynamic.timeout" in m]
+    assert len(timeouts) == 1
+    assert f"rule={RULE_KEY}" in timeouts[0]
     degraded = [m for m in logs if "dynamic.degraded" in m]
-    assert len(degraded) == 1
-    assert f"rule={RULE_KEY}" in degraded[0]
-    assert "reason=timeout" in degraded[0]
+    assert degraded == []

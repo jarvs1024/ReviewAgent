@@ -122,7 +122,15 @@ def find_refs(
                 cwd=workdir,
                 capture_output=True, text=True, timeout=_SINGLE_TIMEOUT_S,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # 单文件 rg 超时 / 缺 rg 二进制：静默跳过，整体失败由动态 runner 的
+            # 超时 / 降级日志承载，避免每 ident 刷一条 WARNING。
+            continue
+        except Exception as exc:
+            logger.warning(
+                "dynamic.collect.failed provider=cross_file_refs error={}",
+                type(exc).__name__,
+            )
             continue
         hits = 0
         for line in result.stdout.splitlines():
@@ -198,8 +206,13 @@ def collect_refs(
             cwd=workdir,
             capture_output=True, text=True, timeout=_BULK_TIMEOUT_S,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-        logger.warning("improve.cross_file_global_rg failed: {}", e)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {fp: [] for fp in files}
+    except Exception as exc:
+        logger.warning(
+            "dynamic.collect.failed provider=cross_file_refs error={}",
+            type(exc).__name__,
+        )
         return {fp: [] for fp in files}
 
     # 3. 解析: 按 ident 分桶

@@ -245,7 +245,8 @@ def run(ctx: RunContext) -> dict[str, Any]:
             )
             cross_file_refs_by_file = refs_by_file(evidence, files_to_review)
             for key, ev in evidence.items():
-                if ev.degraded:
+                # timeout 已由 dynamic runner（dynamic.timeout）记录，这里跳过避免同一事件两条日志.
+                if ev.degraded and ev.reason != "timeout":
                     logger.warning(
                         "dynamic.degraded rule={} provider={} reason={}",
                         key, ev.provider, ev.reason,

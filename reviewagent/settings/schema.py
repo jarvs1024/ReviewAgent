@@ -75,6 +75,8 @@ SCHEMA: tuple[FieldSpec, ...] = (
     FieldSpec("push_commands", tuple, ("describe", "improve"), env="PUSH_COMMANDS", scope="instance"),
     FieldSpec("data_dir", Path, Path("./data"), env="REVIEWAGENT_DATA_DIR", scope="instance"),
     FieldSpec("log_level", str, "INFO", env="REVIEWAGENT_LOG_LEVEL", scope="instance"),
+    FieldSpec("log_format", str, "text", env="LOG_FORMAT", scope="instance", choices=("text", "json")),
+    FieldSpec("log_rotation", str, "single", env="LOG_ROTATION", scope="instance", choices=("single", "none")),
     FieldSpec("review_profile", str, "", env="REVIEW_PROFILE", scope="instance"),
     FieldSpec("review_profile_root", str, profiles_root(), env="REVIEW_PROFILE_ROOT", scope="instance"),
     FieldSpec("mr_cooldown_seconds", int, 60, env="MR_COOLDOWN_SECONDS", scope="instance", minimum=0),

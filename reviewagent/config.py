@@ -92,6 +92,8 @@ class Config:
     # ---- 存储 ----
     data_dir: Path = field(default_factory=lambda: Path("./data"))
     log_level: str = "INFO"
+    log_format: str = "text"        # text=现网观感(默认) / json=机读单行 (LOG_FORMAT)
+    log_rotation: str = "single"    # single=loguru 进程内轮转 / none=外部 logrotate 或 journald 接管 (LOG_ROTATION)
 
     # ---- 场景包 (Profile) ----
     review_profile: str = ""                  # 空=内置默认场景（当前 Python/SSD 行为）
