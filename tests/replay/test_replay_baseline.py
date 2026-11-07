@@ -214,14 +214,23 @@ def test_replay_matches_baseline(name, monkeypatch, tmp_path):
 
 
 def test_replay_ignores_scenario_env_override(monkeypatch, tmp_path):
-    """开发者 env（IMPROVE_MIN_SCORE=50）不得改变回放结果."""
+    """开发者 env（IMPROVE_MIN_SCORE=50）不得改变回放结果.
+
+    同时模拟「env 在 import 期已进入 `_current`」的污染：若
+    `_pin_scenario_plane` 不再复位 `_current`，这里的断言会失败。
+    """
     name = sorted(CASES)[0]
     case = CASES[name]
+    default_min_score = next(
+        spec.default for spec in _SCENARIO_SPECS if spec.name == "improve_min_score"
+    )
 
-    monkeypatch.setenv("IMPROVE_MIN_SCORE", "50")
-    overridden = _run_case(case, monkeypatch, tmp_path / "override")
-    # _pin_scenario_plane 已把该 env 摘掉；此处两次运行的环境完全一致.
     baseline_run = _run_case(case, monkeypatch, tmp_path / "clean")
 
+    monkeypatch.setenv("IMPROVE_MIN_SCORE", "50")
+    config_module._current = replace(config_module.current(), improve_min_score=50)
+    overridden = _run_case(case, monkeypatch, tmp_path / "override")
+
+    assert config_module.current().improve_min_score == default_min_score
     assert overridden["suggestions"] == baseline_run["suggestions"]
     _assert_matches_baseline(name, overridden["suggestions"])

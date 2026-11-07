@@ -90,6 +90,21 @@ def test_config_show_masks_url_credentials_and_query_tokens(tmp_path, monkeypatc
     assert "access_token=***" in out
 
 
+def test_config_show_masks_query_tokens_without_scheme(tmp_path, monkeypatch, capsys):
+    """少写 scheme 的 webhook 地址同样不得泄露 access_token."""
+    monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL",
+        "oapi.dingtalk.com/robot/send?access_token=tok456",
+    )
+
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+
+    assert "tok456" not in out
+    assert "oapi.dingtalk.com/robot/send?access_token=***" in out
+
+
 def test_config_show_keeps_url_without_credentials_intact(tmp_path, monkeypatch, capsys):
     """无敏感成分的 URL（默认 redis）不得被改写."""
     monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path))

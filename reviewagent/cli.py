@@ -124,18 +124,21 @@ def _mask_display_value(spec: FieldSpec, value: Any) -> Any:
     """`config show` 展示值脱敏：secret 整值替换，URL 内嵌凭据/query 凭证遮盖.
 
     * `spec.secret` → `***`（与旧行为一致）；
-    * 其它字符串若是 `scheme://...`：把 userinfo 里的密码改成 `user:***@host`，
-      并把 query 中 `access_token` / `token` / `secret` / `sign` / `key` /
-      `password` 的值改成 `***`；没有敏感成分时原样返回；
-    * 非字符串 / 非 URL 原样返回（由 `_format_value` 负责渲染）。
+    * 其它字符串：`scheme://...` 时把 userinfo 里的密码改成 `user:***@host`；
+      query 中 `access_token` / `token` / `secret` / `sign` / `key` /
+      `password` 的值一律改成 `***`（不要求带 scheme —— 少写 `https://`
+      的 webhook 地址同样不得泄露凭证）；没有敏感成分时原样返回；
+    * 非字符串原样返回（由 `_format_value` 负责渲染）。
     """
     if spec.secret:
         return "***"
-    if not isinstance(value, str) or "://" not in value or not _URL_SCHEME_RE.match(value):
+    if not isinstance(value, str):
         return value
-    masked = _URL_USERINFO_RE.sub(
-        lambda match: f"{match.group('scheme')}{match.group('user')}:***@", value
-    )
+    masked = value
+    if _URL_SCHEME_RE.match(value):
+        masked = _URL_USERINFO_RE.sub(
+            lambda match: f"{match.group('scheme')}{match.group('user')}:***@", value
+        )
     return _mask_url_query(masked)
 
 
