@@ -11,12 +11,10 @@ from fastapi import FastAPI, Response
 from fastapi.responses import PlainTextResponse
 
 from reviewagent import bootstrap
-from reviewagent.gitlab.client import GitLabError
+from reviewagent.api.router import router as telemetry_router
 from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
-from reviewagent.api.router import router as telemetry_router
 from reviewagent.webhook.router import router as webhook_router
-
 
 __version__ = "0.1.0"
 
@@ -81,13 +79,13 @@ _register_metric_help()
 @app.get("/metrics", tags=["meta"], response_class=PlainTextResponse)
 async def metrics_endpoint() -> Response:
     """Prometheus text exposition format — 轻量级, 仅 counter + gauge."""
-    from fastapi.responses import PlainTextResponse as _PTR
-
     from reviewagent.metrics import format_prometheus as _fmt
     # 注册幂等: 即使进程被测试 reset 过也能保证所有 HELP 在 /metrics 出现.
     _register_metric_help()
     body = _fmt()
-    return _PTR(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
+    return PlainTextResponse(
+        content=body, media_type="text/plain; version=0.0.4; charset=utf-8"
+    )
 
 
 @app.get("/", tags=["meta"])

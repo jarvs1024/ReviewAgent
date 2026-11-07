@@ -35,11 +35,13 @@ def _resolve_config() -> Any:
     return from_env()
 
 
-def _load(args: argparse.Namespace) -> tuple[Any, Any]:
-    """解析 env → 加载 profile（含场景字段应用）→ 绑定 data_dir.
+def _load(args: argparse.Namespace, bind: bool = True) -> tuple[Any, Any]:
+    """解析 env → 加载 profile（含场景字段应用）→ 按需绑定 data_dir.
 
     全程使用本次解析出的 `cfg`（而不是 import 期的 `current()`），这样
     `REVIEWAGENT_DATA_DIR` / `REVIEW_PROFILE` 等实例字段与本次命令行一致。
+    `bind=False` 时只读：`config show` 不得写 `instance.json`，否则探查别的
+    profile 会把 data_dir 永久绑定、随后挡住真正的服务启动。
     任何一步失败都以异常上抛，由子命令转成一行错误。
     """
     from reviewagent.scenario.profile import bind_instance, load_profile
@@ -49,7 +51,8 @@ def _load(args: argparse.Namespace) -> tuple[Any, Any]:
     # load_profile 处理（回退 DEFAULT_PROFILE 并打 WARNING）。
     name = args.profile if args.profile is not None else cfg.review_profile
     profile = load_profile(name, root=Path(cfg.review_profile_root))
-    bind_instance(profile, Path(cfg.data_dir))
+    if bind:
+        bind_instance(profile, Path(cfg.data_dir))
     return cfg, profile
 
 
@@ -71,8 +74,8 @@ def _source(spec: FieldSpec, profile: Any, explicit: frozenset[str]) -> str:
     """`env` / `profile` / `preset` / `default` — profile.sources 已按 env 优先级判定."""
     if spec.name in profile.sources:
         return profile.sources[spec.name]
-    names = ((spec.env,) if spec.env else ()) + tuple(spec.aliases)
-    if any(name in explicit for name in names):
+    # binder.from_env() 只记录 canonical env 名（spec.env or spec.name）。
+    if spec.env and spec.env in explicit:
         return _ENV_SOURCE
     return "default"
 
@@ -102,7 +105,7 @@ def _cmd_config_check(args: argparse.Namespace) -> int:
 
 def _cmd_config_show(args: argparse.Namespace) -> int:
     try:
-        cfg, profile = _load(args)
+        cfg, profile = _load(args, bind=False)
     except Exception as exc:  # noqa: BLE001 — 同上，show 也不吐 traceback
         print(f"config show failed: {exc}", file=sys.stderr)
         return _EXIT_CHECK_FAILED

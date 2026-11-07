@@ -13,7 +13,6 @@ from rq.worker.worker_classes import get_connection_kwargs
 from reviewagent.logging_setup import logger
 
 
-
 def _fork_work_horse_setsid(worker: Any, job: Any, queue: Any) -> Any:
     """Fork work-horse with os.setsid() in child to detach from controlling tty.
 
@@ -190,7 +189,8 @@ class ReviewAgentSpawnWorker(SpawnWorker):
         #      The lock TTL (30min) is too long; we release immediately.
         try:
             from reviewagent.webhook.locks import locks
-            lock = locks.get_lock(project_id, mr_iid)
+            # 构造 _ChainLock 同时解析 redis client（后续 _get_redis 依赖该副作用）
+            locks.get_lock(project_id, mr_iid)
             # Force delete the lock key (ignore owner mismatch)
             lock_key = f"reviewagent:lock:{project_id}:{mr_iid}"
             r = locks._get_redis()

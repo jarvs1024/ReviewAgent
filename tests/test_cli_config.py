@@ -12,22 +12,6 @@ from reviewagent import bootstrap
 from reviewagent.cli import main
 from reviewagent.scenario import profile as profile_module
 
-
-@pytest.fixture(autouse=True)
-def _restore_explicit_env():
-    """还原 binder 的全局 explicit-env 快照.
-
-    `cli._load()` 经 `binder.from_env()` 解析 env，会刷新该快照，而 monkeypatch
-    移除 env 之后快照不会回退（binder 既有的全局语义）。不还原的话，后续
-    profile 测试会把"env 显式覆盖"误判为生效，从而跳过场景值校验。
-    """
-    from reviewagent.settings import binder
-
-    saved = binder._EXPLICIT_ENV
-    yield
-    binder._EXPLICIT_ENV = saved
-
-
 # ---------------- config check ----------------
 
 
@@ -266,3 +250,42 @@ def test_worker_bootstrap_runs_startup_before_loop(isolated_instance, monkeypatc
     assert worker.bootstrap() == "super"
     assert calls == ["super.bootstrap"]
     assert bootstrap.readiness()[0] is True
+
+
+def test_api_lifespan_aborts_on_invalid_profile(tmp_path, monkeypatch):
+    """REVIEW_PROFILE 非法时 lifespan 启动即失败（uvicorn 会据此拒绝启动）."""
+    from fastapi.testclient import TestClient
+
+    import reviewagent.config as config_module
+    from reviewagent import main as main_module
+    from reviewagent.settings import binder
+
+    monkeypatch.setenv("REVIEW_PROFILE", "nope")
+    monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path))
+    # 模拟真实启动：按当前 env 重新解析配置（含 review_profile / data_dir）。
+    monkeypatch.setattr(config_module, "_current", binder.from_env())
+    # 模块级 `_state` 缓存会掩盖失败，前后都要清掉。
+    bootstrap.reset_for_tests()
+    try:
+        with pytest.raises(ValueError, match="profile 'nope' not found"):
+            with TestClient(main_module.app):
+                pass  # pragma: no cover — 启动必须失败，进不到用例体
+    finally:
+        bootstrap.reset_for_tests()
+
+
+def test_worker_bootstrap_propagates_startup_failure(monkeypatch):
+    """启动装配失败必须从 worker bootstrap 冒泡（不能带错场景继续跑任务）."""
+    from reviewagent.workers import rq_worker
+
+    def boom(kind: str):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bootstrap, "startup", boom)
+    bootstrap.reset_for_tests()
+    try:
+        worker = object.__new__(rq_worker.ReviewAgentSpawnWorker)
+        with pytest.raises(RuntimeError, match="boom"):
+            worker.bootstrap()
+    finally:
+        bootstrap.reset_for_tests()

@@ -28,7 +28,7 @@ from reviewagent.config import current
 from reviewagent.logging_setup import logger, setup_logging
 from reviewagent.scenario import profile as profile_module
 from reviewagent.scenario.profile import bind_instance, bound_profile, load_and_activate
-from reviewagent.settings.binder import explicit_env, validate
+from reviewagent.settings.binder import REQUIRED_FIELDS, explicit_env, validate
 from reviewagent.settings.binder import fingerprint as config_fingerprint
 from reviewagent.settings.schema import SCHEMA
 
@@ -36,8 +36,6 @@ from reviewagent.settings.schema import SCHEMA
 _SCENARIO_ENV_KEYS = frozenset(
     spec.env for spec in SCHEMA if spec.scope == "scenario" and spec.env
 )
-# 启动期必须非空的字段（与 binder._REQUIRED 对齐，避免 import 私有常量）。
-_REQUIRED_FIELDS = ("gitlab_url", "gitlab_pat", "gitlab_webhook_secret")
 
 
 @dataclass(frozen=True)
@@ -45,14 +43,15 @@ class BootstrapResult:
     """一次成功启动的结果快照.
 
     前两个字段与 brief 保持一致（位置参数），其余为扩展信息；
+    `data_dir` 不设默认值（静默取当前目录会把日志/数据写到意外位置），
     `rule_set` 是 Task 5 的接入点，本任务恒为 None。
     """
 
     profile_name: str
     profile_fingerprint: str
+    data_dir: Path
     kind: str = ""
     config_fingerprint: str = ""
-    data_dir: Path = Path(".")
     rule_set: Any | None = None
 
 
@@ -68,7 +67,7 @@ def _check_config() -> list[str]:
             validate(spec, getattr(cfg, spec.name))
         except ValueError as exc:
             reasons.append(f"config invalid: {exc}")
-    for name in _REQUIRED_FIELDS:
+    for name in REQUIRED_FIELDS:
         if not getattr(cfg, name):
             reasons.append(f"missing required config: {name}")
     return reasons
@@ -132,7 +131,11 @@ _state: BootstrapResult | None = None
 
 
 def startup(kind: str) -> BootstrapResult:
-    """API / worker 的统一启动装配；同一 kind 重复调用直接返回首次结果（幂等）."""
+    """API / worker 的统一启动装配；同一 kind 重复调用直接返回首次结果（幂等）.
+
+    状态在首次成功启动后按 `kind` 冻结（换 kind 会重新装配）；测试需要多次
+    重跑启动路径时先调用 `reset_for_tests()`，否则拿到的是缓存结果。
+    """
     global _state
     if _state is not None and _state.kind == kind:
         return _state

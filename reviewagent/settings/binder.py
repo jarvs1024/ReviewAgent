@@ -34,6 +34,8 @@ _EXPLICIT_ENV: frozenset[str] = frozenset()
 
 # 现网 `_env(..., required=True)` 的必填项：缺失或为空即启动失败。
 _REQUIRED: tuple[str, ...] = ("gitlab_url", "gitlab_pat", "gitlab_webhook_secret")
+# 公开别名：bootstrap / readiness 等模块共用一个必填项定义，避免各抄一份。
+REQUIRED_FIELDS = _REQUIRED
 
 
 def explicit_env() -> frozenset[str]:
