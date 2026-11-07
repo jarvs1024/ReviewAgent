@@ -1,6 +1,6 @@
 """规则层数据模型（spec §6.2/§6.3）：不可变 `Rule` / `RulePack`.
 
-规则包是数据，解析/装配/渲染是纯逻辑；本模块不依赖 `reviewagent.review`，
+规则包是数据，解析/装配/渲染是纯逻辑；本模块不依赖检视引擎（`review` 包），
 也不读环境变量。
 """
 from __future__ import annotations

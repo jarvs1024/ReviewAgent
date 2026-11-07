@@ -1,4 +1,4 @@
-"""`reviewagent` 命令行入口（Task 3）：`config check` / `config show`.
+"""`reviewagent` 命令行入口（Task 3/6）：`config check` / `config show` / `rules check`.
 
 设计约束：
 
@@ -7,6 +7,9 @@
 * `config show` 供人工核对生效配置：`key: value`（稳定按字段名排序），
   `--sources` 追加 `# source=env|profile|preset|default`，`--diff-default`
   只显示与 schema 默认不同的字段；secret 一律 `***`。
+* `rules check` 面向规则作者：逐条打印 `key\tseverity\ttitle`，末尾输出
+  `ruleset_fingerprint=` / `render_checksum=`；装配期校验失败同样收敛成
+  一行 stderr + 退出码 2（校验逻辑只在 `assemble_base` 里，不在 CLI 复制）。
 * 模块顶层只 import `settings.schema`（纯数据）。`reviewagent.config` 在 import
   时就会解析 env 并可能抛 "missing required env var"，因此配置/profile 相关
   import 全部放在函数内，缺 env 时也能被收敛成一行错误 + 退出码 2。
@@ -14,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -123,6 +127,27 @@ def _cmd_config_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rules_check(args: argparse.Namespace) -> int:
+    """打印装配后的规则清单 + 指纹/正文校验和；装配失败退 2.
+
+    只读：不绑定 instance（`bind=False`），避免探查别的 profile 时写
+    `instance.json`。profile 解析与 `config check` 一致（缺省取 `REVIEW_PROFILE`）。
+    """
+    try:
+        from reviewagent.scenario.rules.resolver import assemble_base
+
+        _, profile = _load(args, bind=False)
+        rule_set = assemble_base(profile)
+    except Exception as exc:  # noqa: BLE001 — 同上，装配期校验错误收敛成一行
+        print(f"rules check failed: {exc}", file=sys.stderr)
+        return _EXIT_CHECK_FAILED
+    for rule in rule_set.rules:
+        print(f"{rule.key}\t{rule.severity}\t{rule.title}")
+    print(f"ruleset_fingerprint={rule_set.fingerprint}")
+    print(f"render_checksum={hashlib.sha256(rule_set.verbatim_body.encode()).hexdigest()}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="reviewagent", description="ReviewAgent 运维命令")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -145,6 +170,15 @@ def main(argv: list[str] | None = None) -> int:
         "--diff-default", action="store_true", help="只显示与 schema 默认值不同的字段"
     )
     show.set_defaults(func=_cmd_config_show)
+
+    rules_parser = sub.add_parser("rules", help="规则装配校验与展示")
+    rules_actions = rules_parser.add_subparsers(dest="action", required=True)
+    rules_check = rules_actions.add_parser(
+        "check",
+        help="装配规则包并打印 key/severity/title + 指纹（装配失败 → 退出码 2）",
+    )
+    rules_check.add_argument("--profile", default=None, help="场景包名；默认取 REVIEW_PROFILE")
+    rules_check.set_defaults(func=_cmd_rules_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

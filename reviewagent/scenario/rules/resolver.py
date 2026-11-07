@@ -13,6 +13,8 @@
   合并范围内规则包 `id` 不得重复；
 * `fingerprint` = 正文摘要 + 规则 `(key, severity, weight, priority, pack_id)`
   序列摘要。
+* `with_repo()` 叠加请求级仓库规则（同键覆盖 severity/title），指纹追加
+  `:repo:<digest>`，但 `verbatim_body` 逐字节不变（仓库原文经 `{{repo_rules}}`）。
 
 `active_rule_set()` 持有启动期装配的缓存；`set_active_rule_set(None)` 用于
 profile 切换时失效（不得让新 profile 看到上一个 profile 的规则）。
@@ -65,6 +67,29 @@ class RuleSet:
             elif when_all and all(str(word).lower() in lowered for word in when_all):
                 canonical.append(to_key)
         return canonical
+
+    def with_repo(self, overlay: tuple[Rule, ...]) -> RuleSet:
+        """叠加请求级仓库规则（同键覆盖），返回新的不可变 `RuleSet`.
+
+        只换索引/`rules`/`fingerprint`；`verbatim_body` 仍是场景规则正文
+        （spec §6.4：仓库原文经 prompt 的 `{{repo_rules}}` 注入，不得改写正文）。
+        `overlay` 为空时原样返回 `self`（不产生新指纹，避免缓存击穿）。
+        """
+        if not overlay:
+            return self
+
+        index = dict(self.index_by_key)
+        for rule in overlay:
+            index[rule.key] = rule
+        digest = hashlib.sha256(
+            ":".join(sorted(rule.key for rule in overlay)).encode()
+        ).hexdigest()[:12]
+        return replace(
+            self,
+            index_by_key=index,
+            rules=tuple(index.values()),
+            fingerprint=f"{self.fingerprint}:repo:{digest}",
+        )
 
 
 def assemble_base(profile: Profile) -> RuleSet:
