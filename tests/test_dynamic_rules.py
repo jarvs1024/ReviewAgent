@@ -172,7 +172,16 @@ def test_missing_provider_rejected(tmp_path, base_profile):
         _ruleset(tmp_path, base_profile, {"schema_version": 1, "rules": [{"key": "DYN-X"}]})
 
 
-@pytest.mark.parametrize("key", ["BAD-KEY", "dyn-lower", "DYN-", "DYN_a"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "BAD-KEY",
+        "dyn-lower",
+        "DYN-",
+        "DYN_a",
+        pytest.param("DYN-A\n", id="trailing-newline"),
+    ],
+)
 def test_invalid_key_format_rejected(tmp_path, base_profile, key: str):
     with pytest.raises(ValueError, match="invalid dynamic rule key"):
         _ruleset(tmp_path, base_profile, {"schema_version": 1, "rules": [_one_rule(key=key)]})
@@ -223,19 +232,29 @@ def test_with_rule_replaces_matching_rule_and_fingerprint(declared_ruleset):
 
 
 def test_registry_register_overwrites_and_get_passes_kwargs():
-    calls: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    class _Provider:
+    class _First:
         def __init__(self, **kwargs: Any) -> None:
-            calls.append(kwargs)
+            calls.append(("first", kwargs))
 
         def fetch(self, **kwargs: Any):
             return ()
 
-    register("test_overwrite_provider", _Provider)
-    register("test_overwrite_provider", _Provider)  # 覆盖同名注册不报错
-    assert isinstance(get_provider("test_overwrite_provider", fetch_callback="cb"), _Provider)
-    assert calls == [{"fetch_callback": "cb"}]
+    class _Second:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append(("second", kwargs))
+
+        def fetch(self, **kwargs: Any):
+            return ()
+
+    register("test_overwrite_provider", _First)
+    # 同名再注册必须是**不同**工厂，否则无法判别"后者生效"。
+    register("test_overwrite_provider", _Second)
+    provider = get_provider("test_overwrite_provider", fetch_callback="cb")
+    assert isinstance(provider, _Second)
+    assert not isinstance(provider, _First)
+    assert calls == [("second", {"fetch_callback": "cb"})]
 
 
 def test_registry_unknown_provider_raises_key_error():
@@ -359,6 +378,37 @@ def test_rule_param_timeout_overrides_fallback(declared_ruleset):
         timeout_s=30,
     )
     assert out[RULE_KEY].reason == "timeout"
+
+
+@pytest.mark.parametrize(
+    "bad_timeout",
+    ["abc", None, {"nested": 1}],
+    ids=["str", "none", "dict"],
+)
+def test_invalid_timeout_param_falls_back_to_caller_timeout(declared_ruleset, bad_timeout):
+    """非法 params.timeout_seconds（非数值）不得抛错，回退 timeout_s 正常采集."""
+
+    class _Fast:
+        def fetch(self, **kwargs: Any):
+            return [{"file": "fast.py"}]
+
+    register("fast_provider_bad_timeout", lambda **kw: _Fast())
+    rule = replace(
+        declared_ruleset.rules[0],
+        provider="fast_provider_bad_timeout",
+        params={"timeout_seconds": bad_timeout},
+    )
+    out = run_dynamic(
+        declared_ruleset.with_rule(rule),
+        files=["core.py"],
+        diff_by_file={},
+        worktree=None,
+        timeout_s=5,
+    )
+    evidence = out[RULE_KEY]
+    assert evidence.degraded is False
+    assert evidence.reason == ""
+    assert evidence.refs == ({"file": "fast.py"},)
 
 
 def test_disabled_rule_omitted_from_result(declared_ruleset):

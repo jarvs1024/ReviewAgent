@@ -78,7 +78,7 @@ def _parse_rule(raw: Any, seen: set[str]) -> DynamicRule:
     if unknown:
         raise ValueError(f"unknown dynamic rule fields {sorted(unknown)}")
     key = raw.get("key", "")
-    if not isinstance(key, str) or not _KEY_RE.match(key):
+    if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
         raise ValueError(f"invalid dynamic rule key: {key!r}")
     if key in seen:
         raise ValueError(f"duplicate dynamic rule key: {key}")

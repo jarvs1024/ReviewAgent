@@ -5,7 +5,8 @@ prompt 缺段——失败时返回空证据 + `degraded=True`，由 context 渲�
 
 * 每个启用规则在独立 daemon 线程中执行，`join(timeout)` 到期即降级为
   `reason="timeout"` 并记 WARNING（线程无法强杀，残留线程随后自行结束）；
-* 超时优先级：`rule.params["timeout_seconds"]` > 调用方传入的 `timeout_s`；
+* 超时优先级：`rule.params["timeout_seconds"]` > 调用方传入的 `timeout_s`；非法值
+  （非数值）回退 `timeout_s`，且解析发生在起线程之前，异常不得外逃；
 * provider 未注册（`KeyError`）或采集抛异常 → `reason=type(exc).__name__`；
 * 禁用规则不进入结果字典（消费方据此完全不渲染该规则）。
 """
@@ -18,6 +19,9 @@ from reviewagent.logging_setup import logger
 from reviewagent.review.dynamic.model import DynamicEvidence, DynamicRule, DynamicRuleSet
 from reviewagent.review.dynamic.registry import get as get_provider
 
+# 连调用方 `timeout_s` 都不可转换时的最终兜底（配置彻底损坏也不无限等待）。
+_FALLBACK_TIMEOUT_S = 60.0
+
 
 def _degraded(rule: DynamicRule, reason: str) -> DynamicEvidence:
     return DynamicEvidence(
@@ -27,6 +31,28 @@ def _degraded(rule: DynamicRule, reason: str) -> DynamicEvidence:
         degraded=True,
         reason=reason,
     )
+
+
+def _coerce_timeout(raw: Any) -> float | None:
+    """把任意值归一为 float 秒；不可转换时返回 None（不抛异常）."""
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_timeout(rule: DynamicRule, timeout_s: float) -> float:
+    """在起线程**之前**解析超时：规则参数优先，非法则回退调用方 `timeout_s`.
+
+    非法配置（`"abc"` / `null` / dict 等）不得让异常逃出 `run_dynamic` —— 那会
+    留下一个仍在运行的 daemon 线程并阻塞 MR；这里一律回退到最后可用的秒数。
+    """
+    timeout = _coerce_timeout(rule.params.get("timeout_seconds", timeout_s))
+    if timeout is None:
+        timeout = _coerce_timeout(timeout_s)
+    if timeout is None:
+        timeout = _FALLBACK_TIMEOUT_S
+    return timeout
 
 
 def _collect(
@@ -75,9 +101,9 @@ def run_dynamic(
             except Exception as exc:  # 降级：provider 异常不得外逃
                 _box["error"] = exc
 
+        timeout = _resolve_timeout(rule, timeout_s)
         thread = threading.Thread(target=_target, daemon=True, name=f"dynamic-{rule.key}")
         thread.start()
-        timeout = float(rule.params.get("timeout_seconds", timeout_s))
         thread.join(timeout)
         if thread.is_alive():
             logger.warning("dynamic.timeout rule={} provider={}", rule.key, rule.provider)
