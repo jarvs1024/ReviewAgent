@@ -1,31 +1,27 @@
-"""业务配置 — 一个文件，dataclass + 环境变量.
+"""业务配置 — L0 配置层入口.
 
-启动时 Config.from_env() 一次性加载，启动后 frozen 不可变.
+字段默认值的唯一来源是 `reviewagent/settings/schema.py`（SCHEMA），本文件里的
+dataclass 默认值必须与之逐字一致（`tests/test_settings_schema.py` 会把两者对齐）。
+
+启动时 `Config.from_env()` 一次性加载，启动后 frozen 不可变.
+模块级 `config` 是一个"活的"只读代理：`apply_scenario()` 只替换代理背后的
+`_current`，因此所有在 import 时 `from reviewagent.config import config` 的模块
+都会立即看到新值，而不需要重新绑定全局.
 """
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from typing import Any
 
-
-def _env(key: str, default: str | None = None, required: bool = False) -> str:
-    """读取环境变量；缺失且 required 则抛错. 自动 strip 首尾空白."""
-    val = os.environ.get(key, default)
-    if required and not val:
-        raise RuntimeError(f"missing required env var: {key}")
-    return (val or "").strip()
-
-
-def _env_tuple(key: str, default: str) -> tuple[str, ...]:
-    """读逗号分隔的 tuple（如 'describe,improve'）."""
-    raw = os.environ.get(key, default)
-    return tuple(s.strip() for s in raw.split(",") if s.strip())
+from reviewagent.settings.schema import _profiles_root
 
 
 @dataclass(frozen=True)
 class Config:
     # ---- GitLab ----
+    # 前三项必须显式提供（env / 构造参数），没有回退值.
     gitlab_url: str
     gitlab_pat: str
     gitlab_webhook_secret: str
@@ -72,7 +68,7 @@ class Config:
     # ---- Redis / RQ ----
     redis_url: str = "redis://localhost:6379/0"
     rq_queue_name: str = "review"
-    rq_weekly_queue_name: str = "review-weekly"  # 周报专用队列，与 review 命令队列物理隔离
+    rq_weekly_queue_name: str = "review-weekly"  # 周报专用队列，与 review 命令队列物理隔离（缺省派生自主队列）
     rq_worker_timeout: int = 1200  # RQ job_timeout（秒），必须 >= max(QODERCLI_TIMEOUT, OPENCODE_TIMEOUT) + 300s buffer，否则 RQ 会 SIGKILL horse 引发 stuck-run
     rq_worker_count: int = 3  # 并发 worker 数
 
@@ -90,6 +86,10 @@ class Config:
     # ---- 存储 ----
     data_dir: Path = field(default_factory=lambda: Path("./data"))
     log_level: str = "INFO"
+
+    # ---- 场景包 (Profile) ----
+    review_profile: str = ""                  # 空=内置默认场景（当前 Python/SSD 行为）
+    review_profile_root: str = field(default_factory=_profiles_root)  # profiles/ 根目录
 
     # ---- 限制 ----
     mr_cooldown_seconds: int = 60
@@ -113,15 +113,9 @@ class Config:
         # 业务核心 (web 通用)
         "/services/", "/api/", "/core/", "/main.",
         "/models/", "/handlers/", "/routers/",
-        # 自动化测试项目特有 (页面对象 / 选择器 / 共享 fixture / 工具)
-        "/pages/", "/locators/", "/fixtures/", "/utils/",
     )
     improve_skip_test_paths: tuple[str, ...] = (  # 测试/配置文件路径跳过 (不进 LLM)
-        # pytest 共享配置 (跨文件引用, 改动影响大但 LLM 提不出具体建议)
-        "conftest.py",
-        # 字节码 / 测试快照 / 测试数据 / 自动化 test 路径 (低信号)
-        "__pycache__/", "__snapshots__/", "testdata/", "tests_loc/",
-        # 注: tests/ 本身 + test_*.py 不跳 — 自动化测试项目里测试代码即业务
+        "tests/", "/tests/", "test_", "_test.", ".test.", "conftest.py",
     )
     improve_partial_context_lines: int = 20  # partial 模式 ±N 行 (overflow 文件 context 兜底)
     improve_patch_context_lines: int = 3    # patch 模式 diff 行 ±N 行最小 context (V7: 不再纯行号)
@@ -132,18 +126,18 @@ class Config:
     improve_min_severity: str = ""           # 最低严重度过滤 (空=不过滤, 可选: critical/high/medium/low)
 
     # ---- V7 检视模式 + priority 权重 (可配, 适配业务/测试项目) ----
-    improve_review_mode: str = "test"        # "auto"/"business"/"test": 默认 test (适配自动化测试项目, 测试代码即业务)
-    improve_priority_weight_diff: float = 15.0       # log1p(diff_size) 系数 (自动化测试文件常小, 降权)
-    improve_priority_weight_keyword: float = 30.0    # 关键路径加分 (业务核心 + UI 自动化路径, 提权)
+    improve_review_mode: str = "auto"        # "auto"/"business"/"test": 默认 auto (按文件特征自动判定)
+    improve_priority_weight_diff: float = 20.0       # log1p(diff_size) 系数
+    improve_priority_weight_keyword: float = 25.0    # 关键路径加分
     improve_priority_weight_density: float = 20.0    # 高密度改动加分 (改动占比>30%)
-    improve_priority_weight_test_feature: float = 20.0  # 测试特征密度加分 (test 模式, 提权: 自动化项目测试特征即信号)
+    improve_priority_weight_test_feature: float = 15.0  # 测试特征密度加分 (test 模式)
     improve_test_feature_keywords: tuple[str, ...] = (  # 测试特征关键字 (命中→高风险测试文件)
         "pytest.fixture", "fixture(", "@fixture",
         "mock.patch", "MagicMock", "patch(",
         "parametrize", "@pytest.mark",
         "setup_module", "teardown_module", "setup_class", "teardown_class",
         "setUp", "tearDown",
-        "assert ",
+        "assert",
         "yield fixture",
         "pytest.raises", "contextmanager", "tmp_path", "caplog", "monkeypatch",
     )
@@ -185,104 +179,80 @@ class Config:
 
     # ---------- 工厂 ----------
     @classmethod
-    def from_env(cls) -> "Config":
-        rq_queue_name = _env("RQ_QUEUE_NAME", "review")
-        # 周报队列默认派生自主队列, 可通过 RQ_WEEKLY_QUEUE_NAME 覆盖.
-        # 独立队列 + 独立 worker, 保证周报 LLM job 不阻塞 improve/describe.
-        rq_weekly_queue_name = _env("RQ_WEEKLY_QUEUE_NAME", f"{rq_queue_name}-weekly")
-        cfg = cls(
-            gitlab_url=_env("GITLAB_URL", required=True),
-            gitlab_pat=_env("GITLAB_PERSONAL_ACCESS_TOKEN", required=True),
-            gitlab_webhook_secret=_env("GITLAB_WEBHOOK_SECRET", required=True),
-            gitlab_bot_username=_env("GITLAB_BOT_USERNAME", "review-agent"),
-            gitlab_disable_bot_loop_check=_env("GITLAB_DISABLE_BOT_LOOP_CHECK", "false").lower() in ("1", "true", "yes"),
-            opencode_url=_env("OPENCODE_URL", "http://localhost:4096"),
-            opencode_username=_env("OPENCODE_USERNAME", "opencode"),
-            opencode_password=_env("OPENCODE_PASSWORD", ""),
-            opencode_model=_env("OPENCODE_MODEL", "deepseek/deepseek-v4-flash"),
-            opencode_timeout=int(_env("OPENCODE_TIMEOUT", "900")),
-            llm_provider=_env("LLM_PROVIDER", "qodercli"),
-            qodercli_node_path=_env("QODERCLI_NODE_PATH", ""),
-            qodercli_js_path=_env("QODERCLI_JS_PATH", ""),
-            qodercli_model=_env("QODERCLI_MODEL", "DeepSeek-V4-Flash"),
-            qodercli_timeout=int(_env("QODERCLI_TIMEOUT", "600")),
-            qodercli_permission_mode=_env("QODERCLI_PERMISSION_MODE", ""),
-            qodercli_max_turns=int(_env("QODERCLI_MAX_TURNS", "20")),
-            qodercli_fallback_model=_env("QODERCLI_FALLBACK_MODEL", ""),
-            qoder_sdk_pat=_env("QODER_SDK_PAT", ""),
-            qoder_sdk_edition=_env("QODER_SDK_EDITION", "intl").lower(),
-            qoder_sdk_cli_path=_env("QODER_SDK_CLI_PATH", ""),
-            qoder_sdk_model=_env("QODER_SDK_MODEL", ""),
-            qoder_sdk_fallback_model=_env("QODER_SDK_FALLBACK_MODEL", ""),
-            qoder_sdk_timeout=int(_env("QODER_SDK_TIMEOUT", "600")),
-            qoder_sdk_max_turns=int(_env("QODER_SDK_MAX_TURNS", "0")),
-            qoder_sdk_permission_mode=_env("QODER_SDK_PERMISSION_MODE", ""),
-            qoder_sdk_disallowed_tools=_env_tuple("QODER_SDK_DISALLOWED_TOOLS",
-                "write,edit,bash,webfetch,websearch"),
-            redis_url=_env("REDIS_URL", "redis://localhost:6379/0"),
-            rq_queue_name=rq_queue_name,
-            rq_weekly_queue_name=rq_weekly_queue_name,
-            rq_worker_timeout=int(_env("RQ_WORKER_TIMEOUT", "1200")),
-            rq_worker_count=int(_env("RQ_WORKER_COUNT", "3")),
-            pr_commands=_env_tuple("PR_COMMANDS", "describe,improve"),
-            push_commands=_env_tuple("PUSH_COMMANDS", "describe,improve"),
-            data_dir=Path(_env("REVIEWAGENT_DATA_DIR", "./data")),
-            log_level=_env("REVIEWAGENT_LOG_LEVEL", "INFO"),
-            mr_cooldown_seconds=int(_env("MR_COOLDOWN_SECONDS", "60")),
-            max_review_calls_per_mr=int(_env("MAX_REVIEW_CALLS_PER_MR", "30")),
-            max_diff_chars=int(_env("MAX_DIFF_CHARS", "50000")),
-            opencode_max_diff_chars=int(_env("OPENCODE_MAX_DIFF_CHARS", "20000")),
-            repo_context_files=_env_tuple("REPO_CONTEXT_FILES", "AGENTS.md"),
-            repo_context_rules_dir=_env("REPO_CONTEXT_RULES_DIR", ".agents/rules"),
-            rule_key_prefix=_env("RULE_KEY_PREFIX", "SSD"),
-            repo_context_max_lines=int(_env("REPO_CONTEXT_MAX_LINES", "2000")),
-            improve_parallel_workers=int(_env("IMPROVE_PARALLEL_WORKERS", "3")),
-            improve_full_files=int(_env("IMPROVE_FULL_FILES", "20")),
-            improve_full_source_max_bytes=int(_env("IMPROVE_FULL_SOURCE_MAX_BYTES", "0")),
-            improve_keyword_paths=_env_tuple("IMPROVE_KEYWORD_PATHS",
-                "/services/,/api/,/core/,/main.,/models/,/handlers/,/routers/"),
-            improve_skip_test_paths=_env_tuple("IMPROVE_SKIP_TEST_PATHS",
-                "tests/,/tests/,test_,_test.,.test.,conftest.py"),
-            improve_partial_context_lines=int(_env("IMPROVE_PARTIAL_CONTEXT_LINES", "20")),
-            improve_patch_context_lines=int(_env("IMPROVE_PATCH_CONTEXT_LINES", "3")),
-            improve_max_suggestions=int(_env("IMPROVE_MAX_SUGGESTIONS", "15")),
-            improve_max_suggestions_per_file=int(_env("IMPROVE_MAX_SUGGESTIONS_PER_FILE", "5")),
-            improve_min_suggestions_per_file=int(_env("IMPROVE_MIN_SUGGESTIONS_PER_FILE", "2")),
-            improve_min_score=int(_env("IMPROVE_MIN_SCORE", "0")),
-            improve_min_severity=_env("IMPROVE_MIN_SEVERITY", "").lower(),
-            improve_review_mode=_env("IMPROVE_REVIEW_MODE", "auto").lower(),
-            improve_priority_weight_diff=float(_env("IMPROVE_PRIORITY_WEIGHT_DIFF", "20")),
-            improve_priority_weight_keyword=float(_env("IMPROVE_PRIORITY_WEIGHT_KEYWORD", "25")),
-            improve_priority_weight_density=float(_env("IMPROVE_PRIORITY_WEIGHT_DENSITY", "20")),
-            improve_priority_weight_test_feature=float(_env("IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE", "15")),
-            improve_test_feature_keywords=_env_tuple("IMPROVE_TEST_FEATURE_KEYWORDS",
-                "pytest.fixture,fixture(,@fixture,mock.patch,MagicMock,patch(,parametrize,@pytest.mark,setup_module,teardown_module,setup_class,teardown_class,setUp,tearDown,assert ,yield fixture,pytest.raises,contextmanager,tmp_path,caplog,monkeypatch"),
-            # --- 文件筛选 / 抽样护栏 (2026-08-17) ---
-            # D: 文件数硬上限 — files_to_review(送 LLM 的集合)超过此值时, 必保(新增+关键路径)外的低优先级 tail 截断
-            improve_max_files_to_review=int(_env("IMPROVE_MAX_FILES_TO_REVIEW", "60")),
-            # A: 新增文件优先 — 优先级加分(自然吃满 IMPROVE_FULL_FILES 配额) + 必保(豁免 D 截断) + 建议截断豁免
-            improve_new_file_full=_env("IMPROVE_NEW_FILE_FULL", "1").strip().lower() in ("1", "true", "yes", "y"),
-            # C: 自动 case / 测试文件抽样 — 命中路径模式的文件超过 max 时确定性抽样 N 个进 LLM, 其余跳过
-            # max=0 表示不抽样(保持现状: 全检); 设为正整数启用
-            improve_test_sample_paths=_env_tuple("IMPROVE_TEST_SAMPLE_PATHS", ""),
-            improve_test_sample_max=int(_env("IMPROVE_TEST_SAMPLE_MAX", "0")),
-            # --- V10 批次合并 + 大 diff 截断 (2026-08-18) ---
-            # 小 diff (partial/patch 策略) 文件合并进同一 prompt, 减少 LLM 调用次数; full 策略文件独享 chunk
-            improve_batch_enabled=_env("IMPROVE_BATCH_ENABLED", "1").strip().lower() in ("1", "true", "yes", "y"),
-            improve_batch_max_diff_lines=int(_env("IMPROVE_BATCH_MAX_DIFF_LINES", "60")),
-            improve_batch_max_files=int(_env("IMPROVE_BATCH_MAX_FILES", "5")),
-            improve_batch_max_total_lines=int(_env("IMPROVE_BATCH_MAX_TOTAL_LINES", "300")),
-            improve_clip_diff_lines=int(_env("IMPROVE_CLIP_DIFF_LINES", "800")),
-            review_exclude_extensions=_env_tuple("REVIEW_EXCLUDE_EXTENSIONS",
-                ".md,.doc,.docx,.txt,.rst,.csv,.png,.jpg,.jpeg,.gif,.svg,.ico"),
-        )
-        # 确保目录存在
-        cfg.data_dir.mkdir(parents=True, exist_ok=True)
-        cfg.repos_dir.mkdir(parents=True, exist_ok=True)
-        cfg.worktrees_dir.mkdir(parents=True, exist_ok=True)
-        cfg.weekly_reports_dir.mkdir(parents=True, exist_ok=True)
-        return cfg
+    def from_env(cls) -> Config:
+        """环境变量加载统一委托 settings.binder（唯一解析入口）."""
+        from reviewagent.settings.binder import from_env
+
+        return from_env()
 
 
-# 全局单例；启动时初始化
-config = Config.from_env()
+_current: Config = Config.from_env()
+
+
+class _ConfigProxy:
+    """模块级稳定引用；scenario 应用时只替换 `_current`，不重绑全局.
+
+    `dataclasses.replace(view, **changes)` 仍然可用（既有测试依赖）：
+    代理声明了空的 `__dataclass_fields__`，因此 replace() 会调用
+    `view.__class__(**changes)`，这里用 `_current` + changes 生成一份不可变快照.
+
+    没有 `__slots__`：既有测试用 `object.__setattr__(config, ...)` 就地覆盖单个字段
+    （绕过 frozen），这类写入落在实例 __dict__ 上、会遮蔽 `_current` 的同名字段；
+    普通赋值 `config.x = ...` 仍被 `__setattr__` 拒绝.
+    """
+
+    __dataclass_fields__: dict[str, Any] = {}
+
+    def __init__(self, **overrides: Any) -> None:
+        if overrides:
+            base: dict[str, Any] = {f.name: getattr(_current, f.name) for f in fields(Config)}
+            base.update(overrides)
+            object.__setattr__(self, "_snapshot", Config(**base))
+        else:
+            object.__setattr__(self, "_snapshot", None)
+
+    def _target(self) -> Config:
+        try:
+            snapshot = object.__getattribute__(self, "_snapshot")
+        except AttributeError:  # __init__ 尚未执行（异常路径）时退回当前配置
+            return _current
+        return _current if snapshot is None else snapshot
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"config is read-only; use apply_scenario() (field '{name}')")
+
+    def __repr__(self) -> str:
+        return repr(self._target())
+
+
+config: Config = _ConfigProxy()  # type: ignore[assignment]
+
+
+def current() -> Config:
+    """返回调用时生效的 Config（scenario 应用后即为新值）."""
+    return _current
+
+
+def apply_scenario(values: Mapping[str, Any]) -> None:
+    """把场景包的值应用到当前配置（不落盘、不改 env）.
+
+    未知字段 -> KeyError；secret 字段 -> PermissionError（场景包不得携带凭据）.
+    """
+    global _current
+    from reviewagent.settings.binder import _UNSET, _validate, coerce
+    from reviewagent.settings.schema import SCHEMA_BY_NAME
+
+    updates: dict[str, Any] = {}
+    for name, raw in values.items():
+        spec = SCHEMA_BY_NAME[name]
+        if spec.secret:
+            raise PermissionError(f"scenario must not set secret field: {name}")
+        value = coerce(spec, raw)
+        if value is _UNSET:
+            continue
+        _validate(spec, value)
+        updates[name] = value
+    _current = replace(_current, **updates)
