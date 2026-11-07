@@ -1,0 +1,20 @@
+请按你的 system prompt 处理当前 MR 的 diff
+（变更内容见上方附件文件）。
+
+## diff 有效新增行（VALID NEW LINES）
+
+下面列出本次 diff 里每个文件所有以 `+` 开头的**新文件行号**。**你的 `start_line` 必须且只能从此集合中取**；若你怀疑某 issue 的目标行不在此集合里（context 行 / 删除行 / 跨文件推断），请放弃 `improved_code`，改为在 `summary_md` 里文字描述，不要强行填一个错位的 suggestion。
+
+- `core.py`: 2, 4
+
+## 完整文件源码（带行号）
+
+**强烈建议**：每条 suggestion 的 `start_line` 必须**精确等于** 下方源码里 `existing_code` 第一行对应的行号。Python 端会用 `existing_code` 反查行号校验 — 行号错位的会被自动降级。
+
+### 完整源码：`core.py`（共 4 行；行号在左侧）
+```
+   1| import os
+   2| import json
+   3| def f():
+   4|     return 2
+```
