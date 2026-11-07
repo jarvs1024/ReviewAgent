@@ -136,20 +136,22 @@ def readiness() -> tuple[bool, list[str]]:
 
 
 def _check_sqlite() -> list[str]:
-    """SQLite 探针：取 store 并在真实连接上执行 `SELECT 1`."""
+    """SQLite 探针：取 store 并在真实连接上执行 `SELECT 1`（`Store.ping`）."""
     try:
         from reviewagent.telemetry.store import get_store
 
-        store = get_store()
-        with store._conn() as conn:
-            conn.execute("SELECT 1").fetchone()
+        get_store().ping()
     except Exception as exc:  # noqa: BLE001 — 探针失败即原因
         return [f"sqlite: {type(exc).__name__}: {exc}"]
     return []
 
 
 def _check_redis() -> list[str]:
-    """Redis 探针：新建短超时连接 ping，绝不触碰 `get_redis()` 共享单例."""
+    """Redis 探针：新建短超时连接 ping，绝不触碰 `get_redis()` 共享单例.
+
+    专用 client 用完必须关闭（`try/finally`），否则每次 `/readyz` 都泄漏一个连接。
+    """
+    client: Any = None
     try:
         import redis
 
@@ -161,6 +163,13 @@ def _check_redis() -> list[str]:
         client.ping()
     except Exception as exc:  # noqa: BLE001 — 探针失败即原因
         return [f"redis: {type(exc).__name__}: {exc}"]
+    finally:
+        close = getattr(client, "close", None) if client is not None else None
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 — 关闭失败不影响探针结论
+                logger.warning("readiness.redis close failed: {}", exc)
     return []
 
 

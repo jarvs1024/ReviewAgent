@@ -295,6 +295,49 @@ def enqueue_command_from_note(
 
 
 # ---------- RQ 任务执行（worker 直接 invoke） ----------
+def _disable_retries_for_current_job() -> None:
+    """把当前 RQ job 的 `retries_left` 清零 — 指纹错配是毒 job, 重试只会重复失败.
+
+    取不到 job（非 worker 上下文 / import 失败 / 测试替身）时静默跳过：重试抑制
+    失败不影响主流程，错误仍会照常向上抛。
+    """
+    try:
+        import rq
+
+        job = rq.get_current_job()
+    except Exception as e:  # noqa: BLE001 — 拿不到 job 只影响重试抑制
+        logger.warning("job.retries_clear skipped: {}", e)
+        return
+    if job is None:
+        return
+    try:
+        job.retries_left = 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.retries_clear skipped: {}", e)
+
+
+def _verify_job_manifest(
+    *,
+    profile: str,
+    profile_fingerprint: str,
+    config_fingerprint: str,
+    ruleset_fingerprint: str,
+    dynamic_rules_fingerprint: str,
+) -> None:
+    """校验运行指纹；失败时先抑制重试再把异常抛出（确定性错配 → 毒 job 不重试）."""
+    try:
+        verify_job({
+            "profile": profile,
+            "profile_fingerprint": profile_fingerprint,
+            "config_fingerprint": config_fingerprint,
+            "ruleset_fingerprint": ruleset_fingerprint,
+            "dynamic_rules_fingerprint": dynamic_rules_fingerprint,
+        })
+    except Exception:  # noqa: BLE001 — verify_job 的失败都是确定性的，重试无意义
+        _disable_retries_for_current_job()
+        raise
+
+
 def _run_command(
     command: str,
     *,
@@ -314,13 +357,13 @@ def _run_command(
     （profile / 规则 / 配置）不一致时 job 直接失败，不做半截动作。缺字段的
     老 job（滚动升级）只记 WARNING 后继续。
     """
-    verify_job({
-        "profile": profile,
-        "profile_fingerprint": profile_fingerprint,
-        "config_fingerprint": config_fingerprint,
-        "ruleset_fingerprint": ruleset_fingerprint,
-        "dynamic_rules_fingerprint": dynamic_rules_fingerprint,
-    })
+    _verify_job_manifest(
+        profile=profile,
+        profile_fingerprint=profile_fingerprint,
+        config_fingerprint=config_fingerprint,
+        ruleset_fingerprint=ruleset_fingerprint,
+        dynamic_rules_fingerprint=dynamic_rules_fingerprint,
+    )
     # 兜底: 清理全局超时孤儿 running (精确 per-MR sweep 在 run_mr_chain 锁后已处理主路径).
     # 用时间阈值 (rq_worker_timeout + buffer) 兜底单命令/无锁场景, 不会误清刚启动的 run.
     try:
@@ -450,6 +493,9 @@ def run_mr_chain(
         ruleset_fingerprint=ruleset_fingerprint,
         dynamic_rules_fingerprint=dynamic_rules_fingerprint,
     )
+    # 链入口先校验指纹（先于取锁 / 孤儿清理）：错配时不做任何锁或 store 副作用。
+    # `_run_command` 内部仍会再校验一次（防御纵深：直接调用路径同样受保护）。
+    _verify_job_manifest(**manifest_kwargs)
     lock = locks.get_lock(project_id, mr_iid)
     if not lock.acquire(blocking=True, blocking_timeout=300):
         logger.warning(

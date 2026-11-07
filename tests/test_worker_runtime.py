@@ -184,3 +184,91 @@ def test_run_command_without_manifest_still_runs(monkeypatch):
 
     assert result == {"ok": True}
     assert called == ["sweep", "init", "run"]
+
+
+def test_run_command_disables_retries_on_manifest_mismatch(monkeypatch):
+    """指纹错配 = 毒 job：清零 retries_left，Retry(max=2) 不会再跑两遍."""
+    import rq
+
+    from reviewagent.workers import tasks
+
+    fake_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr(rq, "get_current_job", lambda *args, **kwargs: fake_job)
+
+    with pytest.raises(RuntimeError, match="job.profile_mismatch"):
+        tasks._run_command(
+            "improve",
+            project_id=1,
+            mr_iid=2,
+            triggered_by="webhook",
+            actor_username="tester",
+            profile="not-the-active-profile",
+            profile_fingerprint="deadbeef",
+            config_fingerprint="deadbeef",
+        )
+
+    assert fake_job.retries_left == 0
+
+
+def test_run_command_tolerates_missing_current_job(monkeypatch):
+    """非 worker 上下文（get_current_job → None）+ 错配：仍抛 RuntimeError，不炸在重试抑制上."""
+    import rq
+
+    from reviewagent.workers import tasks
+
+    monkeypatch.setattr(rq, "get_current_job", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="job.profile_mismatch"):
+        tasks._run_command(
+            "improve",
+            project_id=1,
+            mr_iid=2,
+            triggered_by="webhook",
+            actor_username="tester",
+            profile="not-the-active-profile",
+            profile_fingerprint="deadbeef",
+            config_fingerprint="deadbeef",
+        )
+
+
+def test_run_mr_chain_rejects_mismatch_before_lock_and_command(monkeypatch):
+    """链入口先校验指纹：错配时既不取锁，也不执行命令（无锁/store 副作用）."""
+    import rq
+
+    from reviewagent.workers import tasks
+
+    touched: list[str] = []
+
+    class _FakeLock:
+        def acquire(self, **_kwargs):
+            touched.append("acquire")
+            return True
+
+        def release(self):
+            touched.append("release")
+
+    class _FakeLocks:
+        def get_lock(self, project_id, mr_iid):
+            touched.append("get_lock")
+            return _FakeLock()
+
+    fake_job = SimpleNamespace(retries_left=2)
+    monkeypatch.setattr(rq, "get_current_job", lambda *args, **kwargs: fake_job)
+    monkeypatch.setattr(tasks, "locks", _FakeLocks())
+    monkeypatch.setattr(tasks, "get_store", lambda: touched.append("store"))
+    monkeypatch.setattr(tasks, "_run_command", lambda *a, **kw: touched.append("run"))
+
+    with pytest.raises(RuntimeError, match="job.profile_mismatch"):
+        tasks.run_mr_chain(
+            commands=["describe", "improve"],
+            project_id=1,
+            mr_iid=2,
+            triggered_by="webhook",
+            actor_username="tester",
+            profile="not-the-active-profile",
+            profile_fingerprint="deadbeef",
+            config_fingerprint="deadbeef",
+        )
+
+    assert touched == []
+    assert fake_job.retries_left == 0

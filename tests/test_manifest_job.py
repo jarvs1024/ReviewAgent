@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -148,6 +149,96 @@ def test_verify_job_rejects_ruleset_fingerprint_mismatch(manifest):
     payload = dict(manifest, ruleset_fingerprint="deadbeef")
     with pytest.raises(RuntimeError, match="fingerprint"):
         verify_job(payload)
+
+
+# ---------------------------------------------------------------------------
+# 入队指纹转发（fake Queue 捕获 q.enqueue kwargs）
+# ---------------------------------------------------------------------------
+
+_MANIFEST_KEYS = (
+    "profile",
+    "profile_fingerprint",
+    "config_fingerprint",
+    "ruleset_fingerprint",
+    "dynamic_rules_fingerprint",
+)
+
+
+class _FakeQueue:
+    """记录 `q.enqueue(func, **kwargs)` 的假队列（不连 Redis）."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def enqueue(self, func, **kwargs):
+        self.calls.append({"func": func, **kwargs})
+        return SimpleNamespace(id="job-1")
+
+
+def _assert_flat_manifest_kwargs(call: dict) -> None:
+    """断言 5 个指纹字段以扁平 kwargs 出现且取值与激活环境一致."""
+    from reviewagent.scenario.profile import active_or_load
+    from reviewagent.scenario.rules.resolver import active_rule_set
+
+    assert "manifest" not in call
+    for key in _MANIFEST_KEYS:
+        assert key in call, f"missing flat kwarg {key}"
+    profile = active_or_load()
+    assert call["profile"] == profile.name
+    assert call["profile_fingerprint"] == profile.fingerprint
+    assert call["config_fingerprint"] == _config_fingerprint(current())
+    assert call["ruleset_fingerprint"] == active_rule_set().fingerprint
+    assert (
+        call["dynamic_rules_fingerprint"]
+        == load_dynamic_rules(profile).fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    ("enqueue_name", "target_func"),
+    [
+        ("describe", "reviewagent.workers.tasks.run_describe"),
+        ("improve", "reviewagent.workers.tasks.run_improve"),
+    ],
+)
+def test_enqueue_forwards_manifest_fingerprints(monkeypatch, enqueue_name, target_func):
+    from reviewagent.workers import tasks
+
+    fake = _FakeQueue()
+    monkeypatch.setattr(tasks, "get_queue", lambda: fake)
+
+    job_id = tasks._enqueue(
+        enqueue_name,
+        project_id=1,
+        mr_iid=2,
+        triggered_by="webhook",
+        actor_username="tester",
+    )
+
+    assert job_id == "job-1"
+    assert fake.calls[0]["func"] == target_func
+    _assert_flat_manifest_kwargs(fake.calls[0])
+
+
+def test_enqueue_mr_chain_forwards_manifest_fingerprints(monkeypatch):
+    from reviewagent.workers import tasks
+
+    fake = _FakeQueue()
+    monkeypatch.setattr(tasks, "get_queue", lambda: fake)
+
+    job_ids = tasks.enqueue_mr_chain(
+        commands=("describe", "improve"),
+        project_id=1,
+        mr_iid=2,
+        triggered_by="webhook",
+        actor_username="tester",
+    )
+
+    assert job_ids == ["job-1"]
+    call = fake.calls[0]
+    assert call["func"] == "reviewagent.workers.tasks.run_mr_chain"
+    assert call["commands"] == ["describe", "improve"]
+    _assert_flat_manifest_kwargs(call)
 
 
 # ---------------------------------------------------------------------------

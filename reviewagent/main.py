@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 
 from reviewagent import bootstrap
 from reviewagent.api.router import router as telemetry_router
@@ -90,8 +91,11 @@ async def metrics_endpoint() -> Response:
 
 @app.get("/readyz", tags=["meta"])
 async def readyz() -> JSONResponse:
-    """运行时就绪探针：profile/RuleSet/instance + SQLite + Redis 全部通过才 200."""
-    ok, reasons = bootstrap.runtime_readiness()
+    """运行时就绪探针：profile/RuleSet/instance + SQLite + Redis 全部通过才 200.
+
+    探针含同步 SQLite / Redis ping，放线程池执行，避免阻塞事件循环。
+    """
+    ok, reasons = await run_in_threadpool(bootstrap.runtime_readiness)
     if ok:
         return JSONResponse({"status": "ok"})
     return JSONResponse({"status": "unready", "reasons": reasons}, status_code=503)

@@ -326,6 +326,11 @@ class Store:
         finally:
             conn.close()
 
+    def ping(self) -> None:
+        """轻量探针：在真实连接上执行 `SELECT 1`（不写库；失败直接抛错）."""
+        with self._conn() as conn:
+            conn.execute("SELECT 1").fetchone()
+
     # ---------- MR ----------
     def upsert_mr(self, mr: MRRecord) -> None:
         """插入或更新 MR；保留已有 author_sticky（不被覆盖）."""

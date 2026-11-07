@@ -86,10 +86,14 @@ def test_sqlite_probe_reports_failure(monkeypatch):
 
 def test_redis_probe_passes_with_fake_client(monkeypatch):
     calls: list[dict] = []
+    closed: list[bool] = []
 
     class _FakeRedis:
         def ping(self):
             return True
+
+        def close(self):
+            closed.append(True)
 
     def from_url(url, **kwargs):
         calls.append({"url": url, **kwargs})
@@ -100,6 +104,34 @@ def test_redis_probe_passes_with_fake_client(monkeypatch):
     assert bootstrap._check_redis() == []
     assert calls and calls[0]["socket_connect_timeout"] == 1
     assert calls[0]["socket_timeout"] == 1
+    assert closed == [True], "专用探针 client 必须关闭，避免每次 /readyz 泄漏连接"
+
+
+def test_redis_probe_closes_client_when_ping_fails(monkeypatch):
+    closed: list[bool] = []
+
+    class _FakeRedis:
+        def ping(self):
+            raise ConnectionError("redis down")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(redis.Redis, "from_url", lambda _url, **_kw: _FakeRedis())
+
+    reasons = bootstrap._check_redis()
+    assert len(reasons) == 1 and reasons[0].startswith("redis:")
+    assert closed == [True]
+
+
+def test_redis_probe_tolerates_client_without_close(monkeypatch):
+    class _FakeRedis:
+        def ping(self):
+            return True
+
+    monkeypatch.setattr(redis.Redis, "from_url", lambda _url, **_kw: _FakeRedis())
+
+    assert bootstrap._check_redis() == []
 
 
 def test_redis_probe_reports_failure(monkeypatch):
