@@ -2,7 +2,7 @@
 
 - 日期：2026-11-07
 - 分支：new_review_v2（基于 main 新建）
-- 状态：已与需求方分段确认；已按完整性核查补齐缺口，待审阅
+- 状态：已与需求方分段确认；已按完整性核查补齐缺口；首期范围收窄为 Python 场景（C/C++ 仅预留接口），待审阅
 
 ## 1. 背景与问题
 
@@ -32,12 +32,14 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 | 检视数据存储 | **一实例一库**：文档强制 `REVIEWAGENT_DATA_DIR` 按实例隔离，schema 不改 |
 | 周报场景化 | **全量纳入场景包**：三个 weekly prompt、规则→动作映射、repo_scan 扩展名、标题 |
 | env 与 profile 优先级 | **显式 env > profile.yaml > 内置默认值** |
+| 首期实施范围 | **仅 Python 场景**：完成 Profile 架构、Python 场景包与全套兼容改造；C/C++ 仅预留接口与设计，稳定后再实施 |
 
 ## 3. 非目标
 
 - 不做仓库级 profile 自动发现（实例级已确认；仓库级留作后续演进）。
 - 不做结构化规则 DSL / 规则命中统计闭环（YAGNI）。
 - 不做 C/C++ AST 级符号校验。
+- **首期不实施 C/C++ 场景**：`cpp-dev` 场景包、`policies/cpp.py`、C++ 周报内容、`repo_scan` 的 C/C++ 扩展名均推迟；本期只保证接口（LanguagePolicy 协议、注册表、profile 字段、规则键配置）可承载，稳定后再落地。
 - 不改 webhook / RQ / GitLab / LLM provider 的外部接口；telemetry 表结构不变（靠一实例一库隔离场景）。
 
 ## 4. 总体架构
@@ -48,17 +50,17 @@ ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统�
 reviewagent/
 ├── profiles/                     # 新：场景包根目录
 │   ├── _shared/                  # 共享规则与默认 prompt 库（可被多场景引用）
-│   ├── ssd-python-autotest/      # 场景包 1：现有行为严格迁移
+│   ├── ssd-python-autotest/      # 场景包 1：现有行为严格迁移（首期唯一实施）
 │   │   ├── profile.yaml
 │   │   ├── prompts/improve.md, describe.md, weekly_*.md
 │   │   └── rules/*.md
-│   └── cpp-generic-dev/          # 场景包 2：通用 C/C++ 开发检视
+│   └── cpp-generic-dev/          # 场景包 2：预留设计，首期不实施（不创建目录）
 ├── review/                       # 新包：检视引擎
 │   ├── engine.py                 # 调度：文件过滤/排序/分批/chunk
 │   ├── assembly.py               # prompt 装配：profile 模板渲染 + repo 上下文注入 + argv 预算
-│   ├── policy.py                 # LanguagePolicy 接口 + 注册表
+│   ├── policy.py                 # LanguagePolicy 接口 + 注册表（首期仅注册 python）
 │   ├── policies/python.py
-│   ├── policies/cpp.py
+│   ├── policies/cpp.py           # 预留文件，首期不实现
 │   ├── validation.py             # 语言无关防护：行号校验、去重指纹、锚定校验
 │   └── publishing.py             # GitLab suggestion 构造与发布
 ├── profile.py                    # 新：profile 加载器（yaml 解析 + 校验 + env 合并 + 单例）
@@ -183,12 +185,12 @@ class LanguagePolicy(Protocol):
 ```
 
 - **python.py**：全量实现，行为与现有逐项对齐（ast 校验结果格式不变、`rg -t py`、pytest 关键词、4 空格约定）。
-- **cpp.py**：
+- **cpp.py（预留，首期不实现）**：
   - `validate_suggestion`：仅上下文锚定（suggestion 的 `existing_code` 逐行匹配 diff 真实行）+ 风险降级规则（如建议删除行数超阈值 → 降级为纯评论，不带 suggestion 块）；
   - `cross_file_evidence`：`rg -t c -t cpp`，段落文案随 profile 注入（不写死 "Python 端已 grep"）；
   - `score_file`：扩展名 + 路径权重 + 热点词（memcpy / malloc / goto 等，来自 profile `scoring`）；
   - `is_test_file`：按路径/文件名约定判断测试代码（供 adopt 判定等复用）。
-- 注册表：`profile.yaml` 的 `language` → policy 类。未注册语言启动即报错，不静默降级。
+- 注册表：`profile.yaml` 的 `language` → policy 类。首期仅注册 `python`；未注册语言启动即报错，不静默降级（C/C++ 实施时增加注册项即可）。
 - `commands/suggestion_actions.py:367-375` 的 adopt 判定改用 policy `is_test_file`，不再硬编码 Python 关键字。
 
 ### 6.4 严格兼容的落地
@@ -199,7 +201,9 @@ class LanguagePolicy(Protocol):
 4. `_call_chunk` 的模型选择、qodercli 128KB argv 预算逻辑随迁 `assembly.py`，行为不变。
 5. `prompts/loader.py` 改为 profile 解析后，4 个测试文件 36 处 `provider.run(agent="improve"/"describe")` 走默认 profile，断言（含 `improve.md` frontmatter `tools_disabled`）继续通过。
 
-## 7. cpp-generic-dev 场景包（首版内容）
+## 7. cpp-generic-dev 场景包（预留设计，首期不实施）
+
+以下为后续实施 C/C++ 场景时的落地说明，本期不创建目录、不写实现、不加测试；接口与配置字段（`language` 注册表、`rule_keys`、`capabilities`、`reporting`）已按此预留，届时只需新增场景包与 `policies/cpp.py`，核心代码零改动。
 
 - `language: cpp`；`include_extensions: [.c, .h, .cpp, .cc, .hpp]`；`ast_validation: false`；`apply_suggestion: true`；`full_source_analysis: false`（规避大文件 E2BIG，后续按需开启）。
 - `rule_keys`：`builtin_regex: 'CPP-R-[A-Z0-9_]+'`、`repo_prefix: CPP-RULE`、`display_prefix: CPP`。
@@ -222,19 +226,19 @@ class LanguagePolicy(Protocol):
 ## 9. 测试策略
 
 1. **兼容性铁律**：现有测试零改动全绿（§6.2 门面 + §5.1 默认回退保障）——行为严格兼容的验收标准。
-2. 新增：profile 加载器（默认回退/非法值/env 覆盖/共享规则引用）、模板渲染变量齐全性、规则键正则（`CPP-R-*` 完整匹配、`CPP-RULE-*` 豁免生效、repo_context 抽取）、`policies/cpp.py`（锚定校验、降级）、cpp-generic-dev 端到端 fake-LLM 流程（复用 fakeredis / mock provider 模式）。
-3. 新增：RQ job profile 校验测试（场景不匹配拒绝执行）、周报链路 profile 化测试（标题/动作映射/扩展名/规则翻译）。
-4. 新增结构测试：两个内置场景的 output_schema 与解析器兼容（防漂移）。
+2. 新增：profile 加载器（默认回退/非法值/env 覆盖/共享规则引用）、模板渲染变量齐全性、规则键正则（`R-*` 完整匹配、`SSD-RULE-*` 豁免生效、repo_context 抽取）、`policies/python.py` 行为对齐测试、ssd-python-autotest 端到端 fake-LLM 流程（复用 fakeredis / mock provider 模式）。
+3. 新增：RQ job profile 校验测试（场景不匹配拒绝执行）、周报链路 profile 化测试（标题/动作映射/扩展名/规则翻译，python 场景输出与现有快照一致）。
+4. 新增结构测试：`ssd-python-autotest` 的 output_schema 与解析器兼容（防漂移）。
 5. prompt 正文内容不做断言（与现状一致）。
+6. C/C++ 相关测试（policy、场景包、周报内容）随 C/C++ 实施一并新增，本期不做。
 
-## 10. 实施顺序（供 writing-plans 细化）
+## 10. 实施顺序（首期：Python 场景）
 
 1. profile 加载器 + `ssd-python-autotest` 包（纯迁移 + 默认回退 + env 覆盖，现有测试全绿）；
 2. improve.py 拆分 + 兼容门面（engine / assembly / validation / publishing，测试零改动全绿）；
-3. 规则键正则/`repo_context`/`suggestion_actions` 的 profile 化（含 `CPP-R-*` 校验用例）；
-4. LanguagePolicy 接口 + python.py（行为对齐，全绿）；
-5. `policies/cpp.py` + `cpp-generic-dev` 场景包 + 新增测试；
-6. 周报链路 profile 化（三个 weekly prompt、rule_translate、renderer、repo_scan、标题），python 场景输出不变；
-7. 部署与文档更新（`.env.example`、systemd、README、DEPLOYMENT.md）。
+3. 规则键正则 / `repo_context` / `suggestion_actions` 的 profile 化（python 键行为不变）；
+4. LanguagePolicy 接口 + `policies/python.py`（行为对齐，全绿）；
+5. 周报链路 profile 化（三个 weekly prompt、rule_translate、renderer、repo_scan、标题），python 场景输出不变；
+6. 部署与文档更新（`.env.example`、systemd、README、DEPLOYMENT.md）。
 
-每步独立可验收、可提交。
+每步独立可验收、可提交。首期完成并稳定后，再按第 7 节设计新增 `cpp-generic-dev` 场景包与 `policies/cpp.py`（届时核心代码零改动）。
