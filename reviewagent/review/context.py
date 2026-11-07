@@ -9,6 +9,10 @@
 
 模板每次从 ``profile.root`` 读取（``load_template`` 做路径逃逸校验），不加
 进程内缓存 — golden 测试依赖磁盘原文。
+
+信任边界（spec §7.6）：源码行与跨文件证据属于**不可信数据**，装配前按
+``security.normalize_untrusted`` 剥离控制字符、按内容自适应围栏长度；正常内容
+（无控制字符、无 4+ 连续反引号）逐字节不变。
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from reviewagent.review.policy import LanguagePolicy
 from reviewagent.review.types import FileContext
 from reviewagent.scenario.profile import Profile, active_or_load
 from reviewagent.scenario.prompts import load_template, render_template
+from reviewagent.security import fence_for, normalize_untrusted, security_flag
 
 _SOURCE_DIR = "prompts/source"
 _DYNAMIC_DIR = "prompts/dynamic"
@@ -34,6 +39,13 @@ _MAX_VALID_DISPLAY = 20
 
 def _resolve_profile(profile: Profile | None) -> Profile:
     return profile or active_or_load()
+
+
+def _normalize_lines(lines: list[str], profile: Profile | None) -> list[str]:
+    """按 ``security.normalize_untrusted`` 清理不可信源码行（正常行原对象透传）."""
+    if not security_flag(_resolve_profile(profile), "normalize_untrusted", default=True):
+        return lines
+    return [normalize_untrusted(line) for line in lines]
 
 
 def _render(
@@ -94,6 +106,8 @@ def build_source_block(
     """
     file_path = ctx.file_path
     lines = list(ctx.lines)
+    if lines:
+        lines = _normalize_lines(lines, profile)
 
     if strategy == "full":
         if not lines:
@@ -217,6 +231,10 @@ def render_cross_file_section(
     * `refs` 空 → 空模板；非空 → items 模板；
     * 规则禁用（整段不存在）由调用方直接传 ``""``，不经过本函数。
 
+    每个 ref 的 ``content`` 是不可信证据：按 ``security.normalize_untrusted``
+    清理控制字符，围栏按内容自适应（默认 3 反引号 — 普通内容与旧硬编码逐字节
+    一致，仅当内容含 3+ 连续反引号时才加长，防止提前闭合）。
+
     不在此处记日志：降级告警由 runner 统一输出。
     """
     if evidence is not None and getattr(evidence, "degraded", False):
@@ -228,11 +246,20 @@ def render_cross_file_section(
             profile,
             trim=False,
         )
-    refs_block = "".join(
-        f"**`{ref['file']}:{ref['line']}`** 引用 `{ref['ident']}`:\n"
-        f"```\n{ref['content']}\n```\n\n"
-        for ref in refs
+    normalize = security_flag(
+        _resolve_profile(profile), "normalize_untrusted", default=True
     )
+    parts: list[str] = []
+    for ref in refs:
+        content = ref["content"]
+        if normalize:
+            content = normalize_untrusted(content)
+        fence = fence_for(content)
+        parts.append(
+            f"**`{ref['file']}:{ref['line']}`** 引用 `{ref['ident']}`:\n"
+            f"{fence}\n{content}\n{fence}\n\n"
+        )
+    refs_block = "".join(parts)
     return _render(
         items_template or _DEFAULT_ITEMS_TEMPLATE,
         {"refs_count": str(len(refs)), "refs_block": refs_block},

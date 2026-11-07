@@ -291,6 +291,14 @@ class ImproveCommand(BaseCommand):
         """
         wt = str(ws.worktree)
 
+        from reviewagent.scenario.profile import active_or_load
+        from reviewagent.security import hardening_prefix, normalize_untrusted, security_flag
+
+        profile = active_or_load()
+        if security_flag(profile, "normalize_untrusted", default=True):
+            # diff 属不可信数据：控制字符会让行号/围栏解析错位，先清理再裁剪。
+            file_diff = normalize_untrusted(file_diff)
+
         # V10: 大 diff 截断 (clip) — 防单文件巨型 diff 撑爆 prompt (截断处有显式标记行)
         _clip_n = config.improve_clip_diff_lines
         if _clip_n > 0:
@@ -325,9 +333,7 @@ class ImproveCommand(BaseCommand):
             build_chunk_prompt,
             build_rules_block,
         )
-        from reviewagent.scenario.profile import active_or_load
 
-        profile = active_or_load()
         rules_block = build_rules_block(
             self.repo_context, self._general_rules_text(), profile=profile
         )
@@ -358,7 +364,7 @@ class ImproveCommand(BaseCommand):
                 + "\n".join(_anchors) + "\n\n---\n\n"
             )
 
-        return build_chunk_prompt(
+        return hardening_prefix(profile) + build_chunk_prompt(
             ChunkPromptParts(
                 cross_file_section=cross_file_section,
                 rules_block=rules_block,
@@ -400,6 +406,33 @@ class ImproveCommand(BaseCommand):
             logger.warning("improve.get_mr_head_sha failed: {}", e)
             return None
 
+    def _worktree_candidate(self, root: Path, file_path: str) -> Path | None:
+        """把 worktree 相对路径解析为真实路径（worktree 约束，spec §7.6 第 2 条）.
+
+        默认（``security.worktree_containment=true``）走
+        ``review.paths.resolve_within``：绝对路径 / ``..`` 分量 / 符号链接逃逸
+        记 ``security.path_rejected`` WARNING 并返回 None；文件缺失或解析失败
+        （ELOOP 等 OSError）静默返回 None（调用侧沿用既有降级返回值）。
+
+        关闭约束时保留旧语义（``root / file_path``，绝对路径按 pathlib 规则直取）。
+        """
+        from reviewagent.review.paths import resolve_within
+        from reviewagent.security import security_flag
+
+        if not security_flag(
+            getattr(self, "_profile", None), "worktree_containment", default=True
+        ):
+            return Path(root) / file_path
+        try:
+            return resolve_within(Path(root), file_path)
+        except ValueError:
+            logger.warning(
+                "security.path_rejected path={} reason={}", file_path, "outside_worktree"
+            )
+            return None
+        except OSError:
+            return None
+
     def _file_blob_sha(self, file_path: str, ws) -> str | None:
         """V9: 文件内容指纹 (sha1 of raw bytes at worktree head).
 
@@ -408,14 +441,8 @@ class ImproveCommand(BaseCommand):
         """
         import hashlib
         try:
-            ws_root = Path(ws.worktree)
-            p = ws_root / file_path
-            if not p.is_file():
-                try:
-                    p = (ws_root / file_path).resolve()
-                except OSError:
-                    return None
-            if not p.is_file():
+            p = self._worktree_candidate(Path(ws.worktree), file_path)
+            if p is None or not p.is_file():
                 return None
             return hashlib.sha1(p.read_bytes()).hexdigest()
         except OSError:
@@ -509,12 +536,16 @@ class ImproveCommand(BaseCommand):
 
     def _read_file_line_count(self, file_path: str, ws) -> int:
         """读 worktree 文件行数, 用于 priority 排序 + strategy 分配.
-        失败返回 -1 (排序时按最低优先级)."""
+        失败 (含路径越界 / 文件缺失) 返回 -1 (排序时按最低优先级)."""
+        if not ws:
+            return -1
+        path = self._worktree_candidate(Path(ws.worktree), file_path)
+        if path is None:
+            return -1
         try:
-            wt_path = Path(ws.worktree) / file_path
-            if not wt_path.is_file():
+            if not path.is_file():
                 return -1
-            with wt_path.open("r", encoding="utf-8", errors="replace") as f:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
                 return sum(1 for _ in f)
         except (OSError, UnicodeDecodeError):
             return -1
@@ -618,8 +649,10 @@ class ImproveCommand(BaseCommand):
             build_rules_block,
         )
         from reviewagent.scenario.profile import active_or_load
+        from reviewagent.security import hardening_prefix, normalize_untrusted, security_flag
 
         profile = active_or_load()
+        normalize = security_flag(profile, "normalize_untrusted", default=True)
         rules_block = build_rules_block(
             self.repo_context, self._general_rules_text(), profile=profile
         )
@@ -628,6 +661,8 @@ class ImproveCommand(BaseCommand):
         sections: list[str] = []
         for idx, fp in enumerate(group, 1):
             file_diff = diff_by_file.get(fp, "")
+            if normalize:
+                file_diff = normalize_untrusted(file_diff)
             valid_lines = line_map.get(fp, set())
             strat = strategy.get(fp, "patch")
             if strat == "full":
@@ -667,7 +702,7 @@ class ImproveCommand(BaseCommand):
             )
 
         file_list = "\n".join(f"- `{fp}`" for fp in group)
-        return build_batch_prompt(
+        return hardening_prefix(profile) + build_batch_prompt(
             BatchPromptParts(
                 rules_block=rules_block,
                 file_count=n,
@@ -765,18 +800,14 @@ class ImproveCommand(BaseCommand):
         ws = getattr(self, "ws", None)
         if not ws:
             return -1
-        ws_root = Path(ws.worktree)
-        candidates = [ws_root / file_path]
+        path = self._worktree_candidate(Path(ws.worktree), file_path)
+        if path is None:
+            return -1
         try:
-            candidates.append((ws_root / file_path).resolve())
+            if path.is_file():
+                return path.stat().st_size
         except OSError:
             pass
-        for p in candidates:
-            try:
-                if p.is_file():
-                    return p.stat().st_size
-            except OSError:
-                continue
         return -1
 
     def _single_file_over_full_budget(
@@ -884,23 +915,17 @@ class ImproveCommand(BaseCommand):
         )
 
     def _read_file_lines(self, file_path: str) -> list[str]:
-        """从 worktree 读 file 源，按行 split；读不到返回 []."""
+        """从 worktree 读 file 源，按行 split；读不到（含路径越界）返回 []."""
         if not self.ws:
             return []
-        # 绝对路径 / 相对路径都兼容
-        ws_root = Path(self.ws.worktree)
-        candidates = [ws_root / file_path]
-        # 若 file_path 含 ../ 等相对引用，从 worktree 解析
+        path = self._worktree_candidate(Path(self.ws.worktree), file_path)
+        if path is None:
+            return []
         try:
-            candidates.append((ws_root / file_path).resolve())
+            if path.is_file():
+                return path.read_text(encoding="utf-8").splitlines(keepends=False)
         except OSError:
-            pass
-        for p in candidates:
-            try:
-                if p.is_file():
-                    return p.read_text(encoding="utf-8").splitlines(keepends=False)
-            except OSError:
-                continue
+            return []
         return []
 
     @staticmethod
@@ -925,6 +950,11 @@ class ImproveCommand(BaseCommand):
     def _build_user_prompt(self) -> str:
         """把 diff 的 valid new_line 集合 + 完整文件源码喂给 agent —
         严格约束它的 start_line 取值，让模型能精确数出文件行号。"""
+        from reviewagent.scenario.profile import active_or_load
+        from reviewagent.security import hardening_prefix, normalize_untrusted, security_flag
+
+        profile = getattr(self, "_profile", None) or active_or_load()
+        normalize = security_flag(profile, "normalize_untrusted", default=True)
         line_map = self._diff_line_map()
 
         # 仓库规则上下文 (AGENTS.md) — 优先遵循
@@ -971,7 +1001,7 @@ class ImproveCommand(BaseCommand):
             logger.warning("improve.list_existing failed (non-fatal): {}", e)
 
         if not line_map:
-            return (
+            return hardening_prefix(profile) + (
                 f"{repo_ctx_block}"
                 f"{already_suggested_block}"
                 "请按你的 system prompt 处理当前 MR 的 diff"
@@ -985,13 +1015,15 @@ class ImproveCommand(BaseCommand):
             lines = self._read_file_lines(fp)
             if not lines:
                 continue
+            if normalize:
+                lines = [normalize_untrusted(ln) for ln in lines]
             numbered = "\n".join(f"{i+1:4d}| {ln}" for i, ln in enumerate(lines))
             file_blocks.append(
                 f"### 完整源码：`{fp}`（共 {len(lines)} 行；行号在左侧）\n```\n{numbered}\n```"
             )
         files_text = "\n\n".join(file_blocks) if file_blocks else "(no files)"
 
-        return (
+        return hardening_prefix(profile) + (
             f"{repo_ctx_block}"
             "请按你的 system prompt 处理当前 MR 的 diff\n"
             "（变更内容见上方附件文件）。\n\n"

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from reviewagent.logging_setup import logger
 from reviewagent.scenario.rules.model import Rule
+from reviewagent.security import fence_for, normalize_untrusted, security_flag
 
 if TYPE_CHECKING:  # 仅类型：避免在 import 期拉起 profile/config 的 env 解析
     from reviewagent.scenario.profile import Profile
@@ -106,15 +107,32 @@ def extract_rule_keys(text: str) -> list[str]:
 
 
 # ---------- 渲染 ----------
+def _normalize_enabled() -> bool:
+    """是否清理指令文件里的不可信控制字符（读激活 profile 的 security 开关）.
+
+    开关缺失 / profile 尚未装配 / 装配异常时保持**开启**（fail-safe：清理只会
+    去掉控制字符，正常内容逐字节不变）。
+    """
+    from reviewagent.scenario.profile import active_or_load
+
+    try:
+        profile = active_or_load()
+    except Exception:  # noqa: BLE001 - 开关解析失败不得影响规则渲染
+        return True
+    return security_flag(profile, "normalize_untrusted", default=True)
+
+
 def _get_markdown_fence(content: str) -> str:
-    fence = MARKDOWN_FENCE
-    while fence in content:
-        fence += "`"
-    return fence
+    """自适应围栏：起点为 ``MARKDOWN_FENCE``（5 反引号），内容含更长连续反引号时加长."""
+    return fence_for(content, minimum=len(MARKDOWN_FENCE))
 
 
 def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str:
-    """把文件内容渲染为 <instruction_files> XML 块 (带行数预算)."""
+    """把文件内容渲染为 <instruction_files> XML 块 (带行数预算).
+
+    文件内容是不可信数据：按 profile 的 ``security.normalize_untrusted`` 清理
+    控制字符，围栏长度始终大于内容中的最长连续反引号（防提前闭合）。
+    """
     if not files:
         return ""
 
@@ -127,7 +145,11 @@ def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str
     if max_lines < len(parts) + 1:
         return ""
 
+    normalize = _normalize_enabled()
+
     for path, content in files.items():
+        if normalize:
+            content = normalize_untrusted(content)
         scope = path.rsplit("/", 1)[0] if "/" in path else "repo-root"
         fence = _get_markdown_fence(content)
         file_header = [
