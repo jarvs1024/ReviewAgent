@@ -20,7 +20,7 @@ python3.12 -m venv .venv
 # 2. 配置
 cp .env.example .env
 # 编辑 .env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET（必填）
-# REVIEW_PROFILE 默认 ssd-python-autotest；本地可把 REVIEWAGENT_DATA_DIR 改回 ./data
+# REVIEW_PROFILE 默认 ssd-python-autotest
 
 # 3. 起 Redis（Docker 或本地）
 # docker run -d --name redis -p 6379:6379 redis:7

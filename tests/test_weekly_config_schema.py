@@ -143,6 +143,25 @@ def test_collectors_comma_and_space_are_equivalent(bind):
     assert comma == space == ("telemetry", "merged_mrs")
 
 
+def test_empty_collectors_env_falls_back_to_legacy_default(bind):
+    """`REVIEWAGENT_WEEKLY_COLLECTORS=` 经 binder 变成空 tuple，仍回退 3 段默认。"""
+    bind({"REVIEWAGENT_WEEKLY_COLLECTORS": ""})
+    cfg = WeeklyReportConfig.from_env(SimpleNamespace(reporting={}))
+    assert cfg.collectors == ("telemetry", "merged_mrs", "repo_scan")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["telemetry,merged_mrs", "telemetry merged_mrs"],
+)
+def test_collectors_env_variants_yield_same_tuple(bind, raw):
+    bind({"REVIEWAGENT_WEEKLY_COLLECTORS": raw})
+    assert WeeklyReportConfig.from_env(SimpleNamespace(reporting={})).collectors == (
+        "telemetry",
+        "merged_mrs",
+    )
+
+
 def test_report_title_falls_back_to_profile_then_default(bind):
     bind()
     profile = SimpleNamespace(reporting={"weekly_title": "Profile 周报"})

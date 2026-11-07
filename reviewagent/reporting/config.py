@@ -62,7 +62,9 @@ class WeeklyReportConfig:
             target_branch=cfg.weekly_target_branch,
             timezone=cfg.weekly_timezone,
             # binder 只按逗号切；这里再按空白切一次，兼容 "a b" 写法。
-            collectors=tuple(" ".join(cfg.weekly_collectors).replace(",", " ").split()),
+            # 空串 env 会被 binder 解析成空 tuple，此时回退旧的 3 段默认。
+            collectors=tuple(" ".join(cfg.weekly_collectors).replace(",", " ").split())
+            or ("telemetry", "merged_mrs", "repo_scan"),
             notifier=cfg.weekly_notifier,
             dingtalk_webhook_url=cfg.weekly_dingtalk_webhook_url,
             dingtalk_secret=cfg.weekly_dingtalk_secret,

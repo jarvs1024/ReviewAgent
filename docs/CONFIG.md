@@ -1,11 +1,18 @@
 # 生效配置（生成文件）
 
-> 本文件由下列命令生成，**不要手工编辑值**。改配置请改环境变量 / profile，再重新生成：
+> 本文件由下列命令生成，**不要手工编辑值**。改配置请改环境变量 / profile，再重新生成。
+> 以下两步只重写「生成输出」小节之后的段落，保留本文件上方的说明与指纹表格：
 >
 > ```bash
+> tmp=$(mktemp)
 > GITLAB_URL=https://gitlab.example.invalid GITLAB_PERSONAL_ACCESS_TOKEN=stub \
 >   GITLAB_WEBHOOK_SECRET=stub REVIEW_PROFILE=ssd-python-autotest \
->   .venv/bin/python -m reviewagent config show --diff-default --sources > docs/CONFIG.md
+>   .venv/bin/python -m reviewagent config show --diff-default --sources > "$tmp"
+> # 保留到「生成输出」标题（按前缀匹配，避免正文重复出现完整标题）
+> sed -n '1,/^## 生成输/p' docs/CONFIG.md > "$tmp.doc"
+> echo >> "$tmp.doc"
+> cat "$tmp" >> "$tmp.doc"
+> mv "$tmp.doc" docs/CONFIG.md
 > ```
 >
 > GitLab 三项必填项生成时使用临时 stub 值（secret 一律渲染为 `***`，`GITLAB_URL`

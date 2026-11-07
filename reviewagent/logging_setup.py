@@ -49,6 +49,8 @@ _SECRET_FIELD_NAMES: tuple[str, ...] = (
     "gitlab_webhook_secret",
     "qoder_sdk_pat",
     "opencode_password",
+    "weekly_dingtalk_secret",
+    "weekly_dingtalk_webhook_url",
 )
 
 # `scheme://user:pass@host` → `scheme://***@host`
