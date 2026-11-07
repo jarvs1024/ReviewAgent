@@ -19,16 +19,19 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from reviewagent import config as config_module
 from reviewagent.commands.improve import ImproveCommand
 from reviewagent.llm.base import LLMResult
 from reviewagent.scenario import profile as profile_module
 from reviewagent.scenario.profile import load_profile
 from reviewagent.scenario.rules import resolver
+from reviewagent.settings.schema import SCHEMA
 from reviewagent.telemetry import store as store_module
 from reviewagent.telemetry.store import Store
 
@@ -61,18 +64,40 @@ def _case_responses(name: str) -> dict[str, dict]:
     return data
 
 
+_SCENARIO_SPECS = tuple(spec for spec in SCHEMA if spec.scope == "scenario")
+
+
+def _pin_scenario_plane(monkeypatch) -> None:
+    """把场景平面钉回 SCHEMA 默认值，并隔离开发者 env（回放密闭性）.
+
+    `IMPROVE_MIN_SCORE=50` 这类场景 env 会先进入 import 时的 `_current`；
+    `load_profile` 处理 profile 映射字段时还会经 `spec_env_override` 二次
+    读取 env。只复位 `_current` 不足以密闭，所以这里同时把场景字段的 env
+    从进程环境中摘掉（monkeypatch 负责测试结束后还原），再让 profile 的
+    preset 覆盖默认值。`conftest._restore_config_snapshots` 负责复原全局
+    `_current` / `_EXPLICIT_ENV`。
+    """
+    defaults = {spec.name: spec.default for spec in _SCENARIO_SPECS}
+    config_module._current = replace(config_module.current(), **defaults)
+    for spec in _SCENARIO_SPECS:
+        for env_name in (spec.env, *spec.aliases):
+            if env_name:
+                monkeypatch.delenv(env_name, raising=False)
+
+
 def _run_case(case: dict, monkeypatch, tmp_path: Path) -> dict:
     name = case["name"]
     diff_text = (REPLAY_ROOT / "cases" / name / "diff.patch").read_text(encoding="utf-8")
     responses = _case_responses(name)
 
-    # 真实默认场景（与线上一致），不改任何 profile 字段.
+    # 先钉死场景平面（SCHEMA 默认），再加载真实默认场景让 preset 覆写.
+    _pin_scenario_plane(monkeypatch)
     profile = load_profile("ssd-python-autotest")
     monkeypatch.setattr(profile_module, "_active", profile)
     monkeypatch.setattr(resolver, "_ACTIVE", resolver.assemble_base(profile))
 
     worktree = tmp_path / name
-    worktree.mkdir()
+    worktree.mkdir(parents=True)
     _materialize_worktree(diff_text, worktree)
     diff_file = worktree / ".diff"
     diff_file.write_text(diff_text, encoding="utf-8")
@@ -134,12 +159,10 @@ def test_manifest_covers_three_synthetic_cases():
                 seen.add(key)
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_replay_matches_baseline(name, monkeypatch, tmp_path):
+def _assert_matches_baseline(name: str, suggestions: list[dict]) -> None:
+    """spec 回放门禁的全部断言（总数 / severity 占比 / high 条目）."""
     case = CASES[name]
     baseline = case["baseline"]
-    result = _run_case(case, monkeypatch, tmp_path)
-    suggestions = result["suggestions"]
 
     # 1) suggestion 总数偏差.
     actual_count = len(suggestions)
@@ -182,3 +205,23 @@ def test_replay_matches_baseline(name, monkeypatch, tmp_path):
     }
     for item in baseline["high_items"]:
         assert item in produced_high, f"{name}: missing baseline high item {item!r}"
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_replay_matches_baseline(name, monkeypatch, tmp_path):
+    result = _run_case(CASES[name], monkeypatch, tmp_path)
+    _assert_matches_baseline(name, result["suggestions"])
+
+
+def test_replay_ignores_scenario_env_override(monkeypatch, tmp_path):
+    """开发者 env（IMPROVE_MIN_SCORE=50）不得改变回放结果."""
+    name = sorted(CASES)[0]
+    case = CASES[name]
+
+    monkeypatch.setenv("IMPROVE_MIN_SCORE", "50")
+    overridden = _run_case(case, monkeypatch, tmp_path / "override")
+    # _pin_scenario_plane 已把该 env 摘掉；此处两次运行的环境完全一致.
+    baseline_run = _run_case(case, monkeypatch, tmp_path / "clean")
+
+    assert overridden["suggestions"] == baseline_run["suggestions"]
+    _assert_matches_baseline(name, overridden["suggestions"])

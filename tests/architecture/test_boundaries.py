@@ -107,15 +107,32 @@ def _is_within(module: str, prefix: str) -> bool:
     return module == prefix or module.startswith(prefix + ".")
 
 
+def _under_prefix(
+    path: Path, root: Path, prefixes: tuple[tuple[str, ...], ...]
+) -> bool:
+    """``path`` 是否落在 ``root`` 下某个前缀子树里（按**相对扫描根**判定）.
+
+    旧实现用 ``any(part in path.parts ...)``，会把任意层级里同名的目录
+    （如 ``tests/fixtures/policies/``）也排除掉，守卫可在无感知的情况下空转。
+    """
+    if not prefixes:
+        return False
+    try:
+        parts = path.resolve().relative_to(Path(root).resolve()).parts
+    except ValueError:
+        parts = (path.name,)
+    return any(parts[: len(prefix)] == tuple(prefix) for prefix in prefixes)
+
+
 def _import_violations(
     root: Path,
     *,
     forbidden: tuple[str, ...],
-    exclude_parts: tuple[str, ...] = (),
+    exclude_parts: tuple[tuple[str, ...], ...] = (),
 ) -> list[str]:
     violations: list[str] = []
     for path in _python_files(root):
-        if any(part in path.parts for part in exclude_parts):
+        if _under_prefix(path, root, exclude_parts):
             continue
         hits = sorted(
             module
@@ -132,11 +149,11 @@ def _import_violations(
 
 
 def shared_review_violations(root: Path) -> list[str]:
-    """``review`` 共享模块不得 import 策略实现或命令层（排除 policies/）."""
+    """``review`` 共享模块不得 import 策略实现或命令层（相对根排除 policies/ 子树）."""
     return _import_violations(
         root,
         forbidden=("reviewagent.review.policies", "reviewagent.commands"),
-        exclude_parts=("policies",),
+        exclude_parts=(("policies",),),
     )
 
 
@@ -167,12 +184,29 @@ def config_module_import_violations(root: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _os_aliases(tree: ast.Module) -> set[str]:
+    """收集绑定到 ``os`` 模块的本地名（``import os`` / ``import os as _o``）."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".", 1)[0] == _OS_ENV_MODULE:
+                    aliases.add(alias.asname or _OS_ENV_MODULE)
+    return aliases
+
+
 def _env_accesses(path: Path) -> list[str]:
-    """AST 里出现的环境变量直接读取（文档字符串 / 注释天然不在 AST 中）."""
+    """AST 里出现的环境变量直接读取（文档字符串 / 注释天然不在 AST 中）.
+
+    支持 ``import os as _o`` / ``from os import environ as env`` /
+    ``getattr(<os 别名>, "environ" | "getenv")`` —— 别名不得成为绕出口。
+    """
+    tree = _parse(path)
+    os_aliases = _os_aliases(tree)
     hits: list[str] = []
-    for node in ast.walk(_parse(path)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "environ":
-            if isinstance(node.value, ast.Name) and node.value.id == _OS_ENV_MODULE:
+            if isinstance(node.value, ast.Name) and node.value.id in os_aliases:
                 hits.append("os.environ")
         elif isinstance(node, ast.Call):
             func = node.func
@@ -180,9 +214,19 @@ def _env_accesses(path: Path) -> list[str]:
                 isinstance(func, ast.Attribute)
                 and func.attr == "getenv"
                 and isinstance(func.value, ast.Name)
-                and func.value.id == _OS_ENV_MODULE
+                and func.value.id in os_aliases
             ):
                 hits.append("os.getenv")
+            elif (
+                isinstance(func, ast.Name)
+                and func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in os_aliases
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in {"environ", "getenv"}
+            ):
+                hits.append(f"getattr(os, {node.args[1].value!r})")
             elif (
                 isinstance(func, ast.Name)
                 and func.id == "__import__"
@@ -202,7 +246,8 @@ def env_reader_violations(root: Path) -> list[str]:
     """``settings/**`` + 显式 allowlist 之外禁止直接读环境变量."""
     violations: list[str] = []
     for path in _python_files(root):
-        if "settings" in path.parts:
+        # settings 排除同样按相对扫描根的子树判定（不误伤任意同名目录）。
+        if _under_prefix(path, root, (("settings",),)):
             continue
         rel = _rel_posix(path)
         if rel in ENV_READER_ALLOWLIST:
@@ -280,6 +325,50 @@ def test_bad_env_fixture_fails_config_boundary_guard():
     assert violations
     assert any("os.environ" in item for item in violations)
     assert any("os.getenv" in item for item in violations)
+
+
+def test_bad_env_alias_fixture_fails_config_boundary_guard():
+    """`import os as _o` / `from os import environ as env` / getattr 别名同样被 flag."""
+    violations = env_reader_violations(FIXTURES / "bad_env_alias.py")
+    assert violations
+    joined = "\n".join(violations)
+    assert "os.environ" in joined
+    assert "getattr(os, 'environ')" in joined
+    assert "from os import environ" in joined
+
+
+def test_import_exclusion_is_relative_to_scan_root(tmp_path):
+    """只有扫描根下的 `policies/` 子树被排除；任意层级的同名目录仍受检."""
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "excluded.py").write_text(
+        "from reviewagent.commands.improve import x\n", encoding="utf-8"
+    )
+    nested = tmp_path / "pkg" / "policies"
+    nested.mkdir(parents=True)
+    (nested / "flagged.py").write_text(
+        "from reviewagent.commands.improve import x\n", encoding="utf-8"
+    )
+
+    violations = shared_review_violations(tmp_path)
+    assert len(violations) == 1, violations
+    assert "flagged.py" in violations[0]
+
+
+def test_env_settings_exclusion_is_relative_to_scan_root(tmp_path):
+    """只有扫描根下的 `settings/` 子树被排除；嵌套同名目录仍受检."""
+    (tmp_path / "settings").mkdir()
+    (tmp_path / "settings" / "ok.py").write_text(
+        "import os\n\nVALUE = os.environ.get('X')\n", encoding="utf-8"
+    )
+    nested = tmp_path / "pkg" / "settings"
+    nested.mkdir(parents=True)
+    (nested / "bad.py").write_text(
+        "import os\n\nVALUE = os.environ.get('X')\n", encoding="utf-8"
+    )
+
+    violations = env_reader_violations(tmp_path)
+    assert len(violations) == 1, violations
+    assert "bad.py" in violations[0]
 
 
 def test_env_guard_rejects_arbitrary_same_named_config(tmp_path):

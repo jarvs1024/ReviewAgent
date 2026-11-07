@@ -4,6 +4,10 @@
 `measure()` 复测，并与仓库内固定的 `tests/replay/perf_baseline.json` 对照，
 防止 prompt 模板 / 规则装配在后续重构中退化成数量级的额外开销。
 
+基线同时记录装配/渲染区间的 `tracemalloc` 峰值（`peak_tracemalloc_kb`，
+与本进程历史无关，可跨机器按倍数比较）与整进程峰值 RSS（`peak_rss_mb`，
+仅作参考）。门禁用前者做相对比较、后者做绝对冒烟上限。
+
 运行方式（生成 / 刷新基线）::
 
     .venv/bin/python scripts/bench_review_assembly.py
@@ -18,6 +22,7 @@ import os
 import platform
 import resource
 import sys
+import tracemalloc
 from pathlib import Path
 from statistics import mean
 from time import perf_counter
@@ -40,6 +45,7 @@ BASELINE_KEYS = (
     "assemble_seconds",
     "build_prompt_seconds",
     "total_seconds",
+    "peak_tracemalloc_kb",
     "peak_rss_mb",
     "platform",
 )
@@ -68,7 +74,7 @@ def _chunk_parts() -> Any:
 
 
 def measure(iterations: int = 5) -> dict[str, Any]:
-    """测 `assemble_base` 与 `build_chunk_prompt` 的平均耗时 + 峰值 RSS."""
+    """测 `assemble_base` 与 `build_chunk_prompt` 的平均耗时 + 峰值内存."""
     if iterations <= 0:
         raise ValueError(f"iterations must be positive: {iterations}")
 
@@ -82,14 +88,23 @@ def measure(iterations: int = 5) -> dict[str, Any]:
     assemble_samples: list[float] = []
     prompt_samples: list[float] = []
     rendered = ""
-    for _ in range(iterations):
-        started = perf_counter()
-        resolver.assemble_base(profile)
-        assemble_samples.append(perf_counter() - started)
+    tracing = tracemalloc.is_tracing()
+    if not tracing:
+        tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        for _ in range(iterations):
+            started = perf_counter()
+            resolver.assemble_base(profile)
+            assemble_samples.append(perf_counter() - started)
 
-        started = perf_counter()
-        rendered = build_chunk_prompt(parts, profile=profile)
-        prompt_samples.append(perf_counter() - started)
+            started = perf_counter()
+            rendered = build_chunk_prompt(parts, profile=profile)
+            prompt_samples.append(perf_counter() - started)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        if not tracing:
+            tracemalloc.stop()
     if "core/main.py" not in rendered:
         raise RuntimeError("benchmark prompt lost the file path placeholder")
 
@@ -100,6 +115,7 @@ def measure(iterations: int = 5) -> dict[str, Any]:
         "assemble_seconds": round(assemble_s, 6),
         "build_prompt_seconds": round(prompt_s, 6),
         "total_seconds": round(assemble_s + prompt_s, 6),
+        "peak_tracemalloc_kb": round(peak_bytes / 1024, 1),
         "peak_rss_mb": round(_peak_rss_mb(), 2),
         "platform": platform.system().lower(),
     }

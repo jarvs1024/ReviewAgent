@@ -9,8 +9,9 @@
 1. import 节点（含相对 import）文本里出现 ``.py`` / ``-t py`` /
    ``import ast``，或导入标准库 ``ast``（Python 专属语法树）；
 2. 可执行字符串常量（含 f-string 的常量片段）包含上述字面量；
-3. ``ast.Compare`` 左侧为名字 ``language`` 且比较对象是字符串常量
-   （即 ``language == "python"`` 之类的语言分支）。
+3. ``ast.Compare`` 中的语言分支：``language == "python"``、
+   ``self.language == "python"``、``meta["language"] == "python"``，以及反向
+   写法 ``"python" == language`` —— 任一侧是语言引用、另一侧是字符串常量即命中。
 
 注释与模块 / 类 / 函数 docstring 不参与扫描——它们是文档，不是分支。
 """
@@ -111,6 +112,32 @@ def _is_stdlib_ast_import(node: ast.Import | ast.ImportFrom) -> bool:
     return (node.module or "").split(".", 1)[0] == _AST_MODULE
 
 
+def _is_language_ref(node: ast.AST) -> bool:
+    """语言引用形态：``language`` / ``obj.language`` / ``meta["language"]``."""
+    if isinstance(node, ast.Name):
+        return node.id == "language"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "language"
+    if isinstance(node, ast.Subscript):
+        slice_node = node.slice
+        return (
+            isinstance(slice_node, ast.Constant) and slice_node.value == "language"
+        )
+    return False
+
+
+def _language_compare_values(node: ast.Compare) -> list[str]:
+    """比较两侧任一为语言引用时，返回参与比较的字符串常量（含反向比较）."""
+    participants = [node.left, *node.comparators]
+    if not any(_is_language_ref(item) for item in participants):
+        return []
+    return [
+        item.value
+        for item in participants
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    ]
+
+
 def language_literal_violations(root: Path) -> list[str]:
     """返回 ``root`` 下所有语言字面量违规（``path: kind: 片段``）."""
     violations: list[str] = []
@@ -145,15 +172,8 @@ def language_literal_violations(root: Path) -> list[str]:
                                 f"{rel}: f-string ({label}): {part.value[:80]!r}"
                             )
             elif isinstance(node, ast.Compare):
-                if not (isinstance(node.left, ast.Name) and node.left.id == "language"):
-                    continue
-                for comparator in node.comparators:
-                    if isinstance(comparator, ast.Constant) and isinstance(
-                        comparator.value, str
-                    ):
-                        violations.append(
-                            f"{rel}: compare: language == {comparator.value!r}"
-                        )
+                for value in _language_compare_values(node):
+                    violations.append(f"{rel}: compare: language == {value!r}")
     return violations
 
 
@@ -193,6 +213,23 @@ def test_language_literal_fixture_fails_guard():
     assert "-t py" in joined
     assert ".py" in joined
     assert "language ==" in joined
+    # 反向比较 + 属性/下标形态都必须命中（每条 compare 一条违规）。
+    compares = [item for item in violations if ": compare:" in item]
+    assert len(compares) == 4, compares
+
+
+def test_reverse_and_attribute_language_compares_are_flagged(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "def f(language, meta, obj):\n"
+        '    return "python" == language or obj.language == "python" '
+        'or meta["language"] == "python"\n',
+        encoding="utf-8",
+    )
+    violations = language_literal_violations(sample)
+    compares = [item for item in violations if ": compare:" in item]
+    assert len(compares) == 3, violations
+    assert all("language ==" in item for item in compares)
 
 
 def test_docstrings_and_comments_are_ignored(tmp_path):
