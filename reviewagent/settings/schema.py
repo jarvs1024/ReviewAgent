@@ -29,7 +29,8 @@ class FieldSpec:
     aliases: tuple[str, ...] = ()
 
 
-def _profiles_root() -> str:
+def profiles_root() -> str:
+    """仓库根 `profiles/` 目录（公开名，供 config 的默认工厂引用）."""
     return str(Path(__file__).resolve().parents[2] / "profiles")
 
 
@@ -75,7 +76,7 @@ SCHEMA: tuple[FieldSpec, ...] = (
     FieldSpec("data_dir", Path, Path("./data"), env="REVIEWAGENT_DATA_DIR", scope="instance"),
     FieldSpec("log_level", str, "INFO", env="REVIEWAGENT_LOG_LEVEL", scope="instance"),
     FieldSpec("review_profile", str, "", env="REVIEW_PROFILE", scope="instance"),
-    FieldSpec("review_profile_root", str, _profiles_root(), env="REVIEW_PROFILE_ROOT", scope="instance"),
+    FieldSpec("review_profile_root", str, profiles_root(), env="REVIEW_PROFILE_ROOT", scope="instance"),
     FieldSpec("mr_cooldown_seconds", int, 60, env="MR_COOLDOWN_SECONDS", scope="instance", minimum=0),
     FieldSpec("max_review_calls_per_mr", int, 30, env="MAX_REVIEW_CALLS_PER_MR", scope="instance", minimum=0),
     FieldSpec("max_diff_chars", int, 50000, env="MAX_DIFF_CHARS", scope="scenario", minimum=1),

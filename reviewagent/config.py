@@ -15,7 +15,13 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from reviewagent.settings.schema import _profiles_root
+from reviewagent.settings import (
+    SCHEMA_BY_NAME,
+    UNSET,
+    coerce_scenario,
+    profiles_root,
+    validate,
+)
 
 
 @dataclass(frozen=True)
@@ -89,7 +95,7 @@ class Config:
 
     # ---- 场景包 (Profile) ----
     review_profile: str = ""                  # 空=内置默认场景（当前 Python/SSD 行为）
-    review_profile_root: str = field(default_factory=_profiles_root)  # profiles/ 根目录
+    review_profile_root: str = field(default_factory=profiles_root)  # profiles/ 根目录
 
     # ---- 限制 ----
     mr_cooldown_seconds: int = 60
@@ -192,16 +198,21 @@ _current: Config = Config.from_env()
 class _ConfigProxy:
     """模块级稳定引用；scenario 应用时只替换 `_current`，不重绑全局.
 
-    `dataclasses.replace(view, **changes)` 仍然可用（既有测试依赖）：
-    代理声明了空的 `__dataclass_fields__`，因此 replace() 会调用
-    `view.__class__(**changes)`，这里用 `_current` + changes 生成一份不可变快照.
+    `dataclasses.replace/asdict/fields` 都按真实 dataclass 处理本代理：
+    `__dataclass_fields__` 指向 `Config` 的真实字段映射（不是空 dict），因此
+    `replace(replace(config, a=...), b=...)` 的链式覆盖、无参 `replace(config)`
+    与 `asdict(config)` 都会返回真实值。`replace` 会调用
+    `proxy.__class__(**all_fields)`，这里用 `_current` + changes 生成一份不可变快照.
 
     没有 `__slots__`：既有测试用 `object.__setattr__(config, ...)` 就地覆盖单个字段
-    （绕过 frozen），这类写入落在实例 __dict__ 上、会遮蔽 `_current` 的同名字段；
-    普通赋值 `config.x = ...` 仍被 `__setattr__` 拒绝.
+    （绕过 frozen）。这是 `test_improve_strategy` 依赖的测试旋钮，语义上是一层
+    独立于 scenario 的 shadow 覆盖层，优先级高于 `_current`/scenario：普通读取先
+    命中实例 __dict__，只有未被遮蔽的字段才转发到 `_current`。普通赋值
+    `config.x = ...` 仍被 `__setattr__` 拒绝.
     """
 
-    __dataclass_fields__: dict[str, Any] = {}
+    # 真实字段映射（dataclasses.replace/asdict/fields 依赖它遍历字段）。
+    __dataclass_fields__: dict[str, Any] = Config.__dataclass_fields__
 
     def __init__(self, **overrides: Any) -> None:
         if overrides:
@@ -239,20 +250,28 @@ def current() -> Config:
 def apply_scenario(values: Mapping[str, Any]) -> None:
     """把场景包的值应用到当前配置（不落盘、不改 env）.
 
-    未知字段 -> KeyError；secret 字段 -> PermissionError（场景包不得携带凭据）.
+    场景平面空值语义（刻意不复用 env binder 的 `"" -> 未设置`）：
+      * `None` = 继承：跳过该字段，保留当前值；
+      * `""` / `()` / `[]` = 显式空值：照常写入，不回退 schema 默认值；
+      * 字符串字段保留 `""`；tuple 字段的显式空保留 `()`。
+
+    权限边界：未知字段 -> KeyError；secret 字段或 `scope="instance"` 的字段
+    -> PermissionError（消息含字段名），避免运行时静默改 redis/data_dir 等实例参数。
+    类型不符 -> ValueError（消息含字段名）。
     """
     global _current
-    from reviewagent.settings.binder import _UNSET, _validate, coerce
-    from reviewagent.settings.schema import SCHEMA_BY_NAME
-
     updates: dict[str, Any] = {}
     for name, raw in values.items():
         spec = SCHEMA_BY_NAME[name]
         if spec.secret:
             raise PermissionError(f"scenario must not set secret field: {name}")
-        value = coerce(spec, raw)
-        if value is _UNSET:
+        if spec.scope != "scenario":
+            raise PermissionError(
+                f"scenario must not set instance-scoped field: {name} (scope={spec.scope})"
+            )
+        value = coerce_scenario(spec, raw)
+        if value is UNSET:  # 只有 None = 继承；显式空值不会走这里
             continue
-        _validate(spec, value)
-        updates[name] = value
-    _current = replace(_current, **updates)
+        updates[name] = validate(spec, value)
+    if updates:
+        _current = replace(_current, **updates)
