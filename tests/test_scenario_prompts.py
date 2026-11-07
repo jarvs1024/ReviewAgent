@@ -7,6 +7,7 @@ from pathlib import Path
 
 import frontmatter
 import pytest
+import yaml
 
 from reviewagent.prompts.loader import load, load_block
 from reviewagent.scenario.profile import load_profile
@@ -15,6 +16,7 @@ from reviewagent.scenario.prompts import (
     load_template,
     render_template,
 )
+from reviewagent.scenario.prompts import load_block as scenario_load_block
 
 REPO = Path(__file__).resolve().parents[1]
 LEGACY_PROMPTS = REPO / "reviewagent" / "prompts"
@@ -102,3 +104,62 @@ def test_template_placeholder_is_strict():
 def test_render_template_rejects_unknown_identifier():
     # 非法占位符名（数字开头）不属于 {{name}} 语法，保持原样
     assert render_template("a{{1x}}", {}, template_path="t") == "a{{1x}}"
+
+
+def test_render_template_allows_whitespace_and_reports_profile():
+    assert render_template("a{{ x }}b", {"x": "1"}, template_path="t") == "a1b"
+    with pytest.raises(ValueError, match="missing") as excinfo:
+        render_template("{{ y }}", {}, template_path="t", profile_name="alt")
+    assert "alt" in str(excinfo.value)
+
+
+# ---------- Fix round 1：_shared 回退 / 目录穿越 / available 键推导 ----------
+
+
+def _make_tmp_profile(tmp_path: Path, name: str = "alt"):
+    root = tmp_path / "profiles"
+    profile_dir = root / name
+    prompts = {"improve": "prompts/improve.md", "describe": "prompts/describe.md"}
+    for rel in prompts.values():
+        path = profile_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nname: {Path(rel).stem}\n---\nbody\n", encoding="utf-8")
+    data = {
+        "schema_version": 1,
+        "name": name,
+        "language": "python",
+        "prompts": prompts,
+    }
+    (profile_dir / "profile.yaml").write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return load_profile(name, root=root)
+
+
+def test_load_block_falls_back_to_shared(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    shared = profile.root.parent / "_shared" / "prompts"
+    shared.mkdir(parents=True)
+    (shared / "_shared_rules.md").write_text("shared block body\n", encoding="utf-8")
+    assert scenario_load_block("_shared_rules", profile) == "shared block body"
+
+
+def test_load_block_rejects_path_traversal(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    with pytest.raises(ValueError, match="invalid prompt name"):
+        scenario_load_block("_../escape", profile)
+    with pytest.raises(ValueError, match="invalid prompt name"):
+        scenario_load_block("_..\\escape", profile)
+
+
+def test_load_rejects_path_traversal():
+    with pytest.raises(ValueError, match="invalid prompt name"):
+        load("../improve")
+    with pytest.raises(ValueError, match="invalid prompt name"):
+        load(".hidden")
+
+
+def test_available_uses_profile_keys_not_disk(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    (profile.root / "prompts" / "stray.md").write_text("stray\n", encoding="utf-8")
+    assert available(profile) == ["describe", "improve"]

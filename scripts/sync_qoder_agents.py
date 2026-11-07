@@ -12,11 +12,9 @@ only rewritten when the source mtime is newer than the dest mtime.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import frontmatter
-
 
 # Tools we always disable — ReviewAgent prompts must be read-only against
 # the workdir and must not perform web fetches.

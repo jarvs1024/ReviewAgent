@@ -194,6 +194,16 @@ def resolve_env(spec: FieldSpec, src: Mapping[str, str]) -> tuple[Any, bool]:
     return value, explicit
 
 
+def spec_env_override(spec: FieldSpec) -> Any:
+    """二次解析 env：canonical 优先于 aliases，返回 `UNSET` 或 coerce 后的值.
+
+    供场景装配在 config 导入之后再次用 env 覆盖 profile 值（§5.4：env 只覆盖
+    运行配置，不污染 profile 数据）。空串/None 仍按 env 平面语义返回 `UNSET`。
+    """
+    value, _ = resolve_env(spec, os.environ)
+    return value
+
+
 def from_env(environ: Mapping[str, str] | None = None) -> Config:
     global _EXPLICIT_ENV
     src = dict(os.environ if environ is None else environ)

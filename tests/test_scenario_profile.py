@@ -27,6 +27,12 @@ def _write_profile(root: Path, name: str, **overrides) -> Path:
     data.update(overrides)
     profile_dir = root / name
     _write_yaml(profile_dir / "profile.yaml", data)
+    prompts = data.get("prompts")
+    if isinstance(prompts, dict):
+        for rel in prompts.values():
+            path = profile_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {rel}\n", encoding="utf-8")
     return profile_dir
 
 
@@ -206,3 +212,120 @@ def test_active_or_load_returns_cached(monkeypatch):
     monkeypatch.setattr(sp, "_active", profile)
     assert sp.active() is profile
     assert sp.active_or_load() is profile
+
+
+# ---------- Fix round 1：{} 语义 / 引用文件 fail-fast / 校验 / instance ----------
+
+
+def _write_preset(root: Path, name: str, **overrides) -> None:
+    data = {
+        "schema_version": 1,
+        "name": name,
+        "language": "python",
+        "prompts": {"improve": "prompts/improve.md", "describe": "prompts/describe.md"},
+    }
+    data.update(overrides)
+    _write_yaml(root / "_presets" / f"{name}.yaml", data)
+
+
+def test_empty_mapping_clears_preset_values(tmp_path):
+    """`capabilities: {}` 是显式清空，不能继承 preset 的键."""
+    _write_preset(tmp_path, "base", capabilities={"ast_validation": True}, context={"partial_context_lines": 20})
+    _write_profile(tmp_path, "alt", extends="base", capabilities={})
+    profile = load_profile("alt", root=tmp_path)
+    assert profile.capabilities == {}
+    assert profile.resolved["capabilities"] == {}
+    # 其他键不受影响（仍是 preset 值）
+    assert profile.resolved["context"] == {"partial_context_lines": 20}
+    assert profile.sources["capabilities"] == "profile"
+
+
+def test_preset_schema_version_rejected(tmp_path):
+    _write_preset(tmp_path, "base", schema_version=2)
+    _write_profile(tmp_path, "bad", extends="base")
+    with pytest.raises(ValueError, match="preset schema_version"):
+        load_profile("bad", root=tmp_path)
+
+
+def test_profile_value_type_invalid_rejected(tmp_path):
+    _write_profile(tmp_path, "bad", limits={"max_suggestions": "many"})
+    with pytest.raises(ValueError, match="improve_max_suggestions"):
+        load_profile("bad", root=tmp_path)
+
+
+def test_absolute_profile_outside_root_rejected(tmp_path):
+    outside_root = tmp_path / "outside"
+    _write_profile(outside_root, "ext")
+    with pytest.raises(ValueError, match="not found under"):
+        load_profile(str(outside_root / "ext"), root=tmp_path)
+
+
+def test_missing_profile_lists_descriptions(tmp_path):
+    _write_profile(tmp_path, "alt", description="备选场景")
+    with pytest.raises(ValueError, match="alt \\(备选场景\\)"):
+        load_profile("nope", root=tmp_path)
+
+
+def test_missing_referenced_prompt_file_rejected(tmp_path):
+    profile_dir = _write_profile(tmp_path, "bad")
+    (profile_dir / "prompts" / "improve.md").unlink()
+    with pytest.raises(ValueError, match="prompts.improve"):
+        load_profile("bad", root=tmp_path)
+
+
+def test_missing_dynamic_rules_file_rejected(tmp_path):
+    _write_profile(tmp_path, "bad", dynamic_rules="dynamic_rules.yaml")
+    with pytest.raises(ValueError, match="dynamic_rules"):
+        load_profile("bad", root=tmp_path)
+
+
+def test_missing_actions_file_rejected(tmp_path):
+    _write_profile(tmp_path, "bad", reporting={"actions_file": "reporting/rule_actions.yaml"})
+    with pytest.raises(ValueError, match="reporting.actions_file"):
+        load_profile("bad", root=tmp_path)
+
+
+def test_missing_rules_allowed_by_default_with_warning(tmp_path, monkeypatch):
+    import reviewagent.scenario.profile as sp
+
+    warnings: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(
+        sp.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append((message, args)),
+    )
+    _write_profile(tmp_path, "alt", rules=["rules/general_rules.md"])
+    profile = load_profile("alt", root=tmp_path)
+    assert profile.rules == ("rules/general_rules.md",)
+    assert any("profile_missing_rule" in message for message, _ in warnings)
+    with pytest.raises(ValueError, match="rules"):
+        load_profile("alt", root=tmp_path, allow_missing_rules=False)
+
+
+def test_fingerprint_stable_and_sensitive_to_preset(tmp_path):
+    _write_preset(tmp_path, "base", capabilities={"ast_validation": True})
+    _write_profile(tmp_path, "alt", extends="base")
+    first = load_profile("alt", root=tmp_path)
+    second = load_profile("alt", root=tmp_path)
+    assert first.fingerprint == second.fingerprint
+
+    _write_preset(tmp_path, "base", capabilities={"ast_validation": False})
+    changed = load_profile("alt", root=tmp_path)
+    assert changed.fingerprint != first.fingerprint
+
+
+def test_instance_binding_rejects_corrupt_json(tmp_path):
+    (tmp_path / "instance.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="invalid instance.json") as excinfo:
+        bind_instance(load_profile(None), tmp_path)
+    assert str(tmp_path) in str(excinfo.value)
+
+
+def test_instance_binding_rejects_unsupported_schema(tmp_path):
+    (tmp_path / "instance.json").write_text(
+        json.dumps({"schema_version": 2, "profile": DEFAULT_PROFILE}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="schema_version") as excinfo:
+        bind_instance(load_profile(None), tmp_path)
+    assert str(tmp_path) in str(excinfo.value)

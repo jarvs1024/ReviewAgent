@@ -16,6 +16,8 @@ import copy
 import hashlib
 import json
 import os
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ import yaml
 
 from reviewagent.config import apply_scenario
 from reviewagent.logging_setup import logger
-from reviewagent.settings.binder import UNSET, coerce, explicit_env
+from reviewagent.settings.binder import UNSET, explicit_env, spec_env_override
 from reviewagent.settings.schema import SCHEMA_BY_NAME
 
 DEFAULT_PROFILE = "ssd-python-autotest"
@@ -63,10 +65,14 @@ class Profile:
 
 
 def _deep_merge(base: Any, override: Any) -> Any:
+    """深度融合：`None` = 继承，显式空 dict/list = 清空（与 `[]` 语义对齐）."""
     if override is None:
         return copy.deepcopy(base)
-    if isinstance(base, dict) and isinstance(override, dict):
-        out = dict(base)
+    if isinstance(override, dict):
+        if not override:
+            # `{}` 是显式空映射：必须清空 preset 值，而不是被当成"未提供"继承。
+            return {}
+        out = dict(base) if isinstance(base, dict) else {}
         for key, value in override.items():
             out[key] = _deep_merge(out.get(key), value)
         return out
@@ -88,6 +94,21 @@ def _resolve_root(root: Path | None) -> Path:
     return Path(current().review_profile_root).expanduser().resolve()
 
 
+def _available_profiles(root: Path) -> list[str]:
+    """列出可用 profile（附 description），用于"profile 不存在"的错误提示."""
+    entries: list[str] = []
+    for path in sorted(root.glob("*/profile.yaml")):
+        name = path.parent.name
+        try:
+            data = _read_yaml(path)
+        except (OSError, ValueError, yaml.YAMLError):
+            entries.append(name)
+            continue
+        description = data.get("description")
+        entries.append(f"{name} ({description})" if description else name)
+    return entries
+
+
 def _resolve_profile_dir(name: str, root: Path) -> Path:
     if not name:
         name = DEFAULT_PROFILE
@@ -98,8 +119,10 @@ def _resolve_profile_dir(name: str, root: Path) -> Path:
     else:
         resolved = (root / name).resolve()
     if not resolved.is_dir() or resolved.parent != root:
-        available = sorted(p.parent.name for p in root.glob("*/profile.yaml"))
-        raise ValueError(f"profile '{name}' not found under {root}; available={available}")
+        raise ValueError(
+            f"profile '{name}' not found under {root}; "
+            f"available={_available_profiles(root)}"
+        )
     return resolved
 
 
@@ -112,7 +135,6 @@ def _has_path(node: Any, path: tuple[str, ...]) -> bool:
 
 
 def _apply_config(
-    profile_dir: Path,
     merged: dict[str, Any],
     raw: dict[str, Any],
     sources: dict[str, str],
@@ -161,10 +183,11 @@ def _apply_config(
             # env 在 config 导入时已生效：保持现状，不用 profile 值覆盖。
             sources[field_name] = "env"
             continue
-        if spec.env and spec.env in os.environ:
-            # env 在 config 导入之后才设置（测试 / 二次加载）：按 env 平面语义
-            # 重新解析并应用，显式空值视为"未提供"，继续走 profile 值。
-            env_value = coerce(spec, os.environ[spec.env])
+        if spec.env:
+            # env 可能在 config 导入之后才设置（测试 / 二次加载）：统一经
+            # binder.spec_env_override 二次解析（canonical + aliases），
+            # 显式空值视为"未提供"，继续走 profile 值。
+            env_value = spec_env_override(spec)
             if env_value is not UNSET:
                 updates[field_name] = env_value
                 sources[field_name] = "env"
@@ -179,16 +202,91 @@ def _fingerprint(root: Path, merged: dict[str, Any], files: list[str]) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps(merged, sort_keys=True, ensure_ascii=False).encode())
     for rel in sorted(files):
-        data = (root / rel).read_bytes() if (root / rel).exists() else b""
+        path = root / rel
+        if path.is_file():
+            data = path.read_bytes()
+        else:
+            # 不能静默按空文件计算：缺失文件与空文件必须可区分，且留下 WARNING。
+            logger.warning(
+                "scenario.profile_fingerprint_missing path={} profile_root={}",
+                rel,
+                root,
+            )
+            data = b"\0missing\0"
         digest.update(rel.encode() + b"\0" + hashlib.sha256(data).digest())
     return digest.hexdigest()
 
 
-def load_profile(name: str | None = None, *, root: Path | None = None) -> Profile:
+def _reference_path(profile_dir: Path, rel: Any) -> Path:
+    return (profile_dir / str(rel)).expanduser()
+
+
+def _check_referenced_files(
+    profile_dir: Path,
+    merged: dict[str, Any],
+    prompts: dict[str, Any],
+    *,
+    allow_missing_rules: bool,
+) -> None:
+    """引用文件存在性 fail-fast（prompts / dynamic_rules / reporting.actions_file）.
+
+    `rules` 首期允许缺失（规则包由 Task 5/6 落地），但必须显式参数化；
+    缺失时记录 WARNING，并且仍计入 fingerprint。
+    """
+    missing_prompts = [
+        f"prompts.{key}={rel!r}"
+        for key, rel in prompts.items()
+        if not _reference_path(profile_dir, rel).is_file()
+    ]
+    if missing_prompts:
+        raise ValueError(
+            "profile references missing prompt files: "
+            + ", ".join(missing_prompts)
+            + f" (profile root: {profile_dir})"
+        )
+    dynamic_rules = merged.get("dynamic_rules")
+    if dynamic_rules and not _reference_path(profile_dir, dynamic_rules).is_file():
+        raise ValueError(
+            f"profile field dynamic_rules references missing file: {dynamic_rules!r} "
+            f"(profile root: {profile_dir})"
+        )
+    reporting = merged.get("reporting")
+    actions_file = reporting.get("actions_file") if isinstance(reporting, dict) else None
+    if actions_file and not _reference_path(profile_dir, actions_file).is_file():
+        raise ValueError(
+            f"profile field reporting.actions_file references missing file: {actions_file!r} "
+            f"(profile root: {profile_dir})"
+        )
+    missing_rules = [
+        str(rel) for rel in merged.get("rules") or () if not _reference_path(profile_dir, rel).is_file()
+    ]
+    if missing_rules:
+        if not allow_missing_rules:
+            raise ValueError(
+                f"profile field rules references missing file(s): {missing_rules} "
+                f"(profile root: {profile_dir})"
+            )
+        for rel in missing_rules:
+            logger.warning(
+                "scenario.profile_missing_rule path={} profile_root={}",
+                rel,
+                profile_dir,
+            )
+
+
+def load_profile(
+    name: str | None = None,
+    *,
+    root: Path | None = None,
+    allow_missing_rules: bool = True,
+) -> Profile:
     """加载（并应用场景配置）一个 profile.
 
     `name=None` 时读 `config.current().review_profile`（实例平面字段，不走
     `apply_scenario`）；为空则回退 `DEFAULT_PROFILE` 并 WARNING。
+
+    `allow_missing_rules` 首期为 True（规则包尚未落地）；Task 5 会把默认改为
+    False，届时缺失 `rules` 引用文件将直接启动失败。
     """
     profile_root = _resolve_root(root)
     if name is None:
@@ -218,6 +316,11 @@ def load_profile(name: str | None = None, *, root: Path | None = None) -> Profil
         unknown = set(preset) - _ALLOWED_PROFILE_KEYS
         if unknown:
             raise ValueError(f"unknown preset fields: {sorted(unknown)}")
+        if preset.get("schema_version") != _SUPPORTED_SCHEMA:
+            raise ValueError(
+                f"unsupported preset schema_version: {preset.get('schema_version')!r} "
+                f"({preset_path})"
+            )
         merged = _deep_merge(merged, preset)
         sources.update({k: "preset" for k in preset})
     for key, value in raw.items():
@@ -231,15 +334,25 @@ def load_profile(name: str | None = None, *, root: Path | None = None) -> Profil
     if not language:
         raise ValueError(f"profile missing language: {profile_dir}")
     prompts = merged.get("prompts") or {}
-    for required in ("improve", "describe"):
-        if required not in prompts:
-            raise ValueError(f"profile missing prompts.{required}: {profile_dir}")
-    _apply_config(profile_dir, merged, raw, sources)
+    if not isinstance(prompts, dict):
+        raise ValueError(f"profile field prompts must be a mapping: {profile_dir}")
+    missing_required = [key for key in ("improve", "describe") if key not in prompts]
+    if missing_required:
+        fields = ", ".join(f"prompts.{key}" for key in missing_required)
+        raise ValueError(f"profile missing required fields: {fields}: {profile_dir}")
+    _check_referenced_files(
+        profile_dir,
+        merged,
+        prompts,
+        allow_missing_rules=allow_missing_rules,
+    )
+    _apply_config(merged, raw, sources)
     referenced = list(prompts.values()) + list(merged.get("rules") or [])
     if merged.get("dynamic_rules"):
         referenced.append(merged["dynamic_rules"])
-    if merged.get("reporting", {}).get("actions_file"):
-        referenced.append(merged["reporting"]["actions_file"])
+    reporting = merged.get("reporting")
+    if isinstance(reporting, dict) and reporting.get("actions_file"):
+        referenced.append(reporting["actions_file"])
     return Profile(
         name=str(merged.get("name") or profile_dir.name),
         language=str(language),
@@ -289,23 +402,84 @@ def load_and_activate() -> Profile:
     return _active
 
 
+_INSTANCE_SCHEMA = 1
+_LOCK_TIMEOUT_SECONDS = 5.0
+
+
+def _instance_error(data_dir: Path, detail: str) -> RuntimeError:
+    return RuntimeError(
+        f"data_dir {data_dir} has an invalid instance.json: {detail}; "
+        "bind a new REVIEWAGENT_DATA_DIR or fix the file"
+    )
+
+
+def _load_instance(path: Path, data_dir: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _instance_error(data_dir, f"unreadable JSON ({path}): {exc}") from exc
+    if not isinstance(payload, dict):
+        raise _instance_error(data_dir, f"expected a JSON object in {path}")
+    if payload.get("schema_version") != _INSTANCE_SCHEMA:
+        raise _instance_error(
+            data_dir,
+            f"unsupported schema_version {payload.get('schema_version')!r} in {path}",
+        )
+    return payload
+
+
+def _check_bound_profile(path: Path, data_dir: Path, profile: Profile) -> None:
+    existing = _load_instance(path, data_dir)
+    if existing.get("profile") != profile.name:
+        raise RuntimeError(
+            f"data_dir {data_dir} is bound to profile {existing.get('profile')!r}, "
+            f"refusing {profile.name!r}; use a new REVIEWAGENT_DATA_DIR"
+        )
+
+
 def bind_instance(profile: Profile, data_dir: Path) -> None:
     """把 data_dir 绑定到 profile（原子写 `instance.json`）.
 
-    同一 data_dir 已绑定其他 profile 时抛 RuntimeError（提示新建数据目录），
-    避免 telemetry / cohort / 周报跨场景混用。
+    同一 data_dir 已绑定其他 profile / 损坏 / 版本不符时抛 RuntimeError
+    （提示新建数据目录），避免 telemetry / cohort / 周报跨场景混用。
+
+    首次写入用 `O_CREAT|O_EXCL` 锁文件串行化并发首启，写入自身仍是
+    "同目录临时文件 + os.replace" 的原子替换。
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "instance.json"
-    payload = {"schema_version": 1, "profile": profile.name}
     if path.exists():
-        existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing.get("profile") != profile.name:
-            raise RuntimeError(
-                f"data_dir {data_dir} is bound to profile {existing.get('profile')!r}, "
-                f"refusing {profile.name!r}; use a new REVIEWAGENT_DATA_DIR"
-            )
+        _check_bound_profile(path, data_dir, profile)
         return
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    lock_path = data_dir / "instance.json.lock"
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    lock_fd: int | None = None
+    while lock_fd is None:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"data_dir {data_dir}: timed out waiting for {lock_path.name}; "
+                    "another process may be binding this data_dir"
+                ) from None
+            time.sleep(0.01)
+    try:
+        os.write(lock_fd, str(os.getpid()).encode())
+        # 双重检查：等待锁期间另一个进程可能已完成首次绑定。
+        if path.exists():
+            _check_bound_profile(path, data_dir, profile)
+            return
+        payload = {"schema_version": _INSTANCE_SCHEMA, "profile": profile.name}
+        tmp = data_dir / f".instance.json.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        try:
+            tmp.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    finally:
+        os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)

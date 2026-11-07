@@ -21,10 +21,6 @@ from pathlib import Path
 
 import frontmatter
 
-from reviewagent.scenario.profile import active_or_load
-
-# 渲染源 = 当前场景 profile 的 prompts 目录（plan §5.3），不再硬编码仓库路径。
-PROMPTS_DIR = active_or_load().root / "prompts"
 DEFAULT_AGENT_DIR = Path.home() / ".config" / "opencode" / "agent"
 
 # Map our prompt name → opencode mode + tool overrides
@@ -109,6 +105,21 @@ def sync(prompts_dir: Path, agent_dir: Path) -> list[Path]:
     return written
 
 
+def _resolve_prompts_dir() -> Path:
+    """渲染源 = 当前场景 profile 的 prompts 目录（plan §5.3）.
+
+    在 `main()` 内解析（而不是 import 期），这样 `--help` 可用，且缺必填
+    env 时给出一行可读错误后以退出码 2 结束。
+    """
+    try:
+        from reviewagent.scenario.profile import active_or_load
+
+        return active_or_load().root / "prompts"
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: cannot resolve scenario profile: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -118,7 +129,7 @@ def main() -> int:
         help=f"opencode agent dir (default: {DEFAULT_AGENT_DIR})",
     )
     args = parser.parse_args()
-    written = sync(PROMPTS_DIR, args.agent_dir)
+    written = sync(_resolve_prompts_dir(), args.agent_dir)
     print(f"\n[ok] synced {len(written)} agent file(s)")
     return 0
 

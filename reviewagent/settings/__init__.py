@@ -15,6 +15,7 @@ from reviewagent.settings.binder import (
     explicit_env,
     fingerprint,
     from_env,
+    spec_env_override,
     validate,
 )
 from reviewagent.settings.schema import SCHEMA, SCHEMA_BY_NAME, FieldSpec, profiles_root
@@ -30,5 +31,6 @@ __all__ = [
     "fingerprint",
     "from_env",
     "profiles_root",
+    "spec_env_override",
     "validate",
 ]
