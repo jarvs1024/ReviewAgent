@@ -22,14 +22,17 @@ cp .env.example .env
 # 编辑 .env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET（必填）
 # REVIEW_PROFILE 默认 ssd-python-autotest
 
-# 3. 起 Redis（Docker 或本地）
+# 3. 载入 .env 到当前 shell（config check 读进程环境）
+set -a; source .env; set +a
+
+# 4. 起 Redis（Docker 或本地）
 # docker run -d --name redis -p 6379:6379 redis:7
 
-# 4. 启动前静态校验（缺必填 / profile 非法 / 规则装配失败都在这里 fail-fast）
+# 5. 启动前静态校验（缺必填 / profile 非法 / 规则装配失败都在这里 fail-fast）
 .venv/bin/python -m reviewagent config check
 .venv/bin/python -m reviewagent rules check
 
-# 5. 起 webhook + worker
+# 6. 起 webhook + worker
 .venv/bin/uvicorn reviewagent.main:app --host 0.0.0.0 --port 3000
 .venv/bin/rq worker review --url redis://127.0.0.1:6379/0
 ```

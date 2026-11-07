@@ -37,7 +37,7 @@
   systemd unit 增加 `REVIEW_PROFILE` / `REVIEWAGENT_DATA_DIR` 与
   `ExecStartPre=... reviewagent config check`。
 - 日志与运维文档的事件名以代码为准：`chain.lock_timeout`、`improve.record_suggestion failed`。
-- 非法配置值改为启动即失败（`config check` / binder 校验），不再静默回退默认值（Ruling 21）。
+- 非法配置值改为启动即失败（`config check` / binder 校验），不再静默回退默认值。
 
 ### Known limits
 
