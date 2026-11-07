@@ -76,17 +76,25 @@ def _suggestion_content_fingerprint(existing_code: str) -> str:
 
 
 def _raw_rule_keys(raw: Any) -> list[str]:
-    """规范化 agent 输出的 `rule_keys` 字段（列表 → 非空字符串列表）."""
+    """规范化 agent 输出的 `rule_keys` 字段（列表 → 非空字符串列表）.
+
+    非 list 值一律忽略（返回空列表）：畸形 agent 输出不得退化成
+    `[str(value)]` 这类文本兜底键，恢复旧去重的 精确收缩 语义.
+    """
     value = raw.get("rule_keys") if isinstance(raw, dict) else None
     if isinstance(value, list):
         return [str(item) for item in value if item]
-    if value:
-        return [str(value)]
     return []
 
 
 def _rule_key_text(normalised: dict[str, Any]) -> str:
-    return (normalised.get("rationale") or "") + " " + (normalised.get("header") or "")
+    """dedup 用文本：rationale + header（旧去重的扫描范围）."""
+    return (normalised.get("rationale") or "") + "\n" + (normalised.get("header") or "")
+
+
+def _record_rule_key_text(normalised: dict[str, Any]) -> str:
+    """record 用文本：只看 rationale（旧 record 正则不扫 header）."""
+    return normalised.get("rationale") or ""
 
 
 def dedup_rule_keys(
@@ -99,8 +107,7 @@ def dedup_rule_keys(
     """
     keys = _raw_rule_keys(raw)
     if not keys:
-        text = (normalised.get("rationale") or "") + "\n" + (normalised.get("header") or "")
-        keys = list(rule_set.key_patterns.extract(text))
+        keys = list(rule_set.key_patterns.extract(_rule_key_text(normalised)))
     return ",".join(keys)
 
 
@@ -110,10 +117,13 @@ def record_rule_keys(
     """record_suggestion 落库的规则键（保留旧优先级，含 promotion 键）.
 
     - agent 显式 `rule_keys` 非空 → 以它为基，只追加 promotion 派生键；
-    - 为空 → 完全按 `rule_set.normalize_keys(rationale + " " + header)`.
+    - 为空 → 完全按 `rule_set.normalize_keys(rationale)`.
+
+    Why 只看 rationale：旧 record 正则不扫 header，header 里的键是展示文案，
+    不应写进待采纳键（否则与旧行为产生 parity 差异）.
     """
     raw_keys = _raw_rule_keys(raw)
-    text = _rule_key_text(normalised)
+    text = _record_rule_key_text(normalised)
     normalized = rule_set.normalize_keys(text)
     if not raw_keys:
         return normalized

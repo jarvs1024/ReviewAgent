@@ -241,3 +241,44 @@ def test_record_rule_keys_uses_normalize_when_raw_empty():
     normalised = {"rationale": "违反 R-ERR", "header": "静默吞异常"}
     keys = record_rule_keys({"rule_keys": []}, normalised, rule_set=rule_set)
     assert keys == ["R-ERR"]
+
+
+def test_dedup_rule_keys_ignores_non_list_rule_keys():
+    from reviewagent.review.publishing import dedup_rule_keys
+
+    rule_set = _real_rule_set()
+    normalised = {"rationale": "", "header": ""}
+    keys = dedup_rule_keys({"rule_keys": "R-ERR"}, normalised, rule_set=rule_set)
+    assert keys == ""
+
+
+def test_record_rule_keys_ignores_header_only_keys():
+    from reviewagent.review.publishing import record_rule_keys
+
+    rule_set = _real_rule_set()
+    normalised = {"rationale": "", "header": "SSD-RULE-TYPEHINTS"}
+    keys = record_rule_keys({}, normalised, rule_set=rule_set)
+    assert keys == []
+
+
+def test_record_rule_keys_extracts_from_rationale_only():
+    from reviewagent.review.publishing import record_rule_keys
+
+    rule_set = _real_rule_set()
+    normalised = {"rationale": "违反 R-ERR", "header": ""}
+    keys = record_rule_keys({}, normalised, rule_set=rule_set)
+    assert keys == ["R-ERR"]
+
+
+def test_record_rule_keys_appends_promotion_without_duplicating():
+    from reviewagent.review.publishing import record_rule_keys
+
+    rule_set = _real_rule_set()
+    normalised = {"rationale": "wildcard import detected", "header": ""}
+    keys = record_rule_keys({"rule_keys": ["R-ERR"]}, normalised, rule_set=rule_set)
+    assert keys == ["R-ERR", "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
+
+    already = record_rule_keys(
+        {"rule_keys": ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]}, normalised, rule_set=rule_set
+    )
+    assert already == ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
