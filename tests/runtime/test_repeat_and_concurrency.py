@@ -122,7 +122,11 @@ async def test_duplicate_open_webhook_enqueues_once(fake_redis, telemetry, monke
 
 
 def test_concurrent_chains_for_same_mr_are_serialized(fake_redis, monkeypatch):
-    """两线程同 project/mr 跑 run_mr_chain：锁保证命令体最大并发 = 1，两个都 success."""
+    """两线程同 project/mr 跑 run_mr_chain：锁保证命令体最大并发 = 1，两个都 success.
+
+    用 Event 确定性制造重叠（不依赖固定 sleep / 机器速度）：第一个命令体进入后
+    阻塞，主线程确认第二个线程已在等链锁（存活且未进入命令体）后才放行.
+    """
     from reviewagent.webhook.locks import MRLockManager
 
     monkeypatch.setattr(tasks, "locks", MRLockManager(cooldown_seconds=60))
@@ -134,14 +138,21 @@ def test_concurrent_chains_for_same_mr_are_serialized(fake_redis, monkeypatch):
     active = 0
     max_active = 0
     entered: list[str] = []
+    entered_event = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
 
     def fake_run_command(command, **_kwargs):
         nonlocal active, max_active
         with counter_lock:
             active += 1
             max_active = max(max_active, active)
+            is_first = not entered
             entered.append(command)
-        time.sleep(0.05)
+        if is_first:
+            entered_event.set()
+        # 命令体阻塞到主线程确认第二个线程已在等锁 — 不依赖机器速度的固定 sleep
+        assert release.wait(timeout=10), "命令体未被主线程放行（并发用例时序异常）"
         with counter_lock:
             active -= 1
         return {"command": command}
@@ -151,6 +162,9 @@ def test_concurrent_chains_for_same_mr_are_serialized(fake_redis, monkeypatch):
     results: list[list[dict] | None] = [None, None]
 
     def worker(idx: int) -> None:
+        if idx == 1:
+            # 在调用 run_mr_chain 之前打点：主线程据此确认第二个线程已启动
+            second_started.set()
         results[idx] = tasks.run_mr_chain(
             commands=["improve"],
             project_id=34,
@@ -159,14 +173,30 @@ def test_concurrent_chains_for_same_mr_are_serialized(fake_redis, monkeypatch):
             actor_username="alice",
         )
 
-    threads = [threading.Thread(target=worker, args=(idx,)) for idx in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
+    first_thread = threading.Thread(target=worker, args=(0,))
+    first_thread.start()
+    assert entered_event.wait(timeout=10), "第一个 chain 未进入命令体"
+
+    second_thread = threading.Thread(target=worker, args=(1,))
+    second_thread.start()
+    assert second_started.wait(timeout=10), "第二个 chain 未启动"
+    try:
+        # join 短暂确认第二个线程仍存活 = 卡在链锁上（而非已进入命令体）
+        second_thread.join(timeout=0.3)
+        assert second_thread.is_alive(), "第二个 chain 未在等锁（链锁失效）"
+        with counter_lock:
+            assert active == 1, "第一个命令体未完成前不得有第二个命令体进入"
+            assert max_active == 1
+        assert entered == ["improve"], "第二个 chain 在锁释放前不得执行命令"
+    finally:
+        release.set()
+
+    for thread in (first_thread, second_thread):
         thread.join(timeout=30)
+        assert not thread.is_alive()
 
     assert max_active == 1, "同 MR 的 chain 必须串行（链锁失效会并发检视）"
-    assert len(entered) == 2
+    assert entered == ["improve", "improve"]
     for result in results:
         assert result is not None
         assert [item["status"] for item in result] == ["success"]
@@ -215,15 +245,21 @@ def test_chain_lock_timeout_is_fail_closed(monkeypatch):
     class _TimeoutLock:
         key = "reviewagent:lock:34:7"
 
-        def acquire(self, **_kwargs) -> bool:
+        def __init__(self) -> None:
+            self.acquire_calls: list[dict] = []
+
+        def acquire(self, **kwargs) -> bool:
+            self.acquire_calls.append(kwargs)
             return False
 
         def release(self) -> bool:  # pragma: no cover - 未拿到锁时不应释放
             raise AssertionError("release must not run when acquire failed")
 
+    timed_out_lock = _TimeoutLock()
+
     class _LockManager:
         def get_lock(self, project_id: int, mr_iid: int):
-            return _TimeoutLock()
+            return timed_out_lock
 
     monkeypatch.setattr(tasks, "locks", _LockManager())
     monkeypatch.setattr(tasks, "_verify_job_manifest", lambda **_kwargs: None)
@@ -243,6 +279,8 @@ def test_chain_lock_timeout_is_fail_closed(monkeypatch):
     )
 
     assert result == [{"command": "lock", "status": "failed", "error": "lock_timeout"}]
+    # 链锁语义必须是「阻塞等待 300s」：改成非阻塞 / 其它超时会破坏串行与 fail-closed 契约
+    assert timed_out_lock.acquire_calls == [{"blocking": True, "blocking_timeout": 300}]
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +344,32 @@ _MANIFEST_KEYS = (
 )
 
 
+def _active_manifest() -> dict:
+    """按入队侧同一入口（`manifest_for_active`）计算当前生效 manifest."""
+    from reviewagent.config import config
+    from reviewagent.review.manifest import manifest_for_active
+
+    return manifest_for_active(
+        cfg=config,
+        # 与 tasks._manifest_kwargs 的模型选择保持一致
+        model=(
+            config.qodercli_model
+            if config.llm_provider == "qodercli"
+            else config.opencode_model
+        ),
+        provider=config.llm_provider,
+    )
+
+
+def _manifest_payload(*, profile_fingerprint: str | None = None) -> dict:
+    """8 字段 manifest 中入队/校验用的 5 个扁平指纹字段（可篡改单个字段）."""
+    manifest = _active_manifest()
+    payload = {key: manifest[key] for key in _MANIFEST_KEYS}
+    if profile_fingerprint is not None:
+        payload["profile_fingerprint"] = profile_fingerprint
+    return payload
+
+
 class _FakeQueue:
     """记录 `q.enqueue(func, **kwargs)` 的假队列（不连 Redis）."""
 
@@ -318,8 +382,9 @@ class _FakeQueue:
 
 
 def test_suggestion_and_weekly_enqueue_carry_manifest_fingerprints(monkeypatch):
-    """enqueue_suggestion_action / enqueue_weekly_report 必须注入 5 个扁平指纹字段."""
+    """enqueue_suggestion_action / enqueue_weekly_report 注入的指纹值必须与 manifest 一致."""
     from reviewagent.config import current
+    from reviewagent.scenario.dynamic import load_dynamic_rules
     from reviewagent.scenario.profile import active_or_load
     from reviewagent.scenario.rules.resolver import active_rule_set
     from reviewagent.settings.binder import fingerprint as binder_fingerprint
@@ -341,26 +406,45 @@ def test_suggestion_and_weekly_enqueue_carry_manifest_fingerprints(monkeypatch):
 
     assert len(fake_queue.calls) == 2
     profile = active_or_load()
+    # 入队内部走 manifest_for_active；直接调用同一入口比对最稳
+    manifest = _active_manifest()
     expected_config = binder_fingerprint(
         {spec.name: getattr(current(), spec.name) for spec in SCHEMA}
     )
+    expected_ruleset = active_rule_set().fingerprint
+    expected_dynamic = load_dynamic_rules(profile).fingerprint
+
     for call in fake_queue.calls:
         assert "manifest" not in call
         for key in _MANIFEST_KEYS:
             assert key in call, f"{call['func']} missing flat kwarg {key}"
-        assert call["profile"] == profile.name
-        assert call["profile_fingerprint"] == profile.fingerprint
-        assert call["config_fingerprint"] == expected_config
-        assert call["ruleset_fingerprint"] == active_rule_set().fingerprint
+        # 不只查键存在：值与 manifest / binder / 规则集 / 动态规则逐项一致
+        assert call["profile"] == profile.name == manifest["profile"]
+        assert (
+            call["profile_fingerprint"]
+            == profile.fingerprint
+            == manifest["profile_fingerprint"]
+        )
+        assert (
+            call["config_fingerprint"]
+            == expected_config
+            == manifest["config_fingerprint"]
+        )
+        assert (
+            call["ruleset_fingerprint"]
+            == expected_ruleset
+            == manifest["ruleset_fingerprint"]
+        )
+        assert (
+            call["dynamic_rules_fingerprint"]
+            == expected_dynamic
+            == manifest["dynamic_rules_fingerprint"]
+        )
 
 
 def test_run_suggestion_action_rejects_stale_manifest(monkeypatch):
     """在途 /adopt job 的 profile_fingerprint 与激活环境不一致 → 拒绝且不触碰 process_*."""
     from reviewagent.commands import suggestion_actions
-    from reviewagent.config import current
-    from reviewagent.scenario.profile import active_or_load
-    from reviewagent.settings.binder import fingerprint as binder_fingerprint
-    from reviewagent.settings.schema import SCHEMA
 
     touched: list[str] = []
     monkeypatch.setattr(
@@ -370,10 +454,15 @@ def test_run_suggestion_action_rejects_stale_manifest(monkeypatch):
         suggestion_actions, "process_dismiss", lambda **_kw: touched.append("dismiss")
     )
 
-    profile = active_or_load()
-    config_fingerprint = binder_fingerprint(
-        {spec.name: getattr(current(), spec.name) for spec in SCHEMA}
-    )
+    expected = _manifest_payload(profile_fingerprint="stale-fingerprint")
+    real_verify = tasks._verify_job_manifest
+    verified: list[dict] = []
+
+    def spy(**kwargs):
+        verified.append(dict(kwargs))
+        real_verify(**kwargs)
+
+    monkeypatch.setattr(tasks, "_verify_job_manifest", spy)
 
     for action in ("adopt", "dismiss"):
         with pytest.raises(RuntimeError, match="fingerprint"):
@@ -384,21 +473,20 @@ def test_run_suggestion_action_rejects_stale_manifest(monkeypatch):
                 suggestion_note_id="note-1",
                 actor_username="alice",
                 reason="fix",
-                profile=profile.name,
-                profile_fingerprint="stale-fingerprint",
-                config_fingerprint=config_fingerprint,
+                **expected,
             )
 
     assert touched == []
+    assert len(verified) == 2
+    for kwargs in verified:
+        # 5 个字段完整透传（仅 profile_fingerprint 被篡改）
+        assert set(kwargs) == set(_MANIFEST_KEYS)
+        assert kwargs == expected
 
 
 def test_run_weekly_report_rejects_stale_manifest(monkeypatch):
     """在途周报 job 的 profile_fingerprint 不一致 → 拒绝且不运行 run_weekly_job."""
-    from reviewagent.config import current
     from reviewagent.reporting import runner as reporting_runner
-    from reviewagent.scenario.profile import active_or_load
-    from reviewagent.settings.binder import fingerprint as binder_fingerprint
-    from reviewagent.settings.schema import SCHEMA
 
     touched: list[str] = []
     monkeypatch.setattr(
@@ -407,17 +495,20 @@ def test_run_weekly_report_rejects_stale_manifest(monkeypatch):
         lambda **_kw: touched.append("weekly"),
     )
 
-    profile = active_or_load()
-    config_fingerprint = binder_fingerprint(
-        {spec.name: getattr(current(), spec.name) for spec in SCHEMA}
-    )
+    expected = _manifest_payload(profile_fingerprint="stale-fingerprint")
+    real_verify = tasks._verify_job_manifest
+    verified: list[dict] = []
+
+    def spy(**kwargs):
+        verified.append(dict(kwargs))
+        real_verify(**kwargs)
+
+    monkeypatch.setattr(tasks, "_verify_job_manifest", spy)
 
     with pytest.raises(RuntimeError, match="fingerprint"):
-        tasks.run_weekly_report_job(
-            week_offset=0,
-            profile=profile.name,
-            profile_fingerprint="stale-fingerprint",
-            config_fingerprint=config_fingerprint,
-        )
+        tasks.run_weekly_report_job(week_offset=0, **expected)
 
     assert touched == []
+    assert len(verified) == 1
+    assert set(verified[0]) == set(_MANIFEST_KEYS)
+    assert verified[0] == expected

@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from loguru import logger as loguru_logger
 
-from reviewagent.config import current
+from reviewagent.config import Config, current
 from reviewagent.review.manifest import build_manifest, verify_job
 from reviewagent.review.planner import plan
 from reviewagent.scenario.profile import bind_instance, load_profile
@@ -323,3 +323,56 @@ def test_profile_scenario_isolation_across_data_dirs(tmp_path, profile):
     tampered = dict(payload, profile_fingerprint="stale-profile-fingerprint")
     with pytest.raises(RuntimeError, match="fingerprint"):
         verify_job(tampered)
+
+
+def test_get_store_follows_current_data_dir(tmp_path, monkeypatch):
+    """`get_store()` 单例必须读当前 data_dir 的 telemetry.db — 换目录后不串数据.
+
+    直接验证生产单例路径（而不是另建两个 Store）：`Config.sqlite_path` 指向
+    dirA → 写入；切到 dirB 并重置单例 → 读不到 dirA 的数据，且 `.path` 跟随
+    dirB。teardown 恢复 `_store=None`，保证与其它用例的顺序无关.
+    """
+    from reviewagent.telemetry import store as store_mod
+
+    dir_a = tmp_path / "instance-a"
+    dir_b = tmp_path / "instance-b"
+    target = {"data_dir": dir_a}
+    monkeypatch.setattr(
+        Config,
+        "sqlite_path",
+        property(lambda _self: target["data_dir"] / "telemetry.db"),
+    )
+
+    store_mod._store = None
+    try:
+        store_a = store_mod.get_store()
+        assert store_a.path == dir_a / "telemetry.db"
+        store_a.record_suggestion(
+            project_id=34,
+            mr_iid=7,
+            note_id="note-a",
+            file_path="pkg/a.py",
+            target_line=12,
+            existing_code="x = []",
+            improved_code="x = None",
+            header="可变默认参数",
+            severity="high",
+            head_sha="head-1",
+            fingerprint="fp-a",
+            cohort_key="cohort-a",
+        )
+        assert store_a.suggestion_exists_by_fingerprint(
+            34, 7, "fp-a", head_sha="head-1"
+        ) is True
+
+        # 切到另一个 data_dir：单例重置后必须新建 Store 并指向 dirB
+        target["data_dir"] = dir_b
+        store_mod._store = None
+        store_b = store_mod.get_store()
+        assert store_b is not store_a
+        assert store_b.path == dir_b / "telemetry.db"
+        assert store_b.list_suggestions(project_id=34, mr_iid=7) == []
+        assert store_b.suggestion_exists_by_fingerprint(34, 7, "fp-a") is False
+        assert store_b.get_file_review_states(34, 7) == {}
+    finally:
+        store_mod._store = None

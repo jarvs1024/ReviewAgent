@@ -18,6 +18,7 @@ from reviewagent.review.publishing import (
     PublishCallbacks,
     PublishContext,
     _handle_cohort_reoccurrence,
+    _suggestion_fingerprint,
     publish,
 )
 from reviewagent.telemetry.store import Store
@@ -120,7 +121,13 @@ _MERGED = {"summary_md": "", "suggestions": [_SUGGESTION]}
 # ---------------------------------------------------------------------------
 
 
-def test_second_publish_same_suggestion_is_deduped(store, rule_set):
+def test_second_publish_same_suggestion_is_deduped(store, rule_set, monkeypatch):
+    """落库成功后，下一轮同 suggestion / 同 head_sha 由 fingerprint 维度拦截.
+
+    屏蔽 line 维度（`suggestion_exists_at_line` 恒 False），让第二轮只能靠
+    `duplicate_fingerprint` 拦截 —— 证明落库的 fingerprint 值本身有效，而不是
+    被 at-line 兜底掩盖.
+    """
     gitlab = _gitlab()
     ctx = PublishContext(project_id=34, mr_iid=7, gitlab=gitlab)
     captured: dict = {}
@@ -131,16 +138,28 @@ def test_second_publish_same_suggestion_is_deduped(store, rule_set):
         return "## 改进总览 V1\n\n_ok_"
 
     callbacks = _callbacks(build_summary_v2=_capture_summary)
+    monkeypatch.setattr(
+        Store, "suggestion_exists_at_line", lambda *_args, **_kwargs: False
+    )
 
     first = publish(
         ctx, _MERGED, rule_set=rule_set, profile=None, cfg=None, callbacks=callbacks
     )
     assert first["inline_posted"] == 1
     assert gitlab.post_mr_discussion.call_count == 1
-    assert "note-1" in [
-        row["note_id"]
-        for row in store.list_suggestions(project_id=34, mr_iid=7)
-    ]
+
+    rows = store.list_suggestions(project_id=34, mr_iid=7)
+    assert [row["note_id"] for row in rows] == ["note-1"]
+    expected_fingerprint = _suggestion_fingerprint(
+        _SUGGESTION["file"], _SUGGESTION["start_line"], _SUGGESTION["header"]
+    )
+    assert rows[0]["fingerprint"] == expected_fingerprint
+    assert (
+        store.suggestion_exists_by_fingerprint(
+            34, 7, expected_fingerprint, head_sha="head-1"
+        )
+        is True
+    )
 
     second = publish(
         ctx, _MERGED, rule_set=rule_set, profile=None, cfg=None, callbacks=callbacks
@@ -149,10 +168,8 @@ def test_second_publish_same_suggestion_is_deduped(store, rule_set):
     assert second["inline_skipped"] == 1
     assert gitlab.post_mr_discussion.call_count == 1, "同 head_sha 不得重复发帖"
     assert captured["posted"] == []
-    assert captured["skipped"][0]["reason"] in (
-        "duplicate_at_line",
-        "duplicate_fingerprint",
-    )
+    # line 维度已被屏蔽 → 只有 fingerprint 命中才会 skip，理由必须是 duplicate_fingerprint
+    assert captured["skipped"][0]["reason"] == "duplicate_fingerprint"
 
 
 # ---------------------------------------------------------------------------
