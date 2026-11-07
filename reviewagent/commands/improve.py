@@ -1292,20 +1292,12 @@ class ImproveCommand(BaseCommand):
         Returns: (kept_all_files, unsampled_list)
             - kept_all_files: 抽样后剩余的 all_files (顺序不变, 仅移除未抽中者)
             - unsampled_list: 被抽样剔除的文件 (已排序)
+
+        实现见 review/planner.py:sample_case_files（门面薄委托）.
         """
-        import hashlib
-        from pathlib import Path as _P
-        case_files = [
-            fp for fp in all_files
-            if any(pat in fp or _P(fp).name.startswith(pat.rstrip("/")) for pat in patterns)
-        ]
-        if len(case_files) <= max_n:
-            return list(all_files), []
-        sampled = sorted(case_files, key=lambda p: hashlib.md5(p.encode("utf-8")).hexdigest())[:max_n]
-        sampled_set = set(sampled)
-        unsampled = [fp for fp in case_files if fp not in sampled_set]
-        kept = [fp for fp in all_files if fp not in set(unsampled)]
-        return kept, sorted(unsampled)
+        from reviewagent.review.planner import sample_case_files
+
+        return sample_case_files(all_files, patterns, max_n)
 
     @staticmethod
     def _apply_file_count_cap(
@@ -1316,20 +1308,12 @@ class ImproveCommand(BaseCommand):
 
         files_to_review 须已按优先级降序.
         Returns: (kept, truncated)
+
+        实现见 review/planner.py:apply_file_count_cap（门面薄委托）.
         """
-        if max_files <= 0 or len(files_to_review) <= max_files:
-            return list(files_to_review), []
-        must: list[str] = []
-        optional: list[str] = []
-        for fp in files_to_review:
-            is_must = (fp in new_files) or any(
-                kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in keyword_paths
-            )
-            (must if is_must else optional).append(fp)
-        budget = max(0, max_files - len(must))
-        kept_optional = optional[:budget]
-        truncated = optional[budget:]
-        return must + kept_optional, truncated
+        from reviewagent.review.planner import apply_file_count_cap
+
+        return apply_file_count_cap(files_to_review, new_files, keyword_paths, max_files)
 
     def _read_file_line_count(self, file_path: str, ws) -> int:
         """读 worktree 文件行数, 用于 priority 排序 + strategy 分配.
@@ -1513,6 +1497,21 @@ class ImproveCommand(BaseCommand):
             keywords=config.improve_test_feature_keywords,
         )
 
+    @staticmethod
+    def _rule_block_text() -> str:
+        """当前激活规则块正文（full 源码预算的固定开销估算用）.
+
+        由 T5 resolver 的 `verbatim_body` 提供（与旧的
+        `load_block("_general_rules_block")` 逐字节一致）；取不到时返回 ``""``，
+        按 0 计 — 预算是安全网, 不是硬依赖（与旧实现 ``except: pass`` 等价）.
+        """
+        try:
+            from reviewagent.scenario.rules.resolver import active_rule_set
+
+            return active_rule_set().verbatim_body
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _full_source_budget_bytes(self, diff_lines: int) -> int:
         """full 源码块允许的最大字节数 (含行号前缀) — E2BIG 防线.
 
@@ -1522,23 +1521,17 @@ class ImproveCommand(BaseCommand):
         ``上限 − 固定开销(repo_context/规则块/杂项) − 本文件 diff 估算`` 预算拦截。
 
         config.improve_full_source_max_bytes: 0=自适应(默认), >0=固定值, <0=关闭。
+        实现见 review/planner.py:full_source_budget_bytes（门面薄委托,
+        规则块正文经 `_rule_block_text()` 惰性获取, 失败按 0 字节计）。
         """
-        if config.improve_full_source_max_bytes > 0:
-            return config.improve_full_source_max_bytes
-        if config.improve_full_source_max_bytes < 0:
-            return _MAX_ARG_STRLEN  # 关闭防线 (恢复旧行为)
-        fixed = 8_192  # 段标题 / VALID NEW LINES / 已发建议列表 / 输出指令等杂项
-        try:
-            from reviewagent.prompts.loader import load_block as _load_block
-            fixed += len(_load_block("_general_rules_block").encode("utf-8"))
-        except Exception:
-            pass  # 规则块缺失 → 按 0 计 (预算是安全网, 不是硬依赖)
-        fixed += len((getattr(self, "repo_context", "") or "").encode("utf-8"))
-        # diff 行均宽估算 (含上下文行/前缀); clip=0 (不截断) 时按实际行数
-        clip = config.improve_clip_diff_lines
-        est_diff = (diff_lines if clip <= 0 else min(max(diff_lines, 0), clip)) * 64
-        # 目标上限留 8% 安全余量 (估算是粗的)
-        return max(16_384, int(_MAX_ARG_STRLEN * 0.92) - fixed - est_diff)
+        from reviewagent.review.planner import full_source_budget_bytes
+
+        cfg = globals()["config"]
+        rule_bytes = len(self._rule_block_text().encode())
+        return full_source_budget_bytes(
+            diff_lines, cfg=cfg, rule_bytes=rule_bytes,
+            repo_context=getattr(self, "repo_context", "") or "",
+        )
 
     def _stat_file_bytes(self, file_path: str) -> int:
         """从 worktree 读文件字节数 (E2BIG 预算用); 读不到返回 -1 (不拦截, 维持旧行为)."""
@@ -1568,24 +1561,27 @@ class ImproveCommand(BaseCommand):
         其 ``_build_user_prompt`` 无条件内嵌全部源码且不受 strategy 约束。
         超预算时调用方不早退, 落到 strategy 路径 (partial/patch, prompt 尺寸受控)
         — 与多文件 MR 走的是同一条已验证路径。
+
+        判定见 review/planner.py:single_file_over_full_budget；降级日志留在本层
+        （planner 侧无 project/mr 语境）。
         """
-        if len(files) != 1:
-            return False
-        fp = files[0]
-        diff_lines, file_lines = file_meta.get(fp, (0, 0))
-        file_bytes = self._stat_file_bytes(fp)
-        if file_bytes < 0:
-            return False  # 读不到文件大小 → 不拦截, 维持旧行为
-        budget = self._full_source_budget_bytes(diff_lines)
-        if file_bytes + file_lines * 7 <= budget:
-            return False
-        logger.info(
-            "improve.full_source_budget_downgrade project={} mr={} file={} "
-            "file_bytes={} est_source_bytes={} budget={} -> strategy path (single-file)",
-            self.project_id, self.mr_iid, fp, file_bytes,
-            file_bytes + file_lines * 7, budget,
+        from reviewagent.review.planner import single_file_over_full_budget
+
+        over = single_file_over_full_budget(
+            files, file_meta,
+            stat_bytes=self._stat_file_bytes,
+            budget_fn=self._full_source_budget_bytes,
         )
-        return True
+        if over:
+            diff_lines, file_lines = file_meta.get(files[0], (0, 0))
+            file_bytes = self._stat_file_bytes(files[0])
+            logger.info(
+                "improve.full_source_budget_downgrade project={} mr={} file={} "
+                "file_bytes={} est_source_bytes={} budget={} -> strategy path (single-file)",
+                self.project_id, self.mr_iid, files[0], file_bytes,
+                file_bytes + file_lines * 7, self._full_source_budget_bytes(diff_lines),
+            )
+        return over
 
     def _assign_strategy(
         self, sorted_files: list[str], file_meta: dict[str, tuple[int, int]],
@@ -1596,36 +1592,20 @@ class ImproveCommand(BaseCommand):
         full    = 完整源码 (≤ full_files 配额, 优先高 priority 文件)
         partial = diff 行 ±N 行 context (中等文件 / 关键路径降级)
         patch   = diff + ±patch_context_lines 行最小 context (overflow / 大文件)
+
+        实现见 review/planner.py:assign_strategy（门面薄委托, 晚绑定 config;
+        stat/预算经实例方法透传, 保持 monkeypatch 有效）。
         """
-        strategy: dict[str, str] = {}
-        full_quota = config.improve_full_files
-        for fp in sorted_files:
-            if fp in overflow_set:
-                strategy[fp] = "patch"  # MAX_DIFF_CHARS overflow → 强制 patch
-                continue
-            if full_quota > 0 and sum(1 for s in strategy.values() if s == "full") < full_quota:
-                # E2BIG 防线: full 源码块 (文件字节 + 行号前缀) 须在预算内,
-                # 超预算不给 full (落到下方 partial/patch, 不占 full 配额)
-                diff_lines, file_lines = file_meta[fp]
-                file_bytes = self._stat_file_bytes(fp)
-                budget = self._full_source_budget_bytes(diff_lines)
-                if file_bytes < 0 or file_bytes + file_lines * 7 <= budget:
-                    strategy[fp] = "full"
-                    continue
-                logger.info(
-                    "improve.full_source_budget_downgrade project={} mr={} file={} "
-                    "file_bytes={} est_source_bytes={} budget={} -> partial/patch",
-                    self.project_id, self.mr_iid, fp, file_bytes,
-                    file_bytes + file_lines * 7, budget,
-                )
-            file_size = file_meta[fp][1]
-            if file_size > 0 and file_size < 2000:
-                strategy[fp] = "partial"
-            elif any(kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in config.improve_keyword_paths):
-                strategy[fp] = "partial"
-            else:
-                strategy[fp] = "patch"
-        return strategy
+        from reviewagent.review.planner import assign_strategy as _assign
+
+        cfg = globals()["config"]
+        return _assign(
+            sorted_files, file_meta, overflow_set, cfg=cfg,
+            stat_bytes=self._stat_file_bytes,
+            budget_fn=self._full_source_budget_bytes,
+            project_id=self.project_id,
+            mr_iid=self.mr_iid,
+        )
 
     def _build_full_source_block(self, file_path: str) -> str:
         """full 模式: 读 worktree 文件, 拼完整源码 (≤ 5000 行, 超出截断)."""
