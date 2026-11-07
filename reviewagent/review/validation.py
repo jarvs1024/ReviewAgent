@@ -82,9 +82,15 @@ def validate_suggestion(
     `code_first_line_matches`）注入 — 本模块不 import policies / commands.
     `rule_set` / `cfg` 为后续任务（动态规则 / 配置化校验）保留，当前不使用.
     """
+    # 入口守卫: 非法 start_line 直接 drop（bool 是 int 子类，需单独排除），
+    # 不进 validate_fields → 不触发惰性读盘 / snap / 对齐检查.
+    start_line = sug.get("start_line")
+    if isinstance(start_line, bool) or not isinstance(start_line, int) or start_line <= 0:
+        return {"action": "drop", "new_line": 0, "reason": "invalid start_line"}
+
     return validate_fields(
         file_path=sug.get("file") or ctx.file_path,
-        start_line=sug.get("start_line") or 0,
+        start_line=start_line,
         improved_code=sug.get("improved_code") or "",
         existing_code=sug.get("existing_code") or "",
         line_map=line_map,

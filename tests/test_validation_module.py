@@ -65,6 +65,24 @@ def test_drop_when_file_not_in_diff():
     assert verdict["action"] == "drop"
 
 
+def test_invalid_start_line_drops_without_reading_file():
+    """start_line 非正整数 → 入口直接 drop, 不触发惰性读盘 (file_sources 保持空)."""
+    for bad in (0, None):
+        sources: dict[str, list[str]] = {}
+        verdict = _run(
+            {
+                "file": "core.py", "start_line": bad,
+                "existing_code": "    return open('x').read()",
+                "improved_code": "    return open('x').read()  # noqa",
+            },
+            file_sources=sources,
+        )
+        assert verdict == {
+            "action": "drop", "new_line": 0, "reason": "invalid start_line",
+        }, (bad, verdict)
+        assert sources == {}, bad
+
+
 def test_post_snaps_to_existing_code_line_and_returns_normalised_code():
     """existing_code 反查命中 → new_line snap 到真实行, normalised_code 原样带回."""
     verdict = _run({
@@ -136,27 +154,87 @@ def test_alignment_mismatch_drops():
     assert "doesn't match" in verdict["reason"]
 
 
-# ---------- PythonPolicy 薄派发 ----------
+# ---------- PythonPolicy 薄派发 / 钩子注入 ----------
 
 def test_python_policy_dispatch_matches_direct_validation():
+    """policy 薄派发与直接调用逐字段一致, 含 fix_indent 真正改写缩进的场景."""
     profile = load_profile(None)
     policy = PythonPolicy(profile=profile, cfg=current(), read_lines=lambda p: list(LINES))
-    sug = {
-        "file": "core.py", "start_line": 1,
-        "existing_code": "    return open('x').read()",
-        "improved_code": "    return open('x').read()  # noqa",
-    }
     rule_set = assemble_base(profile)
-    via_policy = policy.validate_suggestion(
-        sug, _ctx(), rule_set=rule_set,
-        file_sources={"core.py": list(LINES)}, line_map={"core.py": {3}},
-    )
-    direct = validate_suggestion(
-        sug, ctx=_ctx(), policy=policy, rule_set=rule_set, cfg=current(),
+    cases = [
+        {  # 1: 行号写错 → snap 到 existing_code 所在行, 首行已带缩进
+            "file": "core.py", "start_line": 1,
+            "existing_code": "    return open('x').read()",
+            "improved_code": "    return open('x').read()  # noqa",
+        },
+        {  # 2: target 行有缩进 / improved_code 无缩进 → 经 fix_indent 钩子补齐
+            "file": "core.py", "start_line": 3,
+            "existing_code": "    return open('x').read()",
+            "improved_code": "return open('x').read()  # noqa",
+        },
+    ]
+    dispatched = []
+    for sug in cases:
+        via_policy = policy.validate_suggestion(
+            sug, _ctx(), rule_set=rule_set,
+            file_sources={"core.py": list(LINES)}, line_map={"core.py": {3}},
+        )
+        direct = validate_suggestion(
+            sug, ctx=_ctx(), policy=policy, rule_set=rule_set, cfg=current(),
+            find_line=find_line_by_existing_code,
+            file_sources={"core.py": list(LINES)}, line_map={"core.py": {3}},
+        )
+        assert via_policy == direct, sug
+        dispatched.append(via_policy)
+
+    # 场景 2 证明钩子接的是 fix_indent: 无缩进的 improved_code 被补齐为 target 的缩进
+    indent_verdict = dispatched[1]
+    assert indent_verdict["action"] == "post", indent_verdict
+    assert indent_verdict["normalised_code"] == "    return open('x').read()  # noqa"
+
+
+class _RecordingReadPolicy:
+    """最小 recording wrapper: 只给 read_lines 记账, 另两个钩子直接委托."""
+
+    def __init__(self, inner: PythonPolicy, calls: list[str]) -> None:
+        self._inner = inner
+        self._calls = calls
+
+    def read_lines(self, path: str) -> list[str]:
+        self._calls.append(path)
+        return self._inner.read_lines(path)
+
+    def fix_indent(self, target_line: str, improved_code: str) -> str:
+        return self._inner.fix_indent(target_line, improved_code)
+
+    def code_first_line_matches(self, target_line: str, improved_first: str) -> bool:
+        return self._inner.code_first_line_matches(target_line, improved_first)
+
+
+def test_lazy_read_hook_reads_once_with_suggestion_file():
+    """file_sources 为空 → 经 policy.read_lines 惰性读取, 只读一次 suggestion 的文件."""
+    profile = load_profile(None)
+    calls: list[str] = []
+    inner = PythonPolicy(profile=profile, cfg=current(), read_lines=lambda p: list(LINES))
+    sources: dict[str, list[str]] = {}
+    verdict = validate_suggestion(
+        {
+            "file": "core.py", "start_line": 3,
+            "existing_code": "    return open('x').read()",
+            "improved_code": "    return open('x').read()  # noqa",
+        },
+        ctx=_ctx(),
+        policy=_RecordingReadPolicy(inner, calls),
+        rule_set=assemble_base(profile),
+        cfg=current(),
         find_line=find_line_by_existing_code,
-        file_sources={"core.py": list(LINES)}, line_map={"core.py": {3}},
+        file_sources=sources,
+        line_map={"core.py": {3}},
     )
-    assert via_policy == direct
+    assert calls == ["core.py"]
+    assert verdict["action"] == "post", verdict
+    assert verdict["new_line"] == 3
+    assert sources["core.py"] == list(LINES)
 
 
 # ---------- 指纹门面 ----------
