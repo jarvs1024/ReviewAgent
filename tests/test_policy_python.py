@@ -184,9 +184,24 @@ def test_facade_find_line_fix_indent_normalise_delegate():
     assert ImproveCommand._find_line_by_existing_code(
         lines, "    x = 1", hint_line=2
     ) == find_line_by_existing_code(lines, "    x = 1", hint_line=2)
+    assert ImproveCommand._find_line_by_existing_code(lines, "    x = 1", hint_line=2) == 2
     assert ImproveCommand._fix_indent("    x = 1", "x = 2") == fix_indent("    x = 1", "x = 2")
+    assert ImproveCommand._fix_indent("    x = 1", "x = 2") == "    x = 2"
     raw = {"file": "a.py", "start_line": 1, "improved_code": "y = 2"}
     assert ImproveCommand._normalise_suggestion(raw) == normalise_suggestion(raw)
+    assert ImproveCommand._normalise_suggestion(raw) == {
+        "file": "a.py",
+        "new_line": 1,
+        "improved_code": "y = 2",
+        "header": "建议改进",
+        "rationale": "",
+        "label": "enhancement",
+        "severity": "medium",
+        "body": (
+            "**[MEDIUM]** **建议改进** — enhancement\n\n\n\n"
+            "```suggestion:-0+0\ny = 2\n```" + HELP_TEXT_FOOTER
+        ),
+    }
 
 
 def test_facade_extract_identifiers_and_remedied_symbols_delegate():
@@ -294,12 +309,16 @@ def test_registry_custom_factory():
         calls["hit"] = True
         return GenericPolicy(profile=profile, cfg=cfg, read_lines=read_lines)
 
-    registry.register("task7-test-lang", factory)
-    pol = registry.get(
-        "task7-test-lang", profile=_profile(), cfg=current(), read_lines=lambda p: []
-    )
-    assert isinstance(pol, GenericPolicy)
-    assert calls["hit"] is True
+    try:
+        registry.register("task7-test-lang", factory)
+        pol = registry.get(
+            "task7-test-lang", profile=_profile(), cfg=current(), read_lines=lambda p: []
+        )
+        assert isinstance(pol, GenericPolicy)
+        assert calls["hit"] is True
+    finally:
+        # 只清理本测试注册的键，避免污染进程级 registry 影响其它测试顺序.
+        registry._FACTORIES.pop("task7-test-lang", None)
 
 
 # ---------------------------------------------------------------------------

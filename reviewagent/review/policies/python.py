@@ -743,7 +743,7 @@ def detect_apply_risk(
         syms_str = ", ".join(remedied_missing[:8])
         msgs.append(
             f"**建议要求补充** ({syms_str}) — 建议正文已说明补救方式 "
-            f"(补 import / 定义)；Apply 只替换当前行, 请按建议手动补上后再运行"
+            f"(补 import / 定义)；Apply 只替换当前行，请按建议手动补上后再运行"
         )
     # partial parse 成功 (target_unparseable=False) 时也要附加 file-level hint,
     # 让用户知道目标文件本身有错, missing 列表可能不完整 (例如 partial 后段

@@ -93,33 +93,6 @@ def extract_action(body: str) -> tuple[str, str] | None:
     return None
 
 
-
-def _late_detect_single(
-    *,
-    sug: dict[str, Any],
-    head_sha: str,
-    project_id: int,
-    mr_iid: int,
-    actor_username: str,
-    keywords: set[str] | None = None,
-) -> str:
-    """对单条 state='resolved' + resolution_source='gitlab_resolve' 的 suggestion
-    重跑一次 exact_match / region_changed / token_fallback, 命中就翻 applied.
-
-    Returns:
-        "applied"  — 已翻 applied
-        "unchanged" — 代码未落地, 保持 resolved
-        "error"    — 文件读取 / 比较失败
-
-    Why 独立 helper:
-        跟主循环共用 _exact_improved_code_near_target / _target_region_changed /
-        _token_adoption_match 三层判定, 但不需要重写 gitlab.resolve_discussion
-        (已经 resolved 了, GitLab 那边的 thread 已经是 ✓ 状态).
-    """
-    gl = GitLabClient()
-    store = get_store()
-
-
 def _find_latest_apply_commit(
     apply_commits,
     *,
