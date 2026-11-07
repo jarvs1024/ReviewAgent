@@ -171,15 +171,14 @@ def test_scenario_has_no_language_literals():
 
 
 def test_policies_are_the_language_outlet():
-    """``review/policies/**`` 是唯一出口——即使扫全 review 目录也不得命中它."""
-    for path in sorted(REVIEW_POLICIES_DIR.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        if ".py" in text or "import ast" in text:
-            break
-    else:  # pragma: no cover - 仅在 policies 目录整体被清空时触发
-        return
-    violations = language_literal_violations(REVIEW_POLICIES_DIR)
-    assert violations == []
+    """policies 目录确实含语言字面量，而共享 review 扫描把它们排除在外."""
+    literal_files = [
+        path
+        for path in sorted(REVIEW_POLICIES_DIR.rglob("*.py"))
+        if "import ast" in path.read_text(encoding="utf-8")
+    ]
+    assert literal_files, "expected at least one policy file to contain an 'import ast' literal"
+    assert language_literal_violations(REVIEW_DIR) == []
 
 
 # ---------------------------------------------------------------------------

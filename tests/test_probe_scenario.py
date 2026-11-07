@@ -106,6 +106,7 @@ def test_probe_scenario_runs_end_to_end(monkeypatch, tmp_path):
     registry.register("probe", _probe_factory)
 
     # 隔离 telemetry：不让 file_review_state 写仓库 data/.
+    previous_store = store_module._store
     store_module._store = Store(tmp_path / "telemetry.db")
 
     worktree = tmp_path / "wt"
@@ -155,7 +156,7 @@ def test_probe_scenario_runs_end_to_end(monkeypatch, tmp_path):
         result = cmd._call_agent(cmd.ws)
     finally:
         registry._FACTORIES.pop("probe", None)
-        store_module._store = None
+        store_module._store = previous_store
         profile_module.deactivate()
 
     assert len(result["suggestions"]) >= 1

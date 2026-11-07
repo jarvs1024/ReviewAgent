@@ -77,6 +77,7 @@ def _run_case(case: dict, monkeypatch, tmp_path: Path) -> dict:
     diff_file = worktree / ".diff"
     diff_file.write_text(diff_text, encoding="utf-8")
 
+    previous_store = store_module._store
     store_module._store = Store(tmp_path / f"{name}.db")
 
     def fake_chunk(self, prompt, ws, file_path):
@@ -110,7 +111,7 @@ def _run_case(case: dict, monkeypatch, tmp_path: Path) -> dict:
     try:
         return cmd._call_agent(cmd.ws)
     finally:
-        store_module._store = None
+        store_module._store = previous_store
         profile_module.deactivate()
 
 
