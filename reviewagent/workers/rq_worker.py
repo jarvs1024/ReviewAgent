@@ -104,6 +104,15 @@ class ReviewAgentSpawnWorker(SpawnWorker):
                 connection_kwargs["himport_registry"] = himport_registry
 
     def bootstrap(self, logging_level="INFO", date_format=None, log_format=None):
+        # 启动装配（与 API 同一入口）：激活 REVIEW_PROFILE 场景包 + 绑定 data_dir.
+        # 失败（profile 非法 / instance.json 冲突）必须让 worker 退出，避免带错场景跑任务.
+        from reviewagent.bootstrap import startup as startup_bootstrap
+
+        try:
+            startup_bootstrap("worker")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("worker.bootstrap aborted: {}", exc)
+            raise
         # worker 主进程啟動时 (进入 work 循环前) 清一次孤儿 running 记录.
         # 进程外, 不依赖被杀的 work-horse 自救 — 根治 OOM/SIGTERM 强杀后
         # review_runs 永久停在 running 的假象.

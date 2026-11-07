@@ -10,8 +10,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response
 from fastapi.responses import PlainTextResponse
 
+from reviewagent import bootstrap
 from reviewagent.gitlab.client import GitLabError
-from reviewagent.logging_setup import logger, setup_logging
+from reviewagent.logging_setup import logger
 from reviewagent.telemetry.store import get_store
 from reviewagent.api.router import router as telemetry_router
 from reviewagent.webhook.router import router as webhook_router
@@ -22,7 +23,10 @@ __version__ = "0.1.0"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    setup_logging()
+    # 启动装配：加载/激活 profile、绑定 data_dir、配置 fingerprint 日志.
+    # setup_logging 在 bootstrap.startup 内部（幂等），REVIEW_PROFILE 非法时
+    # 这里直接抛错，uvicorn 会带着原始消息拒绝启动.
+    bootstrap.startup("api")
     logger.info("reviewagent.starting version={}", __version__)
     try:
         get_store()

@@ -402,6 +402,12 @@ def load_and_activate() -> Profile:
     return _active
 
 
+def deactivate() -> None:
+    """清空激活缓存（测试隔离 / 重新装配用；不影响 `_current` 配置）."""
+    global _active
+    _active = None
+
+
 _INSTANCE_SCHEMA = 1
 _LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -435,6 +441,19 @@ def _check_bound_profile(path: Path, data_dir: Path, profile: Profile) -> None:
             f"data_dir {data_dir} is bound to profile {existing.get('profile')!r}, "
             f"refusing {profile.name!r}; use a new REVIEWAGENT_DATA_DIR"
         )
+
+
+def bound_profile(data_dir: Path) -> str | None:
+    """返回 `data_dir` 已绑定的 profile 名；尚未绑定返回 None.
+
+    文件损坏 / schema 版本不符时抛 RuntimeError（消息指出 data_dir 与文件路径），
+    供 bootstrap.readiness() 与 CLI 复用，避免各处自行解析 `instance.json`。
+    """
+    path = Path(data_dir) / "instance.json"
+    if not path.exists():
+        return None
+    payload = _load_instance(path, Path(data_dir))
+    return str(payload.get("profile") or "") or None
 
 
 def bind_instance(profile: Profile, data_dir: Path) -> None:
