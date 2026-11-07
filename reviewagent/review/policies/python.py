@@ -826,6 +826,18 @@ class PythonPolicy:
     def normalize_suggestion(self, sug: Suggestion, ctx: FileContext) -> Suggestion:
         return normalise_suggestion(sug)
 
+    def read_lines(self, path: str) -> list[str]:
+        """读文件源码行（`review/validation.py` 的惰性预读钩子）."""
+        return self._read_lines(path)
+
+    def fix_indent(self, target_line: str, improved_code: str) -> str:
+        """缩进修正钩子 — 委托模块级 `fix_indent`（方法体内解析到模块全局，无递归）."""
+        return fix_indent(target_line, improved_code)
+
+    def code_first_line_matches(self, target_line: str, improved_first: str) -> bool:
+        """首行对齐启发式钩子 — 委托模块级 `code_first_line_matches`."""
+        return code_first_line_matches(target_line, improved_first)
+
     def validate_suggestion(
         self,
         sug: Suggestion,

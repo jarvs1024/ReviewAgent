@@ -18,7 +18,6 @@
 """
 from __future__ import annotations
 
-import hashlib as _hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -27,7 +26,6 @@ from typing import Any
 from reviewagent.commands._common import BaseCommand, BaseCommandError, publish_overview
 from reviewagent.config import config
 from reviewagent.git.diff_lines import (
-    find_nearest_valid_line,
     format_line_map_for_prompt,
     parse_diff_line_map,
 )
@@ -59,18 +57,11 @@ def _suggestion_fingerprint(file_path: str, line: int, header: str | None) -> st
     与 existing_code 行数变化无关 (之前用 sha256(existing_code) 会被 LLM
     给的 1~N 行范围差绕过). lower-case header normalize 让大小写不敏感.
 
-    Args:
-        file_path: suggestion 文件路径.
-        line: new_line (建议应用的行).
-        header: suggestion header (raw, 含大小写/空格都会被 normalize).
-
-    Returns:
-        24 字符 hex fingerprint. 与 _suggestion_dedup_key 保持一致.
+    实现见 review/validation.py:suggestion_fingerprint（门面薄委托）.
     """
-    hdr_norm = (header or "").strip().lower()
-    return _hashlib.sha256(
-        f"{file_path}:{line}:{hdr_norm}".encode()
-    ).hexdigest()[:24]
+    from reviewagent.review.validation import suggestion_fingerprint
+
+    return suggestion_fingerprint(file_path, line, header)
 
 
 def _suggestion_content_fingerprint(existing_code: str) -> str:
@@ -79,16 +70,12 @@ def _suggestion_content_fingerprint(existing_code: str) -> str:
     Why 不依赖 line: Apply 一个 suggestion 会让后续行号 +N, 同一行代码
     物理位置变化但内容不变 → 行号 fingerprint 失效, 内容 fingerprint 命中.
 
-    normalize: strip + 折叠多空白为单空格. 缩进差异视为同代码 (避免 LLM
-    给的 leading-trim 噪声破坏 fingerprint).
-
-    与 _suggestion_fingerprint 互补:
-      - _suggestion_fingerprint: 同 file:line 同类问题 (行号敏感)
-      - _suggestion_content_fingerprint: 同 existing_code 内容 (行号不敏感)
+    实现见 review/validation.py:suggestion_content_fingerprint（门面薄委托）.
     """
-    import re as _cf_re
-    code_norm = _cf_re.sub(r"\s+", " ", (existing_code or "").strip())
-    return _hashlib.sha256(code_norm.encode()).hexdigest()[:16]
+    from reviewagent.review.validation import suggestion_content_fingerprint
+
+    return suggestion_content_fingerprint(existing_code)
+
 # Backward-compat re-exports
 ImproveError = BaseCommandError
 
@@ -556,8 +543,8 @@ class ImproveCommand(BaseCommand):
 
     @staticmethod
     def _merge_chunks(results: list[dict[str, Any]], *, skipped_files: list[str] | None = None, file_priorities: dict[str, float] | None = None, new_files: set[str] | None = None, cap_truncated: list[str] | None = None) -> dict[str, Any]:
-        """合并多个 chunk 的结果（实现见 review/runner.py:merge_chunks，门面薄委托）."""
-        from reviewagent.review.runner import merge_chunks
+        """合并多个 chunk 的结果（实现见 review/validation.py:merge_chunks，门面薄委托）."""
+        from reviewagent.review.validation import merge_chunks
 
         return merge_chunks(
             results, cfg=config, score_fn=ImproveCommand._score_suggestion,
@@ -1848,222 +1835,26 @@ class ImproveCommand(BaseCommand):
     ) -> dict[str, Any]:
         """校验 + snap — 返回 {"action": "post"|"drop", "new_line": int, "reason": str}.
 
-        校验顺序:
-          1. file 在 diff 中？否则 drop
-          2. 优先用 existing_code 反查真实行号（model 经常把 start_line 写错，
-             但 existing_code 内容是对的）— 比 snap 准
-          3. 反查结果不在 diff valid 集合 → snap 到最近 valid
-          4. improved_code 第一行 vs file[start_line-1] 不匹配 → degrade
+        校验顺序见 review/validation.py:validate_fields（门面注入 find_line /
+        read_lines / fix_indent / first_line_matches，实现只此一份）.
+        `file_sources` 惰性填充语义保持不变：缺文件时才经 `_read_file_lines` 读取.
         """
-        valid = line_map.get(file_path)
-        # 文件不在 diff 中（agent 乱猜）→ drop
-        if valid is None:
-            return {"action": "drop", "new_line": start_line,
-                    "reason": f"file '{file_path}' not in diff"}
+        from reviewagent.review.validation import validate_fields
 
-        # 预读文件
-        if file_path not in file_sources:
-            file_sources[file_path] = self._read_file_lines(file_path)
-        file_lines = file_sources[file_path]
-
-        # 2. 用 existing_code 反查真实行号
-        actual_line: int | None = None
-        if existing_code and existing_code.strip():
-            actual_line = self._find_line_by_existing_code(
-                file_lines, existing_code, hint_line=start_line, max_window=8,
-            )
-            if actual_line is not None and actual_line != start_line:
-                logger.info(
-                    "improve.snap_to_existing project={} mr={} file={} {} -> {} (from existing_code)",
-                    self.project_id, self.mr_iid, file_path, start_line, actual_line,
-                )
-                start_line = actual_line
-            elif actual_line is None and start_line in valid:
-                # 反查失败但 start_line 在 valid set 内 — agent 给的 existing_code
-                # 在文件里搜不到 (典型: 视图过期 / 行号填错 / 文件已被同步之前改动).
-                # 不再走 snap + step 4 对齐 (那会 snap 到 valid 内某行然后对不上 → general,
-                # 误以为 "diff 范围"问题). 视为 agent 输出不连贯, 直接 drop.
-                logger.warning(
-                    "improve.existing_code_not_found project={} mr={} file={} "
-                    "start_line={} hint='{}'",
-                    self.project_id, self.mr_iid, file_path, start_line,
-                    existing_code[:80].replace("\n", " "),
-                )
-                return {"action": "drop", "new_line": start_line,
-                        "reason": "existing_code not found near start_line in worktree — agent output inconsistent"}
-
-        # 3. snap 到最近 valid（如果上面没改）
-        if actual_line is None:
-            snapped = find_nearest_valid_line(file_path, start_line, line_map)
-            if snapped is None:
-                return {"action": "drop", "new_line": start_line,
-                        "reason": "no valid line in file"}
-            if snapped != start_line:
-                logger.info(
-                    "improve.snap_line project={} mr={} file={} {} -> {}",
-                    self.project_id, self.mr_iid, file_path, start_line, snapped,
-                )
-                start_line = snapped
-
-        # 3.5 验证 existing_code 与目标行内容匹配 (防止 start_line 与 existing_code 错位)
-        #     场景: LLM 给 start_line=278 (execute 行) 但 existing_code 是 L279 的 f-string
-        #     结果: GitLab 在 L278 显示 "删除 execute(" 但 improved_code 是 f-string → 内容不匹配
-        if existing_code and existing_code.strip():
-            # 取 existing_code 第一行作为匹配基准
-            existing_first = existing_code.strip("\n").split("\n")[0].strip()
-            if existing_first:
-                target_line_content = file_lines[start_line - 1].strip() if start_line - 1 < len(file_lines) else ""
-                if target_line_content != existing_first:
-                    # existing_code 第一行与目标行不匹配 — 尝试在目标行附近搜索
-                    # 搜索范围: start_line ± 3 行
-                    search_start = max(0, start_line - 4)  # 0-based
-                    search_end = min(len(file_lines), start_line + 3)
-                    found_line = None
-                    for i in range(search_start, search_end):
-                        if file_lines[i].strip() == existing_first:
-                            found_line = i + 1  # 转 1-based
-                            break
-                    if found_line is not None and found_line != start_line:
-                        logger.info(
-                            "improve.fix_line_mismatch project={} mr={} file={} {} -> {} (existing_code first line)",
-                            self.project_id, self.mr_iid, file_path, start_line, found_line,
-                        )
-                        start_line = found_line
-                    else:
-                        # 找不到匹配 — drop 防止发布错误的 suggestion
-                        logger.warning(
-                            "improve.existing_code_line_mismatch project={} mr={} file={} "
-                            "start_line={} expected='{}' actual='{}'",
-                            self.project_id, self.mr_iid, file_path, start_line,
-                            existing_first[:60], target_line_content[:60],
-                        )
-                        return {"action": "drop", "new_line": start_line,
-                                "reason": "existing_code first line does not match target line content"}
-
-        # 4. improved_code 第一行 vs file[start_line-1] 对齐检查
-        if not file_lines or start_line - 1 >= len(file_lines):
-            return {"action": "drop", "new_line": start_line,
-                    "reason": "file content unavailable for alignment check"}
-
-        target_line_raw = file_lines[start_line - 1] if start_line - 1 < len(file_lines) else ""
-        target_line = target_line_raw.strip()
-        imp_first = (improved_code.splitlines()[0] if improved_code else "").strip()
-
-        # 4a. 多行替换（improved 行数 > existing 行数）→ 第一行可以完全不同
-        #     场景: return open(p).read() → with open(p) as f: \n return f.read()
-        #     此时第一行是 with 而原行是 return — 这是合法的 "1→N" 替换
-        existing_lines = existing_code.strip("\n").split("\n") if existing_code and existing_code.strip() else []
-        improved_lines = improved_code.strip("\n").split("\n") if improved_code else []
-        is_multi_line_replacement = (
-            bool(existing_lines)
-            and len(improved_lines) > len(existing_lines)
-            and existing_lines[0].strip() == target_line
+        return validate_fields(
+            file_path=file_path,
+            start_line=start_line,
+            improved_code=improved_code,
+            existing_code=existing_code,
+            line_map=line_map,
+            file_sources=file_sources,
+            find_line=self._find_line_by_existing_code,
+            read_lines=self._read_file_lines,
+            fix_indent=self._fix_indent,
+            first_line_matches=_code_first_line_matches,
+            project_id=self.project_id,
+            mr_iid=self.mr_iid,
         )
-
-        if is_multi_line_replacement:
-            # 信任模型: existing_code 已通过反查定位
-            # suggestion:-0+{len(existing_lines)-1} 精确替换 existing 范围
-
-            # 尾部去重: agent 有时把 existing 之后的文件行也写进 improved_code,
-            # 但 -0+N 不会删除那些行, 导致 Apply 后出现重复行.
-            # 检测: improved 末尾的 (improved-existing) 行是否与文件后续行一致, 是则裁掉.
-            n_added = len(improved_lines) - len(existing_lines)
-            if n_added > 0:
-                after_start = start_line - 1 + len(existing_lines)  # 0-based
-                after_lines = file_lines[after_start:after_start + n_added]
-                tail_lines = improved_lines[-n_added:]
-                if len(after_lines) == n_added and all(
-                    t.strip() == a.strip()
-                    for t, a in zip(tail_lines, after_lines, strict=False)
-                ):
-                    improved_lines = improved_lines[:-n_added]
-                    improved_code = "\n".join(improved_lines)
-                    logger.info(
-                        "improve.trim_trailing_dup project={} mr={} file={} "
-                        "line={} trimmed={}",
-                        self.project_id, self.mr_iid, file_path,
-                        start_line, n_added,
-                    )
-
-            normalised_code = self._fix_indent(target_line_raw, improved_code)
-            logger.info(
-                "improve.multiline_replace project={} mr={} file={} line={} existing_lines={} improved_lines={}",
-                self.project_id, self.mr_iid, file_path, start_line,
-                len(existing_lines), len(improved_lines),
-            )
-            # 更新 normalised_code 到 normalisation 结果 (在 publish 阶段生效)
-            return {"action": "post", "new_line": start_line, "reason": "multi_line_replacement",
-                    "normalised_code": normalised_code}
-
-        # 4b. 结构重组旁路 (放在 4c 对齐检查之前, 防 with/try 包装被误 drop)
-        #     with-wrap / try-wrap 时 improved 第一行 ≠ target_line (with 与 return 不同),
-        #     但 improved 引入了新的「块起始行」 (with/try/if/class/def), 是结构重组,
-        #     不应走 4c 的「首行对齐」检查, 直接放行到 4d publish.
-        #     例: `f = open() / f.write / f.close` → `with open as f: / f.write`
-        #         improved=[with..., f.write] < existing=[f=open, f.write, f.close]
-        #         improved[0]=`with ...` ≠ target_line=`f = open(...)`, 但有 `with` 块起始.
-        _block_open_re = re.compile(r'^\s*(?:with\s|try\s*:|if\s|for\s|while\s|async\s|class\s|def\s)')
-        is_structural_refactor = False
-        if len(improved_lines) < len(existing_lines) and improved_lines:
-            norm_existing_set = {ln.strip() for ln in existing_lines if ln.strip()}
-            new_block_openers = [
-                ln.strip() for ln in improved_lines
-                if ln.strip() and _block_open_re.match(ln.strip())
-                and ln.strip() not in norm_existing_set
-            ]
-            if new_block_openers:
-                is_structural_refactor = True
-                logger.info(
-                    "improve.structural_refactor project={} mr={} file={} "
-                    "line={} existing={} improved={} new_block_openers={}",
-                    self.project_id, self.mr_iid, file_path,
-                    start_line, len(existing_lines), len(improved_lines), len(new_block_openers),
-                )
-
-        # 4c. 对齐检查
-        # N→N 等行数替换: existing_code 已在文件中定位 (actual_line 非 None),
-        #   agent 有意改写代码 (e.g. print→logger.info), 第一行不需要匹配.
-        # 1→1 且 existing_code 未找到: 仍需校验第一行对齐, 防止模型乱发.
-        # 例外: improved 为空 (删除整段) → 不需要对齐第一行
-        # 例外: 结构重组 (4b 旁路命中) → with/try 包装首行 ≠ target_line, 跳过对齐
-        is_same_line_count = bool(existing_lines) and len(improved_lines) == len(existing_lines)
-        if not improved_lines:
-            pass  # 删除场景, 不需要对齐
-        elif is_structural_refactor:
-            pass  # 结构重组旁路: 跳过对齐检查, 直接放行
-        elif not (is_same_line_count and actual_line is not None):
-            if not _code_first_line_matches(target_line, imp_first):
-                return {"action": "drop", "new_line": start_line,
-                        "reason": f"improved_code first line doesn't match file:{start_line} ({target_line!r} vs {imp_first!r})"}
-
-        # 4d. 收缩检查: M < N 时区分「真删行」与「结构重组」
-        #     结构重组 (上面 4b 已识别, 已放行) → publish
-        #     真删 (improved ⊂ existing, 没新内容) → general (无 Apply), 防 agent 误删
-        # 例外: M == 0 且 existing 非空 → 整段删除 (duplicated_definition / dead_code),
-        #     允许多行删除 suggestion 走到 publish 阶段.
-        if len(improved_lines) == 0 and existing_lines:
-            logger.info(
-                "improve.delete_range project={} mr={} file={} "
-                "line={} delete_lines={}",
-                self.project_id, self.mr_iid, file_path,
-                start_line, len(existing_lines),
-            )
-        elif len(improved_lines) < len(existing_lines) and not is_structural_refactor:
-            # 走到这里说明: M < N 且 没引入新块起始行 → 真删, 降级 general
-            logger.info(
-                "improve.shrink_to_general project={} mr={} file={} "
-                "line={} existing={} improved={}",
-                self.project_id, self.mr_iid, file_path,
-                start_line, len(existing_lines), len(improved_lines),
-            )
-            return {"action": "general", "new_line": start_line,
-                    "reason": f"shrinking suggestion ({len(existing_lines)} -> {len(improved_lines)} lines)"}
-
-        # 4d. 缩进修正: 若 improved_code 第一行缺缩进, 自动补齐
-        normalised_code = self._fix_indent(target_line_raw, improved_code)
-
-        return {"action": "post", "new_line": start_line, "reason": "ok",
-                "normalised_code": normalised_code}
 
     @staticmethod
     def _score_suggestion(s: dict) -> int:

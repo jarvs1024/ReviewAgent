@@ -351,6 +351,22 @@ def _extract_identifiers(code: str, keywords: set[str] | None = None) -> set[str
     return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", code)) - excluded
 
 
+def _resolve_keywords(
+    keywords: set[str] | None,
+    policy: Any = None,
+) -> set[str] | None:
+    """解析采纳判定关键字集: 显式 `keywords` > `policy.keywords()` > None（旧默认集）.
+
+    `None` 保留旧行为（`_extract_identifiers` 回退 `_KEYWORDS`），
+    保证既有调用方零改动.
+    """
+    if keywords is not None:
+        return keywords
+    if policy is not None:
+        return policy.keywords()
+    return None
+
+
 def _exact_improved_code_near_target(
     current_content: str,
     improved_code: str,
@@ -644,11 +660,16 @@ def process_adopt(
     file_path: str = "",
     target_line: int = 0,
     keywords: set[str] | None = None,
+    policy: Any = None,
 ) -> dict[str, Any]:
     """处理 /adopt 命令.
 
+    `policy`（可选）: 语言策略；`keywords=None` 时用 `policy.keywords()` 作为
+    采纳判定的关键字排除集（显式 `keywords` 优先，两者都缺省则保持旧集合）.
+
     Returns: {\"action\": \"adopted\"|\"adopt-validation-failed\"|\"adopt-failed\", \"reason\": str, \"validation\": str}
     """
+    keywords = _resolve_keywords(keywords, policy)
     gl = GitLabClient()
     store = get_store()
 
@@ -1184,9 +1205,13 @@ def auto_detect_applied(
     head_sha: str,
     actor_username: str = "auto-detect",
     keywords: set[str] | None = None,
+    policy: Any = None,
 ) -> dict[str, Any]:
     """当 head_sha 变化 (push / MR update) 时, 探测哪些 open suggestion
     已被用户在 GitLab UI "Apply suggestion" 了.
+
+    `policy`（可选）: 语言策略；`keywords=None` 时用 `policy.keywords()` 作为
+    采纳判定的关键字排除集（显式 `keywords` 优先，两者都缺省则保持旧集合）.
 
     Returns: {
         "scanned": int,   # 检查的总条数
@@ -1201,6 +1226,7 @@ def auto_detect_applied(
     force-push, merge from web) 都会先跑一次探测, 把已应用的转 applied,
     再触发后续的 describe+improve (作为二次检视).
     """
+    keywords = _resolve_keywords(keywords, policy)
     gl = GitLabClient()
     store = get_store()
 

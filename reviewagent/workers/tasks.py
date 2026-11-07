@@ -329,11 +329,13 @@ def run_suggestion_action(
     reason: str,
     file_path: str = "",
     target_line: int = 0,
+    policy: Any = None,
 ) -> dict[str, Any]:
     """处理 /adopt 或 /dismiss — 不调用 opencode, 直接 resolve discussion + record telemetry.
 
     file_path / target_line 透传给 process_*, 让其在 note_id 查不到时降级到
-    file:line 兜底 (Fix C).
+    file:line 兜底 (Fix C). `policy`（可选）仅透传给 /adopt 的采纳判定
+    （多语言关键字注入），/dismiss 不消费关键字.
     """
     from reviewagent.commands.suggestion_actions import process_adopt, process_dismiss
     logger.info(
@@ -350,6 +352,7 @@ def run_suggestion_action(
             reason=reason,
             file_path=file_path,
             target_line=target_line,
+            policy=policy,
         )
     elif action == "dismiss":
         return process_dismiss(
