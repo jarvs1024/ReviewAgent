@@ -331,4 +331,5 @@ def parse_pack(path: Path, *, language: str, root: Path) -> RulePack:
         index_by_key=index,
         path=str(resolved),
         fingerprint=hashlib.sha256(raw).hexdigest(),
+        applies_to=dict(fm.get("applies_to") or {}),
     )

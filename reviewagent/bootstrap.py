@@ -22,13 +22,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from reviewagent.config import current
 from reviewagent.logging_setup import logger, setup_logging
 from reviewagent.scenario import profile as profile_module
 from reviewagent.scenario.profile import bind_instance, bound_profile, load_and_activate
-from reviewagent.scenario.rules.resolver import assemble_base, set_active_rule_set
+from reviewagent.scenario.rules.resolver import RuleSet, assemble_base, set_active_rule_set
 from reviewagent.settings.binder import REQUIRED_FIELDS, explicit_env, validate
 from reviewagent.settings.binder import fingerprint as config_fingerprint
 from reviewagent.settings.schema import SCHEMA
@@ -53,7 +52,7 @@ class BootstrapResult:
     data_dir: Path
     kind: str = ""
     config_fingerprint: str = ""
-    rule_set: Any | None = None
+    rule_set: RuleSet | None = None
 
 
 # ---------------- readiness ----------------
@@ -183,6 +182,6 @@ def reset_for_tests() -> None:
     """清空启动缓存 / 激活状态 / RuleSet / 追加的 readiness 钩子（仅测试使用）."""
     global _state
     _state = None
+    # `deactivate()` 内部已失效激活 RuleSet（避免新 profile 看到旧规则）。
     profile_module.deactivate()
-    set_active_rule_set(None)
     _readiness_checks[:] = list(_DEFAULT_CHECKS)

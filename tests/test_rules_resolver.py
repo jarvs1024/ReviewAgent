@@ -216,3 +216,128 @@ def test_deactivate_invalidates_active_rule_set():
     assert resolver._ACTIVE is not None
     profile_module.deactivate()
     assert resolver._ACTIVE is None
+
+
+def test_load_and_activate_invalidates_active_rule_set():
+    import reviewagent.scenario.profile as profile_module
+
+    profile = load_profile(None)
+    set_active_rule_set(assemble_base(profile))
+    assert resolver._ACTIVE is not None
+    profile_module.load_and_activate()
+    assert resolver._ACTIVE is None
+
+
+# ---------------- Fix round 1：装配期命名空间 / 共享包 / 唯一 id ----------------
+
+
+def test_rule_key_outside_namespace_fails(tmp_path):
+    body = "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n| X-FOO | high | 命名空间外 |\n"
+    profile = _write_profile(tmp_path, packs=[("rules/p.md", "t/p", 800, body)])
+    with pytest.raises(ValueError, match="namespace"):
+        assemble_base(profile)
+
+
+def test_duplicate_pack_id_fails(tmp_path):
+    body_a = "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n| R-A | high | a |\n"
+    body_b = "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n| R-B | high | b |\n"
+    profile = _write_profile(
+        tmp_path,
+        packs=[
+            ("rules/a.md", "t/dup", 800, body_a),
+            ("rules/b.md", "t/dup", 700, body_b),
+        ],
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        assemble_base(profile)
+
+
+def test_shared_pack_must_declare_languages(tmp_path):
+    # profile root 即 `_shared` 根：其下规则包视为共享包，必须声明语言。
+    shared_dir = tmp_path / "profiles" / "_shared"
+    pack = shared_dir / "rules" / "x.md"
+    pack.parent.mkdir(parents=True)
+    pack.write_text(
+        "---\nschema_version: 1\nid: shared/x\npriority: 800\nrender: verbatim\n---\n"
+        "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n| R-LOG | high | 共享日志 |\n",
+        encoding="utf-8",
+    )
+    profile = replace(load_profile(None), root=shared_dir, rules=("rules/x.md",))
+    with pytest.raises(ValueError, match="applies_to.languages"):
+        assemble_base(profile)
+
+
+# ---------------- Fix round 1：指纹 / disable+override / normalize_keys ----------------
+
+
+def test_fingerprint_includes_pack_priority(tmp_path):
+    body = "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n| R-DUP | high | 同正文 |\n"
+    high = _write_profile(
+        tmp_path / "a", name="a", packs=[("rules/p.md", "t/p", 800, body)]
+    )
+    low = _write_profile(
+        tmp_path / "b", name="b", packs=[("rules/p.md", "t/p", 500, body)]
+    )
+    high_set, low_set = assemble_base(high), assemble_base(low)
+    assert high_set.verbatim_body == low_set.verbatim_body
+    assert high_set.index_by_key["R-DUP"].severity == low_set.index_by_key["R-DUP"].severity
+    assert high_set.fingerprint != low_set.fingerprint
+
+
+def test_override_on_disabled_key_is_noop(tmp_path):
+    body = "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n| R-LOG | low | 日志 |\n"
+    profile = _write_profile(
+        tmp_path,
+        packs=[("rules/p.md", "t/p", 800, body)],
+        rule_overrides={"R-LOG": {"severity": "high"}},
+        disable=["R-LOG"],
+    )
+    ruleset = assemble_base(profile)
+    assert "R-LOG" not in ruleset.index_by_key
+
+
+def _alias_profile(tmp_path: Path):
+    body = (
+        "| 规则键 | 严重度 | 摘要 | aliases |\n"
+        "|---|---|---|---|\n"
+        "| R-LOG | high | 日志 | R-LOGGING |\n"
+    )
+    return _write_profile(tmp_path, packs=[("rules/p.md", "t/p", 800, body)])
+
+
+def test_normalize_keys_maps_alias_to_canonical(tmp_path):
+    ruleset = assemble_base(_alias_profile(tmp_path))
+    assert ruleset.normalize_keys("see R-LOGGING here") == ["R-LOG"]
+
+
+def test_normalize_keys_dedupes_canonical_and_alias(tmp_path):
+    ruleset = assemble_base(_alias_profile(tmp_path))
+    assert ruleset.normalize_keys("R-LOG then R-LOGGING") == ["R-LOG"]
+
+
+def test_normalize_keys_promotion_when_any_is_case_insensitive(tmp_path):
+    promoted = replace(
+        _alias_profile(tmp_path),
+        rule_key_promotions=({"to_key": "R-PERF", "when_any": ["perf_counter"]},),
+    )
+    ruleset = assemble_base(promoted)
+    assert ruleset.normalize_keys("use PERF_COUNTER") == ["R-PERF"]
+
+
+def test_normalize_keys_promotion_when_all(tmp_path):
+    promoted = replace(
+        _alias_profile(tmp_path),
+        rule_key_promotions=({"to_key": "R-LOCK", "when_all": ["lock", "file"]},),
+    )
+    ruleset = assemble_base(promoted)
+    assert ruleset.normalize_keys("lock the file") == ["R-LOCK"]
+    assert ruleset.normalize_keys("lock only") == []
+
+
+def test_normalize_keys_promotion_skips_existing_key(tmp_path):
+    promoted = replace(
+        _alias_profile(tmp_path),
+        rule_key_promotions=({"to_key": "R-LOG", "when_any": ["logging"]},),
+    )
+    ruleset = assemble_base(promoted)
+    assert ruleset.normalize_keys("R-LOG for logging") == ["R-LOG"]

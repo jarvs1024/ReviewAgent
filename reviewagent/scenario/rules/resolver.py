@@ -7,8 +7,12 @@
 * `profile.disable` 中的键不进入 `index_by_key` / `rules` / `alias_map`，
   但 **不改变** `verbatim_body`（正文由包正文拼接，逐字节保留）；
 * `profile.rule_overrides` 只允许调整 `severity` / `weight`，引用未知键即
-  `ValueError`（消息含 "override"）；
-* `fingerprint` = 正文摘要 + 规则 `(key, severity, weight)` 序列摘要。
+  `ValueError`（消息含 "override"）；已 `disable` 的键上的覆盖是 no-op；
+* 装配期校验：规则键必须落在 profile 命名空间（内置 `R-*` 或仓库
+  `<prefix>-RULE-*`）、`_shared` 下的共享包必须声明 `applies_to.languages`、
+  合并范围内规则包 `id` 不得重复；
+* `fingerprint` = 正文摘要 + 规则 `(key, severity, weight, priority, pack_id)`
+  序列摘要。
 
 `active_rule_set()` 持有启动期装配的缓存；`set_active_rule_set(None)` 用于
 profile 切换时失效（不得让新 profile 看到上一个 profile 的规则）。
@@ -18,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from reviewagent.scenario.profile import Profile
@@ -26,6 +31,7 @@ from reviewagent.scenario.rules.model import Rule
 from reviewagent.scenario.rules.parser import parse_pack
 
 _OVERRIDABLE = frozenset({"severity", "weight"})
+_SHARED = "_shared"
 
 
 @dataclass(frozen=True)
@@ -41,30 +47,54 @@ class RuleSet:
     fingerprint: str
 
     def normalize_keys(self, text: str) -> list[str]:
-        """抽取文本中的规则键，并按 `rule_key_promotions` 补充提升键."""
-        keys = self.key_patterns.extract(text)
+        """抽取文本中的规则键，按别名表规范化，并按提升规则补充键."""
+        canonical: list[str] = []
+        for key in self.key_patterns.extract(text):
+            mapped = self.alias_map.get(key, key)
+            if mapped not in canonical:
+                canonical.append(mapped)
         lowered = (text or "").lower()
         for promo in self.promotions:
             to_key = promo.get("to_key")
-            if not to_key or to_key in keys:
+            if not to_key or to_key in canonical:
                 continue
             when_any = promo.get("when_any")
             when_all = promo.get("when_all")
             if when_any and any(str(word).lower() in lowered for word in when_any):
-                keys.append(to_key)
+                canonical.append(to_key)
             elif when_all and all(str(word).lower() in lowered for word in when_all):
-                keys.append(to_key)
-        return keys
+                canonical.append(to_key)
+        return canonical
 
 
 def assemble_base(profile: Profile) -> RuleSet:
     """装配基础 `RuleSet`（profile 规则包 -> 去重规则 + 正文 + 键模式）."""
+    key_patterns = build_key_patterns(profile.rule_keys)
     pairs = [
         (order, parse_pack(profile.root / rel, language=profile.language, root=profile.root))
         for order, rel in enumerate(profile.rules)
     ]
     pairs.sort(key=lambda item: (-item[1].priority, item[0]))
     packs = [pack for _, pack in pairs]
+
+    shared_root = (profile.root.parent / _SHARED).resolve()
+    seen_ids: set[str] = set()
+    for pack in packs:
+        if pack.id in seen_ids:
+            raise ValueError(f"duplicate rule pack id: {pack.id}")
+        seen_ids.add(pack.id)
+        if Path(pack.path).is_relative_to(shared_root) and not pack.applies_to.get(
+            "languages"
+        ):
+            raise ValueError(
+                f"shared rule pack {pack.id} must declare applies_to.languages"
+            )
+        for rule in pack.rules:
+            if not (key_patterns.is_builtin(rule.key) or key_patterns.is_repo(rule.key)):
+                raise ValueError(
+                    f"rule key '{rule.key}' in pack {pack.id} ({pack.path}) "
+                    "is outside profile namespace"
+                )
 
     disabled = set(profile.disable)
     index: dict[str, Rule] = {}
@@ -78,6 +108,9 @@ def assemble_base(profile: Profile) -> RuleSet:
             ordered_keys.append(rule.key)
 
     for key, override in profile.rule_overrides.items():
+        if key in disabled:
+            # 已 disable 的键上的 override 是 no-op（不装配该键，自然无覆盖目标）。
+            continue
         if key not in index:
             raise ValueError(f"rule override references unknown key: {key}")
         changes = {k: v for k, v in override.items() if k in _OVERRIDABLE}
@@ -96,7 +129,18 @@ def assemble_base(profile: Profile) -> RuleSet:
 
     body = "\n\n".join(pack.body for pack in packs if pack.body)
     payload = json.dumps(
-        [[rule.key, rule.severity, rule.weight] for rule in rules],
+        sorted(
+            [
+                [
+                    rule.key,
+                    rule.severity,
+                    rule.weight,
+                    rule.priority,
+                    rule.source.get("pack_id"),
+                ]
+                for rule in rules
+            ]
+        ),
         sort_keys=True,
         ensure_ascii=False,
     )
@@ -109,7 +153,7 @@ def assemble_base(profile: Profile) -> RuleSet:
         index_by_key=index,
         alias_map=alias_map,
         promotions=profile.rule_key_promotions,
-        key_patterns=build_key_patterns(profile.rule_keys),
+        key_patterns=key_patterns,
         sources=tuple(
             {"kind": "profile", "path": pack.path, "pack_id": pack.id} for pack in packs
         ),

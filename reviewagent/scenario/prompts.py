@@ -75,9 +75,12 @@ def load_block(name: str, profile: Profile | None = None) -> str:
     if name == "_general_rules_block":
         # 通用规则正文已迁移到规则包：走 RuleSet 渲染，不再读旧 block 文件。
         from reviewagent.scenario.rules.render import render_rule_block
-        from reviewagent.scenario.rules.resolver import active_rule_set
+        from reviewagent.scenario.rules.resolver import active_rule_set, assemble_base
 
-        prof = _profile(profile)
+        if profile is not None:
+            # 显式 profile 直接装配（不读激活缓存，避免串用其他 profile 的规则）。
+            return render_rule_block(assemble_base(profile), profile=profile)
+        prof = active_or_load()
         return render_rule_block(active_rule_set(), profile=prof)
     if not name.startswith("_"):
         raise ValueError(f"load_block 只接受下划线开头的 block 名, got: {name}")

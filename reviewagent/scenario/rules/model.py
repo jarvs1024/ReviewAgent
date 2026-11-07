@@ -36,3 +36,4 @@ class RulePack:
     index_by_key: dict[str, Rule]
     path: str
     fingerprint: str
+    applies_to: dict[str, Any] = field(default_factory=dict)

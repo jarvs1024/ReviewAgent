@@ -33,4 +33,12 @@ def render_rule_block(
         return rule_set.verbatim_body
     lines = ["| 规则键 | 严重度 | 摘要 |", "|---|---|---|"]
     lines += [f"| {rule.key} | {rule.severity} | {rule.title} |" for rule in rule_set.rules]
-    return "\n".join(lines)
+    rendered = "\n".join(lines)
+    if budget is not None:
+        size = len(rendered.encode())
+        if size > budget:
+            raise ValueError(
+                f"structured rule block exceeds budget for profile {profile.name}: "
+                f"{size} > {budget}"
+            )
+    return rendered
