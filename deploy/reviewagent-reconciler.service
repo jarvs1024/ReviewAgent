@@ -1,20 +1,18 @@
 [Unit]
-Description=ReviewAgent Worker (RQ, main review queue)
-After=network.target redis-server.service
+Description=ReviewAgent Reconciler (sync ✓ resolved state and sweep orphan runs)
+After=network-online.target redis-server.service redis.service
+Wants=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
 User=workflow
 WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment=REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
+Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/workflow/ReviewAgent/config/instance.env
 ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check
-ExecStart=/home/workflow/ReviewAgent/.venv/bin/rq worker review --url redis://127.0.0.1:6379/0
-Restart=always
-RestartSec=5
+ExecStart=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent.reconciler.loop
+TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
-
-[Install]
-WantedBy=multi-user.target

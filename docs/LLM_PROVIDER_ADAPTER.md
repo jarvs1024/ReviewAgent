@@ -366,11 +366,9 @@ bash scripts/services_ops.sh restart
 
 ### 7.1 测试脚本
 
-| 脚本 | 用途 |
-|------|------|
-| `scripts/test_qodercli_feasibility.py` | 基础可行性验证 (4 项) |
-| `scripts/test_qodercli_p0.py` | P0/P1/P2 全面验证 (7 项) |
-| `scripts/test_agents_node.py` | `--agents` 参数单独验证 |
+> 早期三个一次性验证脚本（`test_qodercli_feasibility.py` / `test_qodercli_p0.py` /
+> `test_agents_node.py`）写死在当时的 Windows 开发机上，已于 2026-11-08 删除。
+> provider 行为由 `tests/` 下的单测与统一 E2E（`scripts/e2e/run_e2e.py`）覆盖。
 
 ### 7.2 参考资料
 

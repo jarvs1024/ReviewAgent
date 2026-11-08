@@ -1,0 +1,26 @@
+[Unit]
+Description=ReviewAgent Worker %i (RQ, main review queue)
+After=network-online.target redis-server.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workflow
+WorkingDirectory=/home/workflow/ReviewAgent
+Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment=REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/workflow/ReviewAgent/config/instance.env
+ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check
+ExecStart=/bin/sh -c 'exec /home/workflow/ReviewAgent/.venv/bin/rq worker "$${RQ_QUEUE_NAME:-review}" --url "$${REDIS_URL:-redis://127.0.0.1:6379/0}"'
+# RQ 收到 SIGTERM 会等手上 job 跑完再退；停止超时必须大于 RQ_WORKER_TIMEOUT，
+# 否则 systemd 会 SIGKILL，留下永远 running 的 review_runs（靠 reconciler 兜底清扫）。
+KillSignal=SIGTERM
+TimeoutStopSec=1300
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

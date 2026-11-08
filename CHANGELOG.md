@@ -49,6 +49,15 @@
   E2E 不再在 auto_chain 前清空 `review_runs`（默认上限 30 本就够用），保留
   "哪个 run 产出了哪些 suggestion" 的证据；空 `improved_code` 按删除整段的合法
   形态校验（`existing_code` 非空 + note 含 suggestion 块），非空时与 note 正文比对。
+- **一键部署与部署体检**：`deploy.sh` 幂等完成 venv / Redis / 数据目录 / unit 安装 /
+  `enable --now`（开机自启）/ 部署后验证，支持 `--check` 与 `--no-verify`；
+  新增 `deploy/preflight.sh`（systemd、python、磁盘、端口、密钥、GitLab API、Redis、
+  目录属主、config/rules check）与 `deploy/verify.sh`（is-enabled、is-active、
+  `/health`、`/readyz`、telemetry、API 与 worker 的配置指纹一致性）。
+- **worker 模板与常驻 reconciler**：`reviewagent-worker@.service` 按 `RQ_WORKER_COUNT`
+  实例化（`@1..N`，调小后自动下线多余实例）；新增 `reviewagent-reconciler.service`
+  + `.timer`（开机 2min 后每 60s 同步 ✓ 状态并清扫孤儿 running），Linux 生产不再依赖
+  macOS launchd。
 
 ### Changed
 
@@ -59,6 +68,12 @@
 - 配置文件系统布局统一到 `REVIEWAGENT_DATA_DIR`（生产 `/var/lib/reviewagent`）；
   systemd unit 增加 `REVIEW_PROFILE` / `REVIEWAGENT_DATA_DIR` 与
   `ExecStartPre=... reviewagent config check`。
+- **systemd worker 改为 env 驱动**：队列名与 Redis 地址在 `ExecStart` 里从
+  `config/instance.env` 展开（`$${RQ_QUEUE_NAME:-review}` / `$${REDIS_URL:-...}`，
+  周报队列缺省派生 `<主队列>-weekly`），unit 不再硬编码 `review` / `6379`；
+  `TimeoutStopSec=1300` ≥ `RQ_WORKER_TIMEOUT`，重启不再 SIGKILL 执行中的 job。
+- `deploy.sh` 首次引导改用 `config/examples/instance.env.example`（`.env.example`
+  已删除），venv 与数据/工作树目录统一以服务账号创建，Redis 端口跟随 `REDIS_URL`。
 - 日志与运维文档的事件名以代码为准：`chain.lock_timeout`、`improve.record_suggestion failed`。
 - 非法配置值改为启动即失败（`config check` / binder 校验），不再静默回退默认值。
 - `review.yaml` 支持嵌套键校验，并开放 `repo_context` 与 `reporting`（仅
@@ -86,6 +101,13 @@
 - worktree 路径增加每次运行唯一的后缀，并在创建前清理超过 6 小时的孤儿目录；
   链锁丢失导致同一 MR/SHA 的并发链不再互相删除工作区（表现为 `worktree 不存在`
   与 `output not JSON` 的 describe 失败）。
+- **部署脚本三处失败路径**：首次引导引用已删除的 `.env.example`；成功路径因未初始化
+  的 `MISSING_DEPLOY_UNITS` 在 `set -u` 下退出 1；`/tmp/reviewagent-worktrees` 以 root
+  创建导致 worker `permission denied`（现统一 `install -d -o workflow`）。
+- **单 worker 与并发配置脱节**：旧 `reviewagent-worker.service` 只起 1 个进程而
+  `RQ_WORKER_COUNT=3`；升级时自动 `disable --now` 旧 unit，改由模板实例承接。
+- 清理 `scripts/` 下 5 个写死在已失效开发机路径上的一次性脚本（provider 验证脚本等），
+  文档引用同步更新。
 
 ### Known limits
 

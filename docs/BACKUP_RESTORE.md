@@ -51,7 +51,7 @@ sqlite3 "$BACKUP_DIR/telemetry.db" "SELECT COUNT(*) FROM review_runs;" # 记录�
 
 ```bash
 # 1) 先停 worker（停止消费队列），再停 API（停止入队）
-systemctl stop reviewagent-worker reviewagent-weekly-worker
+systemctl stop 'reviewagent-worker@*' reviewagent-weekly-worker
 systemctl stop reviewagent-webhook
 
 # 2) 确认没有 running run（有则等它结束，或确认是孤儿后由 sweep 收尾）
@@ -61,7 +61,7 @@ sqlite3 "$DATA_DIR/telemetry.db" \
 #    可忽略；恢复后第一次启动 worker 时 sweep_orphaned_runs 会自动标 failed。
 
 # 3) 确认没有进程占用数据目录
-systemctl is-active reviewagent-webhook reviewagent-worker reviewagent-weekly-worker
+systemctl is-active reviewagent-webhook 'reviewagent-worker@*' reviewagent-weekly-worker
 ```
 
 ### schema 版本门禁
@@ -110,7 +110,7 @@ sqlite3 "$NEW_DATA_DIR/telemetry.db" \
   "SELECT COUNT(*) FROM review_runs WHERE status='running';"
 
 # 4) 起服务：先 worker 后 API（与升级顺序一致），再验证
-systemctl start reviewagent-worker reviewagent-weekly-worker
+systemctl start 'reviewagent-worker@*' reviewagent-weekly-worker
 systemctl start reviewagent-webhook
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/readyz       # 期望 200
 curl -s http://127.0.0.1:3000/api/v1/telemetry/health

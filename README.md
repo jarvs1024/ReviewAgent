@@ -250,7 +250,20 @@ LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
 
 ## 快速开始
 
-- 服务器部署 → 见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+服务器部署（Linux + systemd，一键部署并设置开机自启）：
+
+```bash
+# 首次：生成 config/instance.env（600）后退出，填入 GitLab URL / PAT / Webhook Secret
+sudo bash deploy.sh
+sudo bash deploy.sh          # 再执行一次：装依赖、起 Redis、装 unit、enable、跑验证
+sudo bash deploy.sh --check  # 只做前置检查（不修改系统）
+```
+
+`deploy.sh` 完成后所有 unit 均已 `systemctl enable`：webhook、`reviewagent-worker@1..RQ_WORKER_COUNT`、
+weekly-worker 常驻，weekly.timer 与 reconciler.timer 进入 `timers.target`，重启机器自动拉起。
+`deploy/preflight.sh` 与 `deploy/verify.sh` 可单独运行做环境体检与部署后复检。
+
+- 服务器部署细节 → 见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 - 快速启动（本地开发 / 运维） → 见 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 - 生效配置与两个指纹 → 见 [`docs/CONFIG.md`](docs/CONFIG.md)（由 `reviewagent config show` 生成）
 - 规则包模板（verbatim / structured） → 见 [`docs/RULES.md`](docs/RULES.md)

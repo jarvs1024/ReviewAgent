@@ -1,0 +1,11 @@
+[Unit]
+Description=ReviewAgent Reconciler Timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=reviewagent-reconciler.service
+
+[Install]
+WantedBy=timers.target

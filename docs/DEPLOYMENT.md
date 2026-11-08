@@ -11,16 +11,64 @@ ReviewAgent 通过 systemd 管理全部服务，部署在 Linux 服务器上。�
 | 维度 | 生产服务器 |
 |---|---|
 | 主机 | Linux（workflow 用户） |
-| OS | Linux (Anolis/CentOS) |
+| OS | Linux (Anolis/CentOS/Ubuntu，systemd) |
 | webhook 端口 | `:3000` |
-| RQ 队列 | `review`（主队列） + `review-weekly`（周报） |
-| Redis | `redis://127.0.0.1:6379/0`（Docker 容器） |
+| RQ 队列 | `RQ_QUEUE_NAME`（默认 `review`） + `<主队列>-weekly`（默认 `review-weekly`） |
+| Redis | 与 `config/instance.env` 的 `REDIS_URL` 一致（模板默认 `redis://127.0.0.1:6380/0`） |
 | LLM Provider | `qoder-sdk`（推荐）/ `qodercli` subprocess / `opencode` HTTP |
 | GitLab bot | 与 86 共用同一 bot 账号 |
-| 进程管理 | systemd（4 unit + 1 timer） |
-| 代码路径 | `/home/workflow/ReviewAgent` |
+| 进程管理 | systemd（5 个 service + 2 个 timer，全部 enable 开机自启） |
+| 代码路径 | `/home/workflow/ReviewAgent`（`PROJECT_DIR` 可覆盖） |
 | 数据目录 | `/var/lib/reviewagent`（telemetry.db、repos/、weekly_reports/） |
 | 场景包 | `ssd-python-autotest`（`REVIEW_PROFILE`） |
+
+---
+
+## 零、一键部署
+
+`deploy.sh` 是幂等的（可反复执行做升级），在仓库根目录用 root 运行：
+
+```bash
+git pull                                   # 或 rsync 同步代码
+sudo bash deploy.sh                        # 部署 / 升级 + 开机自启 + 部署后验证
+sudo bash deploy.sh --check                # 只做前置检查，不改系统
+sudo bash deploy.sh --no-verify            # 部署但跳过 verify.sh
+```
+
+可覆盖的环境变量：
+
+| 变量 | 默认值 |
+|---|---|
+| `PROJECT_DIR` | `/home/workflow/ReviewAgent` |
+| `REVIEWAGENT_DATA_DIR` | `/var/lib/reviewagent` |
+| `SERVICE_USER` | `workflow` |
+| `WEBHOOK_PORT` | `3000` |
+
+**首次执行**会从 `config/examples/instance.env.example` 生成 `config/instance.env`
+（`600`、属主为服务账号）后退出——填入 `GITLAB_URL` / PAT / `GITLAB_WEBHOOK_SECRET`
+（`qoder-sdk` 还需 `QODER_SDK_PAT`）再执行一次即完成部署。脚本依次完成：
+
+1. 校验代码目录、服务账号（缺失时 `useradd --system` 创建）；
+2. 以服务账号创建 venv 并 `pip install -e ".[dev]"`；
+3. 建好 `/var/lib/reviewagent/{repos,weekly_reports}` 与 `/tmp/reviewagent-worktrees`（属主 `workflow`）；
+4. 按 `REDIS_URL` 解析 host/port，优先 `systemctl enable --now redis-server`（没有 distro unit 时手动拉起并告警）；
+5. `LLM_PROVIDER=qodercli` 时同步 `.qoder/agents`；
+6. 跑 `deploy/preflight.sh`（任何 FAIL 都中止，不带着坏配置改 systemd）；
+7. 安装 `deploy/*.service|*.timer`（自动把默认路径替换成 `PROJECT_DIR` / `REVIEWAGENT_DATA_DIR`），
+   `daemon-reload` 后 `enable --now` 全部 unit，并按 `RQ_WORKER_COUNT` 启 `reviewagent-worker@1..N`；
+8. 跑 `deploy/verify.sh` 校验开机自启、`/health`、`/readyz`、Redis 与 API/worker 的配置指纹一致性。
+
+两个检查脚本也可单独执行：
+
+```bash
+sudo bash deploy/preflight.sh      # 环境：systemd/python/git/用户/磁盘/端口/密钥/GitLab API/Redis/目录/unit/config check
+sudo bash deploy/verify.sh         # 结果：is-enabled + is-active + 探针 + 指纹一致 + timer 列表
+```
+
+**开机自启**由 `systemctl enable` 持久化：`reviewagent-webhook`、`reviewagent-worker@1..N`、
+`reviewagent-weekly-worker` 常驻；`reviewagent-weekly.timer`、`reviewagent-reconciler.timer`
+进入 `timers.target`（reconciler 在 `OnBootSec=2min` 后开始，每 60s 一轮）。
+`verify.sh` 会逐个 `is-enabled`，`disabled` 视为失败。
 
 ---
 
@@ -39,6 +87,9 @@ python3.12 -m venv .venv
 # 确保 node 在 PATH 中，qodercli 通过 npm 全局安装
 ```
 
+> 以上步骤（venv、依赖、Redis、目录、unit 安装与开机自启）已由 `deploy.sh` 自动完成，
+> 本节仅作为手工排障时的等价命令参考。
+
 ---
 
 ## 二、目录准备
@@ -48,7 +99,7 @@ python3.12 -m venv .venv
 
 ```bash
 # 数据目录（SQLite + bare repos + 周报）+ worktree 临时目录
-sudo install -d -o workflow -g workflow -m 700 /var/lib/reviewagent
+sudo install -d -o workflow -g workflow -m 750 /var/lib/reviewagent
 sudo install -d -o workflow -g workflow -m 700 /tmp/reviewagent-worktrees
 
 # 场景与数据绑定：config check 会在 data_dir 下写 instance.json（首次绑定后不可混用其他 profile）
@@ -69,7 +120,7 @@ chmod 600 config/instance.env
 # 编辑 config/instance.env，填入真实值：
 #   GITLAB_URL / GITLAB_PERSONAL_ACCESS_TOKEN / GITLAB_WEBHOOK_SECRET（必填）
 #   LLM_PROVIDER=qoder-sdk + QODER_SDK_PAT
-#   REDIS_URL=redis://127.0.0.1:6379/0
+#   REDIS_URL=redis://127.0.0.1:6380/0
 #   REVIEW_PROFILE=ssd-python-autotest
 #   REVIEWAGENT_DATA_DIR=/var/lib/reviewagent（也可由 systemd unit 固定）
 #   LOG_FORMAT=text（text=现网观感 / json=机读单行）
@@ -88,29 +139,33 @@ chmod 600 config/instance.env
 Environment=RQ_WORKER_CLASS=reviewagent.workers.rq_worker.ReviewAgentSpawnWorker
 ```
 
-`RQ_WORKER_COUNT`（默认 3）只被本地脚本 `scripts/restart_local.sh` /
-`scripts/services_ops.sh` 使用；systemd 生产部署按需要起多个
-`reviewagent-worker.service`（或改用模板 unit 实例化）。
+`RQ_WORKER_COUNT`（默认 3）决定生产部署的 worker 实例数：`deploy.sh` 启
+`reviewagent-worker@1..N`，并在调小后自动 `disable --now` 多余实例。队列名与 Redis 地址
+**只来自 `config/instance.env`**（unit 里是 `$${RQ_QUEUE_NAME:-review}` /
+`$${REDIS_URL:-...}`），不要写进 unit。
 
 ---
 
 ## 四、systemd 服务
 
-`deploy/` 目录是 unit 的唯一事实源（`deploy.sh` 只负责安装）：
+`deploy/` 目录是 unit 的唯一事实源（`deploy.sh` 只负责安装并把默认路径替换成实际
+`PROJECT_DIR` / `REVIEWAGENT_DATA_DIR`）：
 
-| Unit | 用途 |
-|---|---|
-| `reviewagent-webhook.service` | FastAPI webhook（uvicorn :3000，含 `/readyz`） |
-| `reviewagent-worker.service` | RQ review 队列 worker |
-| `reviewagent-weekly-worker.service` | RQ review-weekly 队列 worker（周报专用） |
-| `reviewagent-weekly-enqueue.service` | 周报入队 oneshot |
-| `reviewagent-weekly.timer` | 每周一 10:30 触发周报（与 `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 默认一致） |
+| Unit | 用途 | 开机自启 |
+|---|---|---|
+| `reviewagent-webhook.service` | FastAPI webhook（uvicorn :3000，含 `/readyz`） | `multi-user.target` |
+| `reviewagent-worker@.service` | RQ 主队列 worker 模板，实例 `@1..RQ_WORKER_COUNT` | `multi-user.target` |
+| `reviewagent-weekly-worker.service` | RQ 周报队列 worker（`<主队列>-weekly`） | `multi-user.target` |
+| `reviewagent-weekly-enqueue.service` | 周报入队 oneshot（由 timer 触发） | — |
+| `reviewagent-weekly.timer` | 每周一 10:30 触发周报（与 `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 默认一致） | `timers.target` |
+| `reviewagent-reconciler.service` | 扫描 open MR 同步 ✓ 状态 + 清扫孤儿 running | — |
+| `reviewagent-reconciler.timer` | 开机 2min 后开始，每 60s 触发一次 reconciler | `timers.target` |
 
-所有 long-running unit 都带三行启动护栏：
+所有 service 都带启动护栏：
 
 ```ini
-Environment=REVIEW_PROFILE=ssd-python-autotest
 Environment=REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
+EnvironmentFile=/home/workflow/ReviewAgent/config/instance.env
 ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check
 ```
 
@@ -118,16 +173,31 @@ ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config c
 服务直接进入 `failed`，不会带着坏配置接流量；错误只有一行，落在
 `journalctl -u <unit>`。
 
+worker 的队列与 Redis 在 `ExecStart` 里从 `EnvironmentFile` 展开，避免 unit 与实例配置漂移：
+
+```ini
+ExecStart=/bin/sh -c 'exec .../rq worker "$${RQ_QUEUE_NAME:-review}" --url "$${REDIS_URL:-redis://127.0.0.1:6379/0}"'
+```
+
+`TimeoutStopSec=1300`（≥ 默认 `RQ_WORKER_TIMEOUT=1200`）保证 `systemctl restart` 时
+RQ 能把手上的 job 跑完，而不是被 SIGKILL 留下永远 `running` 的记录。
+
+手工安装（一键部署已包含）：
+
 ```bash
-# 部署 service 文件到 /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now reviewagent-worker
-systemctl enable --now reviewagent-webhook
-systemctl enable --now reviewagent-weekly-worker
-systemctl enable --now reviewagent-weekly.timer
+cd /home/workflow/ReviewAgent
+for unit in deploy/reviewagent-*.service deploy/reviewagent-*.timer; do
+    sudo cp "$unit" /etc/systemd/system/
+done
+sudo systemctl daemon-reload
+sudo systemctl enable --now reviewagent-webhook reviewagent-weekly-worker \
+    reviewagent-weekly.timer reviewagent-reconciler.timer
+for i in 1 2 3; do sudo systemctl enable --now "reviewagent-worker@${i}"; done
 ```
 
 > 注意启动顺序：**先 worker，后 API**（原因见「六、升级与回滚顺序」）。
+> 旧的单 worker `reviewagent-worker.service` 已移除；升级时 `deploy.sh` 会先
+> `disable --now` 它并删除文件，避免两个进程抢同一队列。
 
 ---
 
@@ -143,11 +213,11 @@ systemctl enable --now reviewagent-weekly.timer
 
 ### 升级：先新 worker、后新 API
 
-1. `git`/`rsync` 同步代码 → `pip install -e ".[dev]"` → `systemctl daemon-reload`
-2. `systemctl restart reviewagent-worker reviewagent-weekly-worker`
+1. `git`/`rsync` 同步代码 → `sudo bash deploy.sh`（内部完成 venv、unit 安装、`daemon-reload`、enable）
+2. `sudo systemctl restart 'reviewagent-worker@*' reviewagent-weekly-worker`
 3. 确认 worker 日志出现 `bootstrap.ready kind=worker ... config_fingerprint=...`
-4. `systemctl restart reviewagent-webhook`
-5. 按「九、验证清单」检查
+4. `sudo systemctl restart reviewagent-webhook`
+5. `sudo bash deploy/verify.sh`（按「九、验证清单」）
 
 **为什么不能反着来**：新 API 入队的 job manifest 带新字段（如新增 kwargs），旧
 worker 的 job 函数签名不认识，会以 `unexpected keyword argument` 失败。先上新
@@ -163,8 +233,8 @@ worker 时，旧 API 产生的 job 对新 worker 仍然兼容。
 
 ```bash
 # 1. 停 worker（先），再停 API；确认没有 running run
-systemctl stop reviewagent-worker reviewagent-weekly-worker
-systemctl stop reviewagent-webhook
+sudo systemctl stop 'reviewagent-worker@*' reviewagent-weekly-worker
+sudo systemctl stop reviewagent-webhook
 sqlite3 /var/lib/reviewagent/telemetry.db \
   "SELECT COUNT(*) FROM review_runs WHERE status='running';"   # 期望 0
 
@@ -173,16 +243,16 @@ sudo install -d -o workflow -g workflow -m 700 /var/lib/reviewagent-v2
 
 # 3. 改 config/instance.env（REVIEW_PROFILE / REVIEWAGENT_DATA_DIR）
 #    数据目录若固定在 unit 的 Environment=，则同步改 unit；两处保持一致
-sudo systemctl edit --full reviewagent-webhook reviewagent-worker reviewagent-weekly-worker
+sudo systemctl edit --full reviewagent-webhook reviewagent-weekly-worker
 
 # 4. 启动前静态校验（会写新 data_dir 的 instance.json）
 sudo -u workflow /home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check --profile <new-profile>
 sudo -u workflow /home/workflow/ReviewAgent/.venv/bin/python -m reviewagent rules check --profile <new-profile>
 
 # 5. 起 worker → 起 API
-systemctl daemon-reload
-systemctl start reviewagent-worker reviewagent-weekly-worker
-systemctl start reviewagent-webhook
+sudo systemctl daemon-reload
+sudo systemctl start 'reviewagent-worker@*' reviewagent-weekly-worker
+sudo systemctl start reviewagent-webhook
 ```
 
 旧 data_dir 保持只读保留一段时间（回滚与对账用），不要删。
@@ -198,7 +268,8 @@ systemctl start reviewagent-webhook
 
 ```bash
 journalctl -u reviewagent-webhook -f
-journalctl -u reviewagent-worker -f
+journalctl -u 'reviewagent-worker@*' -f
+journalctl -u reviewagent-reconciler -f
 ```
 
 ---
@@ -214,14 +285,19 @@ journalctl -u reviewagent-worker -f
 ## 九、验证清单
 
 ```bash
+# 一条命令覆盖下面全部检查项（含开机自启状态与指纹一致性）
+sudo bash deploy/verify.sh
+
 # 1. 配置 / 规则静态校验（与 ExecStartPre 同一入口）
 cd /home/workflow/ReviewAgent
 .venv/bin/python -m reviewagent config check --profile ssd-python-autotest   # 期望首行 ok
 .venv/bin/python -m reviewagent rules check --profile ssd-python-autotest    # 期望列表 + 两个指纹
 
-# 2. 服务状态（每个 unit 必须 active (running)）
-systemctl status reviewagent-webhook reviewagent-worker reviewagent-weekly-worker --no-pager
-systemctl list-timers reviewagent-weekly.timer --no-pager
+# 2. 服务状态（每个 unit 必须 active，且 is-enabled=enabled）
+systemctl is-enabled reviewagent-webhook 'reviewagent-worker@*' \
+    reviewagent-weekly-worker reviewagent-weekly.timer reviewagent-reconciler.timer
+systemctl status reviewagent-webhook 'reviewagent-worker@*' reviewagent-weekly-worker --no-pager
+systemctl list-timers 'reviewagent-*.timer' --no-pager
 
 # 3. 健康 / 就绪
 curl -s http://127.0.0.1:3000/health
@@ -230,11 +306,11 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/readyz   # 期望
 
 # 4. 启动日志里的指纹（API 与 worker 必须一致）
 journalctl -u reviewagent-webhook -n 200 | grep -E 'config.resolved|bootstrap.ready'
-journalctl -u reviewagent-worker  -n 200 | grep -E 'config.resolved|bootstrap.ready'
+journalctl -u 'reviewagent-worker@*' -n 200 | grep -E 'config.resolved|bootstrap.ready'
 # profile_fingerprint / config_fingerprint 两边不同 → 场景或配置漂移，禁止放流量
 
-# 5. Redis / SQLite
-python -c 'import redis; print(redis.from_url("redis://127.0.0.1:6379/0").ping())'
+# 5. Redis / SQLite（端口与 REDIS_URL 保持一致）
+python -c 'import redis; print(redis.from_url("redis://127.0.0.1:6380/0").ping())'
 ls -la /var/lib/reviewagent/telemetry.db
 curl -s http://127.0.0.1:3000/api/v1/telemetry/health
 ```

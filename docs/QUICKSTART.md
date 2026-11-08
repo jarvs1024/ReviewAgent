@@ -38,7 +38,7 @@ set -a; source config/instance.env; set +a
 
 # 6. 起 webhook + worker
 .venv/bin/uvicorn reviewagent.main:app --host 0.0.0.0 --port 3000
-.venv/bin/rq worker review --url redis://127.0.0.1:6379/0
+.venv/bin/rq worker "${RQ_QUEUE_NAME:-review}" --url "${REDIS_URL:-redis://127.0.0.1:6380/0}"
 ```
 
 > macOS 本地跑 worker 若遇到 RQ fork crash：`RQ_WORKER_CLASS=reviewagent.workers.rq_worker.ReviewAgentSpawnWorker`
@@ -49,17 +49,24 @@ set -a; source config/instance.env; set +a
 ## 二、服务器运维
 
 ```bash
+# 一键部署 / 升级（幂等；含开机自启与部署后验证）
+sudo bash deploy.sh
+sudo bash deploy.sh --check     # 只做前置检查
+sudo bash deploy/verify.sh      # 单独复检
+
 # 生效配置（--sources 标注 env|config|profile|preset|default；secret 一律 ***）
 .venv/bin/python -m reviewagent config show --diff-default --sources
 
-# 服务状态
-systemctl status reviewagent-webhook reviewagent-worker reviewagent-weekly-worker --no-pager
+# 服务状态（worker 是模板实例，按 RQ_WORKER_COUNT 起 @1..N）
+systemctl status reviewagent-webhook 'reviewagent-worker@*' reviewagent-weekly-worker --no-pager
+systemctl is-enabled reviewagent-webhook 'reviewagent-worker@*' reviewagent-weekly.timer
 curl -s http://127.0.0.1:3000/health
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/readyz   # 200 = 全就绪
 
 # 实时日志
 journalctl -u reviewagent-webhook -f
-journalctl -u reviewagent-worker -f
+journalctl -u 'reviewagent-worker@*' -f
+journalctl -u reviewagent-reconciler -f
 
 # 看 SQLite 检视历史（生产数据目录 /var/lib/reviewagent）
 .venv/bin/python -c '
@@ -70,7 +77,7 @@ for r in db.execute("SELECT id, project_id, mr_iid, command, status, duration_ms
 '
 
 # 重启（顺序：先 worker 后 API，见 docs/DEPLOYMENT.md）
-systemctl restart reviewagent-worker reviewagent-weekly-worker
+systemctl restart 'reviewagent-worker@*' reviewagent-weekly-worker
 systemctl restart reviewagent-webhook
 ```
 

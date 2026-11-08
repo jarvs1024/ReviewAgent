@@ -1,6 +1,7 @@
 [Unit]
 Description=ReviewAgent Weekly Report Worker (RQ, isolated queue)
-After=network.target redis-server.service
+After=network-online.target redis-server.service redis.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -8,9 +9,14 @@ User=workflow
 WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment=REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
+Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/workflow/ReviewAgent/config/instance.env
 ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check
-ExecStart=/home/workflow/ReviewAgent/.venv/bin/rq worker review-weekly --url redis://127.0.0.1:6379/0
+# 周报队列缺省派生自主队列（<RQ_QUEUE_NAME>-weekly），与 settings/binder.py 一致；
+# 队列名或 Redis 地址只认 EnvironmentFile，避免 unit 内硬编码与实例配置漂移。
+ExecStart=/bin/sh -c 'Q="$${RQ_WEEKLY_QUEUE_NAME:-}"; [ -n "$$Q" ] || Q="$${RQ_QUEUE_NAME:-review}-weekly"; exec /home/workflow/ReviewAgent/.venv/bin/rq worker "$$Q" --url "$${REDIS_URL:-redis://127.0.0.1:6379/0}"'
+KillSignal=SIGTERM
+TimeoutStopSec=1300
 Restart=always
 RestartSec=5
 StandardOutput=journal
