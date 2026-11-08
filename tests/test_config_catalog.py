@@ -12,8 +12,7 @@ import pytest
 from reviewagent.scenario.profile import Profile
 from reviewagent.settings import binder
 from reviewagent.settings.schema import SCHEMA, FieldSpec
-from scripts.e2e import catalog
-from scripts.e2e import quick_witnesses
+from scripts.e2e import catalog, quick_witnesses
 
 SCHEMA_NAMES = {spec.name for spec in SCHEMA}
 

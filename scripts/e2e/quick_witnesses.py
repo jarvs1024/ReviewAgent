@@ -13,6 +13,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -555,12 +556,12 @@ def check_rule_key_prefix(cfg: Any) -> str:
 
 @witness("weekly_timezone")
 def check_weekly_timezone(cfg: Any) -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
     from zoneinfo import ZoneInfo
 
     from reviewagent.reporting.runner import _resolve_tz, _week_bounds
 
-    moment = datetime(2026, 1, 4, 16, 30, tzinfo=timezone.utc)
+    moment = datetime(2026, 1, 4, 16, 30, tzinfo=UTC)
     shanghai = _week_bounds(now=moment, tz=ZoneInfo("Asia/Shanghai"))
     new_york = _week_bounds(now=moment, tz=ZoneInfo("America/New_York"))
     assert shanghai[0].date().isoformat() == "2026-01-05", shanghai
