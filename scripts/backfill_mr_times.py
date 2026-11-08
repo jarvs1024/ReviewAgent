@@ -10,24 +10,40 @@
     python3 scripts/backfill_mr_times.py [--project-id ID] [--dry-run]
 """
 import argparse
+import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import gitlab
 
-# 从 .env 读取配置 (与 reviewagent 一致)
+
+# 从实例配置读取 (config/instance.env, 旧部署回退 .env)
+def _env_file():
+    override = os.environ.get("REVIEWAGENT_ENV_FILE", "").strip()
+    if override:
+        return Path(override)
+    root = Path(__file__).resolve().parent.parent
+    for candidate in (root / "config" / "instance.env", root / ".env"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def load_env():
     env = {}
-    try:
-        with open(".env") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip()
-    except FileNotFoundError:
-        pass
+    env_path = _env_file()
+    if env_path is None:
+        return env
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        value = re.split(r"\s+#", v.strip(), maxsplit=1)[0].strip().strip('"').strip("'")
+        env[k.strip()] = value
     return env
 
 
@@ -60,7 +76,7 @@ def main():
     db_path = env.get("REVIEWAGENT_DATA_DIR", "./data") + "/telemetry.db"
 
     if not gitlab_token:
-        print("ERROR: GITLAB_PERSONAL_ACCESS_TOKEN not found in .env")
+        print("ERROR: GITLAB_PERSONAL_ACCESS_TOKEN not found in config/instance.env")
         sys.exit(1)
 
     gl = gitlab.Gitlab(gitlab_url, private_token=gitlab_token)

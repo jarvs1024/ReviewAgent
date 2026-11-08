@@ -5,7 +5,7 @@
 * `config check` 面向 systemd `ExecStartPre`：fail-fast、单行可读错误到 stderr、
   退出码 2；成功时输出 profile / name / fingerprint / data_dir。
 * `config show` 供人工核对生效配置：`key: value`（稳定按字段名排序），
-  `--sources` 追加 `# source=env|profile|preset|default`，`--diff-default`
+  `--sources` 追加 `# source=env|config|profile|preset|default`，`--diff-default`
   只显示与 schema 默认不同的字段；secret 一律 `***`，URL 内嵌密码与
   query 凭证（`access_token` 等）同样脱敏。
 * `rules check` 面向规则作者：逐条打印 `key\tseverity\ttitle`，末尾输出
@@ -73,11 +73,11 @@ def _load(args: argparse.Namespace, bind: bool = True) -> tuple[Any, Any]:
 def _effective_value(spec: FieldSpec, cfg: Any, profile: Any) -> Any:
     """取该字段实际生效的值.
 
-    profile 以 `profile`/`preset` 来源写入的字段，值在 `config.current()` 上
+    profile 以 `config`/`profile`/`preset` 来源写入的字段，值在 `config.current()` 上
     （load_profile 已经 `apply_scenario`）；其余字段（含被 env 覆盖的场景字段、
     以及全部 instance 字段）取本次 env 解析结果，避免读到 import 期的陈旧值。
     """
-    if profile.sources.get(spec.name) in ("profile", "preset"):
+    if profile.sources.get(spec.name) in ("config", "profile", "preset"):
         from reviewagent.config import current
 
         return getattr(current(), spec.name)
@@ -85,7 +85,7 @@ def _effective_value(spec: FieldSpec, cfg: Any, profile: Any) -> Any:
 
 
 def _source(spec: FieldSpec, profile: Any, explicit: frozenset[str]) -> str:
-    """`env` / `profile` / `preset` / `default` — profile.sources 已按 env 优先级判定."""
+    """`env` / `config` / `profile` / `preset` / `default` — profile.sources 已按 env 优先级判定."""
     if spec.name in profile.sources:
         return profile.sources[spec.name]
     # binder.from_env() 只记录 canonical env 名（spec.env or spec.name）。
@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     show = actions.add_parser("show", help="打印生效配置")
     show.add_argument("--profile", default=None, help="场景包名；默认取 REVIEW_PROFILE")
     show.add_argument(
-        "--sources", action="store_true", help="标注来源 env|profile|preset|default"
+        "--sources", action="store_true", help="标注来源 env|config|profile|preset|default"
     )
     show.add_argument(
         "--diff-default", action="store_true", help="只显示与 schema 默认值不同的字段"

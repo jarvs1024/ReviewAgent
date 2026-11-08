@@ -3,9 +3,10 @@
 > 更新日期：2026-11-08
 
 ReviewAgent 通过 systemd 管理全部服务，部署在 Linux 服务器上。配置分三个平面：
-**实例平面**（`.env`，本机一份）、**场景平面**（`profiles/`，由 `REVIEW_PROFILE` 选择）、
+**实例平面**（`config/instance.env`，本机一份）、**场景平面**（`profiles/` + 用户调参
+`config/profiles/<name>/review.yaml`，由 `REVIEW_PROFILE` 选择）、
 **规则平面**（规则包，见 [`docs/RULES.md`](RULES.md)）。完整生效配置见
-[`docs/CONFIG.md`](CONFIG.md)。
+[`docs/CONFIG.md`](CONFIG.md)，配置地图见 [`config/README.md`](../config/README.md)。
 
 | 维度 | 生产服务器 |
 |---|---|
@@ -43,7 +44,7 @@ python3.12 -m venv .venv
 ## 二、目录准备
 
 数据目录**不再**是代码目录下的 `./data`：systemd unit 显式设置
-`REVIEWAGENT_DATA_DIR=/var/lib/reviewagent`（可在 `.env` 覆盖，两者必须一致）。
+`REVIEWAGENT_DATA_DIR=/var/lib/reviewagent`（可在 `config/instance.env` 覆盖，两者必须一致）。
 
 ```bash
 # 数据目录（SQLite + bare repos + 周报）+ worktree 临时目录
@@ -63,20 +64,22 @@ sudo -u workflow /home/workflow/ReviewAgent/.venv/bin/python -m reviewagent conf
 ## 三、配置
 
 ```bash
-cp .env.example .env
-# 编辑 .env，填入真实值：
+cp config/examples/instance.env.example config/instance.env
+chmod 600 config/instance.env
+# 编辑 config/instance.env，填入真实值：
 #   GITLAB_URL / GITLAB_PERSONAL_ACCESS_TOKEN / GITLAB_WEBHOOK_SECRET（必填）
 #   LLM_PROVIDER=qoder-sdk + QODER_SDK_PAT
 #   REDIS_URL=redis://127.0.0.1:6379/0
 #   REVIEW_PROFILE=ssd-python-autotest
-#   REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
+#   REVIEWAGENT_DATA_DIR=/var/lib/reviewagent（也可由 systemd unit 固定）
 #   LOG_FORMAT=text（text=现网观感 / json=机读单行）
 ```
 
-`.env.example` 只含实例平面键（其余字段有 schema 默认值，由 profile 提供）。
-**systemd `EnvironmentFile=` 不剥离行尾注释**：`.env` 里注释必须单独成行。
+模板只含实例平面键，且只列需要显式设置的值（其余字段有 schema 默认值，由 profile 提供）。
+场景调参写 `config/profiles/<name>/review.yaml`，不要写进 `instance.env`。
+**systemd `EnvironmentFile=` 不剥离行尾注释**：`instance.env` 里注释必须单独成行。
 
-### RQ worker class（运维键，不在 `.env.example` / SCHEMA）
+### RQ worker class（运维键，不在模板 / SCHEMA）
 
 `RQ_WORKER_CLASS` 是 `rq` CLI 的环境变量，不参与应用配置 schema，按平台写进 systemd unit：
 
@@ -131,7 +134,7 @@ systemctl enable --now reviewagent-weekly.timer
 ## 五、GitLab webhook（GitLab 侧手动）
 
 - URL：`http://<server-ip>:3000/webhook`
-- Secret token：与 `.env` 的 `GITLAB_WEBHOOK_SECRET` 一致
+- Secret token：与 `config/instance.env` 的 `GITLAB_WEBHOOK_SECRET` 一致
 - Trigger：☑ Merge request events  ☑ Comments  ☑ Push events
 
 ---
@@ -168,9 +171,8 @@ sqlite3 /var/lib/reviewagent/telemetry.db \
 # 2. 准备新 data_dir（新的空目录，不复制旧库）
 sudo install -d -o workflow -g workflow -m 700 /var/lib/reviewagent-v2
 
-# 3. 同时改 webhook / worker / weekly 的 unit（Environment= 两行）+ .env，保持值一致
-#    REVIEW_PROFILE=<new-profile>
-#    REVIEWAGENT_DATA_DIR=/var/lib/reviewagent-v2
+# 3. 改 config/instance.env（REVIEW_PROFILE / REVIEWAGENT_DATA_DIR）
+#    数据目录若固定在 unit 的 Environment=，则同步改 unit；两处保持一致
 sudo systemctl edit --full reviewagent-webhook reviewagent-worker reviewagent-weekly-worker
 
 # 4. 启动前静态校验（会写新 data_dir 的 instance.json）
@@ -204,7 +206,7 @@ journalctl -u reviewagent-worker -f
 ## 八、备份 / 恢复
 
 见 [`docs/BACKUP_RESTORE.md`](BACKUP_RESTORE.md)（`VACUUM INTO` 在线备份、drain 步骤、
-恢复校验）。要点：`.env` 与 `/var/lib/reviewagent/` 都要备份；`/tmp/reviewagent-worktrees/`
+恢复校验）。要点：`config/instance.env` 与 `/var/lib/reviewagent/` 都要备份；`/tmp/reviewagent-worktrees/`
 与 systemd unit 可重建，不需备份。
 
 ---
@@ -245,7 +247,7 @@ curl -s http://127.0.0.1:3000/api/v1/telemetry/health
 2. **worker "FileNotFoundError: git"**：systemd unit 的 PATH 须含 `/usr/bin`。
 3. **上传文件 null 字节污染**：ssh_ops.py upload 的 staging 可能预分配块导致小文件被 null
    填充，上传后用 `python3 -m compileall -q reviewagent` 验证。
-4. **`.env` 行尾注释**：systemd `EnvironmentFile` 不剥离行尾 `#`，注释必须单独成行，
+4. **`config/instance.env` 行尾注释**：systemd `EnvironmentFile` 不剥离行尾 `#`，注释必须单独成行，
    否则值里会带上注释文本（例如 `LOG_FORMAT=text   # ...` 变成非法值，`config check` 报错）。
 5. **数据目录写到了代码目录**：旧部署把数据放 `ReviewAgent/data/`；升级后统一
    `/var/lib/reviewagent`，迁移前先按 BACKUP_RESTORE 备份再拷贝，不要两边同时写。

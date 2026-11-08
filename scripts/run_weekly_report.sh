@@ -4,22 +4,18 @@
 #   WEEKLY_PUSH=true  启用真实推送
 set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR/.."
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_DIR}"
 
-# 注入 env (如果存在 .env)
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
+# shellcheck source=scripts/_env.sh
+source "${PROJECT_DIR}/scripts/_env.sh"
 
 PUSH_FLAG=""
 if [ "${WEEKLY_PUSH:-false}" = "true" ]; then
   PUSH_FLAG="--push"
 fi
 
-# 队列模式: 只入 RQ 队列, 由 worker 异步执行 (含 opencode LLM 调用)
+# 队列模式: 只入 RQ 队列, 由 worker 异步执行 (含 LLM 调用)
 ENQUEUE_FLAG=""
 if [ "${WEEKLY_ENQUEUE:-false}" = "true" ]; then
   ENQUEUE_FLAG="--enqueue"

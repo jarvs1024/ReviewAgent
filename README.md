@@ -175,15 +175,16 @@ JSON 解析补丁（`_strip_line_number_prefix` / `_extract_inner_json` / `_stri
 
 ### 切换步骤
 
-1. **装包**：`pip install qoder-agent-sdk>=1.0.0`（已加 `pyproject.toml`）
+1. **装包**：`pip install qoder-agent-sdk>=1.0.0`（已加 `pyproject.toml`）；
+   国内站点改用 CN 品牌包 `pip install -e ".[qoder-cn]"`（`QODER_SDK_EDITION=cn`）
 2. **改 env**（`LLM_PROVIDER=qoder-sdk` + `QODER_SDK_PAT=...`）:
    ```bash
    # 必填 (PAT 替代 qodercli login 状态)
    QODER_SDK_PAT=pt-44qo...
    LLM_PROVIDER=qoder-sdk
    # 可选 — 留空走默认值
-   QODER_SDK_CLI_PATH=                 # 空 → PATH 找 qodercli
-   QODER_SDK_MODEL=                    # 空 → QODERCLI_MODEL (默认 Lite)
+   QODER_SDK_CLI_PATH=                 # 空 → PATH 找 qodercli（cn 站点找 qoderclicn）
+   QODER_SDK_MODEL=                    # 空 → QODERCLI_MODEL (默认 Lite；模型名按站点取值)
    QODER_SDK_FALLBACK_MODEL=           # 主模型失败时切换
    QODER_SDK_TIMEOUT=600               # 单次 query 超时 (秒)
    QODER_SDK_MAX_TURNS=0               # 0=不传
@@ -261,12 +262,13 @@ LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
 ## 配置
 
 配置分三个平面（**唯一默认值来源**是 [`reviewagent/settings/schema.py`](reviewagent/settings/schema.py)，
-env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) 里解析）：
+env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) 里解析）。
+用户改配置只需要看 [`config/`](config/README.md)：
 
 | 平面 | 载体 | 说明 |
 |---|---|---|
-| 实例平面 | `.env`（模板 `.env.example`，仅约 16 项） | 本机部署参数（GitLab / LLM / Redis / data_dir / profile / 日志 / 周报投递）。**只有 GITLAB_* 三项必填** |
-| 场景平面 | `profiles/<name>/`（`REVIEW_PROFILE` 选择） | prompts / 限制 / improve 权重 / 规则引用 / 周报标题；切换场景 = 新 data_dir + 同时重启 API 与 worker |
+| 实例平面 | `config/instance.env`（模板 `config/examples/instance.env.example`） | 本机部署参数（GitLab / LLM / Redis / data_dir / profile / 日志 / 周报投递），只写非默认值。**只有 GITLAB_* 三项必填** |
+| 场景平面 | `profiles/<name>/`（`REVIEW_PROFILE` 选择）+ `config/profiles/<name>/review.yaml`（用户调参） | prompts / 规则引用由场景包提供；检视范围 / 打分 / 限额 / 上下文在 review.yaml 覆盖；切换场景 = 改 `REVIEW_PROFILE` + 新 data_dir + 同时重启 API 与 worker |
 | 规则平面 | 规则包 `.md`（profile 的 `rules:`） | 键命名空间、verbatim/structured 渲染、`reviewagent rules check` 校验 |
 
 启动前校验与人工核对：
@@ -297,6 +299,10 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 | 周报-钉钉 | `REVIEWAGENT_WEEKLY_DASHBOARD_URL` `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | 看板地址（渲染到「本周检视概况」末尾，空=不显示）；webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为 schema 别名）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
 | 周报-标题 | `REVIEWAGENT_WEEKLY_REPORT_TITLE` `REVIEWAGENT_WEEKLY_REPORT_EMOJI` | 标题（空 = 用 `profile.reporting.weekly_title`，内置场景为 `SSD自动化代码检视周报`）/ emoji（默认 📊） |
 
+> 场景平面字段（限制 / 仓库规则 / improve / 检视过滤）优先在
+> `config/profiles/<name>/review.yaml` 里调整，环境变量只作临时调试；
+> 实例平面字段放 `config/instance.env`。完整说明见 [`config/README.md`](config/README.md)。
+
 ---
 
 ## 当前状态与路线图
@@ -324,7 +330,7 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 
 ## 安全与维护待办
 
-1. **历史密钥轮换**：启动脚本已统一从 `.env` 读取凭据；Git 历史中出现过的旧 secret 仍需保持废弃状态。
+1. **历史密钥轮换**：启动脚本已统一从 `config/instance.env` 读取凭据；Git 历史中出现过的旧 secret 仍需保持废弃状态。
 2. **监控告警**：webhook 5xx / 服务下线告警。
 3. **多项目扩展**（见路线图）。
 

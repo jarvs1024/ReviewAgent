@@ -7,13 +7,19 @@
 
 ### Added
 
+- **`config/` 用户配置目录**：用户改配置只需看 `config/`。`config/instance.env`
+  （实例平面，含密钥、不入库）承载 GitLab / LLM / Redis / 周报投递；
+  `config/profiles/<name>/review.yaml`（场景平面，可入库）覆盖检视范围 / 打分 /
+  限额 / 上下文；模板见 `config/examples/instance.env.example`，配置地图见
+  `config/README.md`。只写非默认值，注释必须单独成行（systemd 不剥离行尾 `#`）。
 - **场景包（profile packs）**：`profiles/` 下的 profile 包（`profile.yaml` + prompts +
   规则 + 动态规则）在启动时装配，由 `REVIEW_PROFILE` 选择；新增场景只需加数据，
   不改引擎代码。首期内置 `ssd-python-autotest`。
 - **单一配置 schema 与三平面**：`reviewagent/settings/schema.py` 是默认值的唯一来源，
-  `binder` 是唯一 env 解析入口。实例平面（`.env`）/ 场景平面（profile）/
-  规则平面（规则包）分离；`reviewagent config check` / `config show` 提供启动前校验与
-  生效值核对。周报的 16 个 env 并入同一 schema（短名 `DINGTALK_WEBHOOK` 保留为别名）。
+  `binder` 是唯一 env 解析入口。实例平面（`config/instance.env`）/ 场景平面（profile
+  + `review.yaml`）/ 规则平面（规则包）分离；`reviewagent config check` / `config show`
+  提供启动前校验与生效值核对（来源新增 `config`）。周报的 16 个 env 并入同一 schema
+  （短名 `DINGTALK_WEBHOOK` 保留为别名）。
 - **静态 / 动态规则拆分**：静态规则包支持 `verbatim` 与 `structured` 两种渲染、
   键命名空间校验、共享包语言声明；动态规则（`DYN-*`）按 provider 加载并 fail-fast 校验。
   `reviewagent rules check` 输出规则索引与 `ruleset_fingerprint` / `render_checksum`。
@@ -25,7 +31,8 @@
 - **运维文档与演练**：`docs/CONFIG.md`（生成）、`docs/RULES.md`（最小规则包模板，
   示例由 CI 实际解析）、`docs/BACKUP_RESTORE.md`（`VACUUM INTO` 备份 + drain + 恢复校验）；
   `tests/runtime/test_ops_drill.py` 覆盖备份恢复往返与孤儿 run 清扫。
-- `.env.example` 收敛为实例平面（约 16 项），其余字段指向 `docs/CONFIG.md`。
+- 实例配置模板迁到 `config/examples/instance.env.example`（原 `.env.example` 移除），
+  其余字段指向 `docs/CONFIG.md`。
 
 ### Changed
 

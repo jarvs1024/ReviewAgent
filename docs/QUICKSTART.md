@@ -3,9 +3,11 @@
 > 适用于：本地开发 / 服务器运维
 > 更新日期：2026-11-08
 
-配置分三个平面：实例平面（`.env`，模板 `.env.example` 只含约 16 项）、场景平面
-（`profiles/`，由 `REVIEW_PROFILE` 选择）、规则平面（规则包，见 `docs/RULES.md`）。
-完整字段与来源见 `docs/CONFIG.md`。
+配置分三个平面：实例平面（`config/instance.env`，模板
+`config/examples/instance.env.example`）、场景平面（`profiles/` + 用户调参
+`config/profiles/<name>/review.yaml`，由 `REVIEW_PROFILE` 选择）、规则平面
+（规则包，见 `docs/RULES.md`）。完整字段与来源见 `docs/CONFIG.md`，
+配置地图见 `config/README.md`。
 
 ---
 
@@ -18,15 +20,17 @@ python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 
 # 2. 配置
-cp .env.example .env
-# 编辑 .env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET（必填）
-# REVIEW_PROFILE 默认 ssd-python-autotest
+cp config/examples/instance.env.example config/instance.env
+chmod 600 config/instance.env
+# 编辑 config/instance.env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET（必填）
+# REVIEW_PROFILE 默认 ssd-python-autotest；场景调参见 config/profiles/<name>/review.yaml
 
-# 3. 载入 .env 到当前 shell（config check 读进程环境）
-set -a; source .env; set +a
+# 3. 载入配置到当前 shell（config check 读进程环境）
+set -a; source config/instance.env; set +a
 
-# 4. 起 Redis（Docker 或本地）
-# docker run -d --name redis -p 6379:6379 redis:7
+# 4. 起 Redis（本地进程；默认 127.0.0.1:6380，避免与其它实例共用）
+# brew install redis
+# redis-server --port 6380 --bind 127.0.0.1 --dir data/redis --appendonly yes
 
 # 5. 启动前静态校验（缺必填 / profile 非法 / 规则装配失败都在这里 fail-fast）
 .venv/bin/python -m reviewagent config check
@@ -45,7 +49,7 @@ set -a; source .env; set +a
 ## 二、服务器运维
 
 ```bash
-# 生效配置（--sources 标注 env|profile|preset|default；secret 一律 ***）
+# 生效配置（--sources 标注 env|config|profile|preset|default；secret 一律 ***）
 .venv/bin/python -m reviewagent config show --diff-default --sources
 
 # 服务状态

@@ -32,20 +32,25 @@ def _sample_data() -> dict:
     }
 
 
+def _metric_rows(out: str) -> list[str]:
+    """指标表的 5 行数据（725ae40 起行首不再带 emoji，仅表头保留）."""
+    return [
+        line for line in out.splitlines()
+        if line.startswith("| ") and not line.startswith("| 📋")
+    ]
+
+
 def test_render_telemetry_uses_three_column_metric_table():
     out = _render_telemetry(_sample_data())
     # 表头 3 列 (|:-:|:-:|:-:| 整串作为单一表分隔)
     assert "|:-:|:-:|:-:|" in out, "header separator should define 3 center-aligned columns"
-    # 5 行指标 (每行 3 cell)
     # 表头 3 列含 emoji (钉钉桌面端 macOS 能正常渲染)
     header = next(l for l in out.splitlines() if l.startswith("|"))
     assert header == "| 📋 指标 | 📈 当前数值 | 📉 较上周 |", header
-    # 每行 emoji 前缀锚定维度
-    rows = [l for l in out.splitlines() if l.startswith("| 📥") or l.startswith("| 📂")
-            or l.startswith("| 💡") or l.startswith("| 📊") or l.startswith("| ✅")]
+    rows = _metric_rows(out)
     assert len(rows) == 5, f"expected 5 metric rows, got {len(rows)}: {rows}"
     # 累计采纳率行 pp 后缀
-    pp_row = [r for r in rows if r.startswith("| ✅")][0]
+    pp_row = [r for r in rows if r.startswith("| 累计采纳率")][0]
     assert "pp" in pp_row, "adoption_rate_pct delta should carry 'pp' suffix"
     # 有 delta 时显示箭头
     assert any("↑" in l for l in out.splitlines()), "have deltas → should show ↑/↓ arrow"
@@ -56,8 +61,7 @@ def test_render_telemetry_shows_single_dash_when_no_deltas():
     data = _sample_data()
     data["deltas"] = {}   # 清空 deltas
     out = _render_telemetry(data)
-    rows = [l for l in out.splitlines() if l.startswith("| 📥") or l.startswith("| 📂")
-            or l.startswith("| 💡") or l.startswith("| 📊") or l.startswith("| ✅")]
+    rows = _metric_rows(out)
     assert len(rows) == 5
     # 5 行 trend 列应该都是 "—"
     dash_rows = [l for l in rows if l.endswith("— |") or "| — |" in l]
@@ -90,7 +94,7 @@ def test_render_telemetry_appends_dashboard_link_when_url_given():
     # 链接行必须出现在指标表最后一行 (✅ 行) 之后
     last_metric_idx = max(
         i for i, l in enumerate(lines)
-        if l.startswith(("| 📥", "| 📂", "| 💡", "| 📊", "| ✅"))
+        if l.startswith("| ") and not l.startswith("| 📋")
     )
     link_idx = lines.index(link_line)
     assert link_idx > last_metric_idx, (

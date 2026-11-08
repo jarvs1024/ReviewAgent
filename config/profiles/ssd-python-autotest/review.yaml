@@ -1,0 +1,46 @@
+# 场景调参：ssd-python-autotest（叠加在 profiles/ssd-python-autotest 之上）
+#
+# 只允许四组：file_filter / scoring / limits / context。
+# 只写"与场景包默认不同"的值；不写的键沿用 profile.yaml / preset。
+# 本文件会入库，禁止写入 token / webhook 等密钥（密钥只放 config/instance.env）。
+#
+# 改完执行：.venv/bin/reviewagent config check
+#           .venv/bin/reviewagent config show --sources
+#           bash scripts/restart_local.sh
+
+schema_version: 1
+
+file_filter:
+  # 不进入检视的路径前缀/片段。自动化测试项目只排除 pytest 的 conftest，
+  # 测试代码本身按业务代码检视（配合 scoring.review_mode=test）
+  skip_paths:
+    - conftest.py
+  # 关键路径加分：命中任一片段的文件优先进入检视、优先保额
+  priority_paths:
+    - /services/
+    - /api/
+    - /core/
+    - /main.
+    - /models/
+    - /handlers/
+    - /routers/
+    - /pages/
+    - /locators/
+    - /fixtures/
+    - /conftest.py
+
+scoring:
+  # auto=按测试文件占比自动切换；test=测试代码即业务代码；business=忽略测试特征
+  review_mode: test
+  # 低于该严重度的建议不发布（low=不过滤；medium=丢掉 low；high=只留 high）
+  min_severity: medium
+  # 抽样路径与上限：测试资产量大，只抽检一部分；0=不抽样
+  test_sample_paths:
+    - testcase/
+  test_sample_max: 50
+
+limits:
+  # 单个 MR 最多发布的建议数
+  max_suggestions: 10
+  # 最多多少个文件送"完整源码"上下文；其余用 diff ± 上下文
+  full_files: 5

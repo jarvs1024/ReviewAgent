@@ -1,11 +1,12 @@
-"""Sync GitLab project webhook secret to match .env's GITLAB_WEBHOOK_SECRET.
+"""Sync GitLab project webhook secret to match the instance config's GITLAB_WEBHOOK_SECRET.
 
 Why this exists:
     GitLab stores a per-hook token. ReviewAgent verifies `X-Gitlab-Token`
-    against `GITLAB_WEBHOOK_SECRET` in .env. If they ever drift (e.g. .env
-    rotated, or hook was created before secret was finalized), all webhook
-    deliveries return 401 and the bot stops reacting to /adopt, /dismiss,
-    MR events, etc. without any obvious error in the server log.
+    against `GITLAB_WEBHOOK_SECRET` in config/instance.env. If they ever
+    drift (e.g. secret rotated, or hook was created before secret was
+    finalized), all webhook deliveries return 401 and the bot stops
+    reacting to /adopt, /dismiss, MR events, etc. without any obvious
+    error in the server log.
 
 This script re-PUTs every hook in the target project with the current
 secret so they line up.
@@ -15,7 +16,7 @@ Usage:
     python scripts/sync_webhook.py --project-id 34 --dry-run
     python scripts/sync_webhook.py --project-id 34 --only-url host.docker.internal:3000/webhook
 
-Env (loaded from .env if present):
+Env (loaded from config/instance.env, falling back to .env if present):
     GITLAB_URL
     GITLAB_PERSONAL_ACCESS_TOKEN
     GITLAB_WEBHOOK_SECRET
@@ -24,16 +25,28 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
 import requests
 
 
+def _env_file() -> Path | None:
+    override = os.environ.get("REVIEWAGENT_ENV_FILE", "").strip()
+    if override:
+        return Path(override)
+    root = Path(__file__).resolve().parent.parent
+    for candidate in (root / "config" / "instance.env", root / ".env"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _load_env() -> None:
-    """Best-effort load of .env into os.environ (no external deps)."""
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
+    """Best-effort load of the instance config into os.environ (no external deps)."""
+    env_path = _env_file()
+    if env_path is None or not env_path.exists():
         return
     for line in env_path.read_text().splitlines():
         line = line.strip()
@@ -41,7 +54,7 @@ def _load_env() -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = re.split(r"\s+#", value, maxsplit=1)[0].strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
 

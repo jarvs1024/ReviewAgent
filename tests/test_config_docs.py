@@ -1,7 +1,8 @@
-"""T20: `.env.example` 与 `docs/CONFIG.md` 的文档契约.
+"""T20: 实例配置模板与 `docs/CONFIG.md` 的文档契约.
 
-* `.env.example` 收敛为「实例平面」：每个键都必须是 `SCHEMA` 的 env（或别名），
-  且对应字段 scope 必须是 `instance`；必填项与关键实例键存在，值只能是占位符。
+* `config/examples/instance.env.example` 只含「实例平面」：每个键都必须是 `SCHEMA`
+  的 env（或别名），且对应字段 scope 必须是 `instance`；必填项与关键实例键存在，
+  值只能是占位符。
 * `docs/CONFIG.md` 由 `reviewagent config show --diff-default --sources` 生成，
   必须解释 `profile_fingerprint` 与 `config_fingerprint`，且不泄露任何凭证。
 """
@@ -14,7 +15,7 @@ from reviewagent.cli import main
 from reviewagent.settings.schema import SCHEMA, SCHEMA_BY_NAME
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ENV_EXAMPLE = REPO_ROOT / ".env.example"
+ENV_EXAMPLE = REPO_ROOT / "config" / "examples" / "instance.env.example"
 CONFIG_DOC = REPO_ROOT / "docs" / "CONFIG.md"
 
 _KEY_RE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
@@ -38,13 +39,13 @@ def _env_example_assignments() -> dict[str, str]:
 
 def test_env_example_is_instance_plane_only():
     assignments = _env_example_assignments()
-    assert assignments, ".env.example has no assignments"
+    assert assignments, "instance.env.example has no assignments"
     unknown = sorted(key for key in assignments if key not in _ENV_INDEX)
     assert not unknown, f"keys outside SCHEMA env set: {unknown}"
     non_instance = sorted(
         key for key in assignments if _ENV_INDEX[key].scope != "instance"
     )
-    assert not non_instance, f"scenario-plane keys must not live in .env.example: {non_instance}"
+    assert not non_instance, f"scenario-plane keys must not live in instance.env.example: {non_instance}"
 
 
 def test_env_example_keeps_required_and_instance_keys():
@@ -75,7 +76,7 @@ def test_env_example_does_not_override_data_dir():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert not any(
         line.strip().startswith("REVIEWAGENT_DATA_DIR=") for line in text.splitlines()
-    ), ".env.example must keep REVIEWAGENT_DATA_DIR commented out"
+    ), "instance.env.example must keep REVIEWAGENT_DATA_DIR commented out"
     assert "# REVIEWAGENT_DATA_DIR=./data" in text
 
 
@@ -120,6 +121,8 @@ def test_config_doc_output_section_is_generated_from_cli(tmp_path, monkeypatch, 
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "stub-secret")
     monkeypatch.setenv("REVIEW_PROFILE", "ssd-python-autotest")
     monkeypatch.setenv("REVIEWAGENT_DATA_DIR", str(tmp_path / "data"))
+    # conftest 默认隔离仓库 config/；本测试校验的正是仓库部署覆盖层。
+    monkeypatch.setenv("REVIEW_CONFIG_DIR", str(REPO_ROOT / "config"))
 
     assert main(["config", "show", "--diff-default", "--sources"]) == 0
     actual = set(capsys.readouterr().out.splitlines())

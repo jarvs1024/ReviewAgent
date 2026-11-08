@@ -324,11 +324,11 @@ sudo npm install -g @qoder-ai/qodercli
 # 3. 登录
 qodercli login
 
-# 4. 更新 .env
-echo 'LLM_PROVIDER=qodercli' >> .env
-echo 'QODERCLI_NODE_PATH=/usr/bin/node' >> .env
-echo 'QODERCLI_JS_PATH=/usr/lib/node_modules/@qoder-ai/qodercli/bundle/qodercli.js' >> .env
-echo 'QODERCLI_MODEL=DeepSeek-V4-Flash' >> .env
+# 4. 更新实例配置 config/instance.env
+echo 'LLM_PROVIDER=qodercli' >> config/instance.env
+echo 'QODERCLI_NODE_PATH=/usr/bin/node' >> config/instance.env
+echo 'QODERCLI_JS_PATH=/usr/lib/node_modules/@qoder-ai/qodercli/bundle/qodercli.js' >> config/instance.env
+echo 'QODERCLI_MODEL=DeepSeek-V4-Flash' >> config/instance.env
 
 # 5. 重启服务
 bash scripts/services_ops.sh restart
@@ -391,7 +391,7 @@ v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。�
 - `scripts/probe_qodercli_acp.py`（端到端 probe）
 - 5 个 `tests/test_qodercli_acp_*.py`
 - `Config` 字段：`qodercli_driver`、`qodercli_acp_extra_args`、`qodercli_max_concurrent_sessions`、`qodercli_queue_wait_timeout`、`qodercli_session_reuse_window`、`qodercli_session_timeout`
-- 全部 `.env` / `.env.example` 上的 `QODERCLI_DRIVER` / `QODERCLI_ACP_*` / `QODERCLI_SESSION_*` 变量
+- 全部 `config/instance.env` / 模板上的 `QODERCLI_DRIVER` / `QODERCLI_ACP_*` / `QODERCLI_SESSION_*` 变量
 
 如果上游修了 stdin hang，新接入应该另起独立模块（不要再 import 这套旧代码），并在复测前先用最小单 case 验证 `agent_message_chunk` 不会卡死。
 

@@ -79,6 +79,8 @@ SCHEMA: tuple[FieldSpec, ...] = (
     FieldSpec("log_rotation", str, "single", env="LOG_ROTATION", scope="instance", choices=("single", "none")),
     FieldSpec("review_profile", str, "", env="REVIEW_PROFILE", scope="instance"),
     FieldSpec("review_profile_root", str, profiles_root(), env="REVIEW_PROFILE_ROOT", scope="instance"),
+    # 空=与 profiles/ 同级（<profile_root>/../config），无需部署时再配一次。
+    FieldSpec("review_config_dir", str, "", env="REVIEW_CONFIG_DIR", scope="instance"),
     FieldSpec("mr_cooldown_seconds", int, 60, env="MR_COOLDOWN_SECONDS", scope="instance", minimum=0),
     FieldSpec("max_review_calls_per_mr", int, 30, env="MAX_REVIEW_CALLS_PER_MR", scope="instance", minimum=0),
     FieldSpec("max_diff_chars", int, 50000, env="MAX_DIFF_CHARS", scope="scenario", minimum=1),

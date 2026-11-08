@@ -2,8 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from rq.worker import SpawnWorker
 
+from reviewagent.workers import rq_worker as rq_worker_module
 from reviewagent.workers.rq_worker import ReviewAgentSpawnWorker
 
 
@@ -31,7 +31,7 @@ def test_spawn_worker_omits_himport_registry_during_spawn(monkeypatch):
         observed_kwargs.update(connection_kwargs)
         return "spawned"
 
-    monkeypatch.setattr(SpawnWorker, "fork_work_horse", fake_spawn)
+    monkeypatch.setattr(rq_worker_module, "_fork_work_horse_setsid", fake_spawn)
 
     assert worker.fork_work_horse(object(), queue) == "spawned"
     assert "himport_registry" not in observed_kwargs
@@ -45,7 +45,7 @@ def test_spawn_worker_restores_himport_registry_after_error(monkeypatch):
         assert "himport_registry" not in connection_kwargs
         raise RuntimeError("spawn failed")
 
-    monkeypatch.setattr(SpawnWorker, "fork_work_horse", fail_spawn)
+    monkeypatch.setattr(rq_worker_module, "_fork_work_horse_setsid", fail_spawn)
 
     with pytest.raises(RuntimeError, match="spawn failed"):
         worker.fork_work_horse(object(), queue)
@@ -61,10 +61,10 @@ def test_local_launchers_use_fork_safe_worker(script):
 
 
 @pytest.mark.parametrize("script", ["scripts/run_webhook.sh", "scripts/run_worker.sh"])
-def test_local_launchers_load_credentials_from_dotenv(script):
+def test_local_launchers_load_credentials_from_env_file(script):
     content = (ROOT / script).read_text(encoding="utf-8")
 
-    assert "source .env" in content
+    assert "scripts/_env.sh" in content
     for variable in (
         "GITLAB_PERSONAL_ACCESS_TOKEN",
         "GITLAB_WEBHOOK_SECRET",
@@ -74,11 +74,12 @@ def test_local_launchers_load_credentials_from_dotenv(script):
 
 
 def test_example_no_qodercli_acp_references():
-    """The .env.example must not point at the dead ACP driver."""
-    content = (ROOT / ".env.example").read_text(encoding="utf-8")
+    """The instance example must not point at the dead ACP driver."""
+    example = ROOT / "config" / "examples" / "instance.env.example"
+    content = example.read_text(encoding="utf-8")
     for needle in ("QODERCLI_DRIVER", "QODERCLI_ACP_EXTRA_ARGS",
                    "QODERCLI_MAX_CONCURRENT_SESSIONS", "QODERCLI_SESSION_TIMEOUT"):
-        assert needle not in content, f"{needle} still in .env.example"
+        assert needle not in content, f"{needle} still in {example}"
 
 
 def test_scripts_do_not_reference_removed_acp_module():

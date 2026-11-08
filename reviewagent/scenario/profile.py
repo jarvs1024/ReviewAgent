@@ -4,6 +4,9 @@
 
 * 一个 profile = `profiles/<name>/profile.yaml`，可 `extends` 一个
   `profiles/_presets/<name>.yaml`；preset 不得再 `extends`（只允许一级继承）；
+* 用户可改的场景值放在 `<config>/profiles/<name>/review.yaml`，叠加在
+  profile.yaml 之上（config > profile > preset > schema 默认），只允许
+  `file_filter` / `scoring` / `limits` / `context` 四组；
 * 未知字段 / 未知 preset / 多级继承 / 非法 `extends` 名称一律启动失败；
 * profile 中的场景字段通过 `config.apply_scenario()` 应用到运行时配置；
   显式 env 仍然优先（§5.4：env 只覆盖运行配置，不污染 profile 数据）；
@@ -39,6 +42,8 @@ _ALLOWED_PROFILE_KEYS = {
     "repo_context", "capabilities", "security", "file_filter", "scoring", "reporting",
     "limits", "context",
 }
+# 用户配置只开放"按场景调参"的四组；身份 / 规则 / 提示词仍由场景包作者维护。
+_ALLOWED_REVIEW_CONFIG_KEYS = {"schema_version", "file_filter", "scoring", "limits", "context"}
 
 
 @dataclass(frozen=True)
@@ -79,10 +84,10 @@ def _deep_merge(base: Any, override: Any) -> Any:
     return copy.deepcopy(override)
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
+def _read_yaml(path: Path, *, kind: str = "profile") -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError(f"profile must be a mapping: {path}")
+        raise ValueError(f"{kind} must be a mapping: {path}")
     return data
 
 
@@ -92,6 +97,14 @@ def _resolve_root(root: Path | None) -> Path:
     from reviewagent.config import current
 
     return Path(current().review_profile_root).expanduser().resolve()
+
+
+def _resolve_config_dir(profile_root: Path) -> Path:
+    """用户配置目录：与 `profiles/` 同级，`REVIEW_CONFIG_DIR` 可整体改位置."""
+    override = spec_env_override(SCHEMA_BY_NAME["review_config_dir"])
+    if override is not UNSET:
+        return Path(override).expanduser().resolve()
+    return (profile_root.parent / "config").resolve()
 
 
 def _available_profiles(root: Path) -> list[str]:
@@ -138,6 +151,7 @@ def _apply_config(
     merged: dict[str, Any],
     raw: dict[str, Any],
     sources: dict[str, str],
+    config_raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mapping = {
         ("file_filter", "exclude_extensions"): "review_exclude_extensions",
@@ -147,13 +161,19 @@ def _apply_config(
         ("scoring", "review_mode"): "improve_review_mode",
         ("scoring", "test_sample_paths"): "improve_test_sample_paths",
         ("scoring", "test_sample_max"): "improve_test_sample_max",
+        ("scoring", "min_score"): "improve_min_score",
+        ("scoring", "min_severity"): "improve_min_severity",
         ("context", "partial_context_lines"): "improve_partial_context_lines",
         ("context", "patch_context_lines"): "improve_patch_context_lines",
         ("limits", "max_suggestions"): "improve_max_suggestions",
         ("limits", "max_suggestions_per_file"): "improve_max_suggestions_per_file",
         ("limits", "min_suggestions_per_file"): "improve_min_suggestions_per_file",
         ("limits", "max_files_to_review"): "improve_max_files_to_review",
+        ("limits", "max_diff_chars"): "max_diff_chars",
+        ("limits", "opencode_max_diff_chars"): "opencode_max_diff_chars",
         ("limits", "full_files"): "improve_full_files",
+        ("limits", "full_source_max_bytes"): "improve_full_source_max_bytes",
+        ("limits", "new_file_full"): "improve_new_file_full",
         ("limits", "parallel_workers"): "improve_parallel_workers",
         ("limits", "clip_diff_lines"): "improve_clip_diff_lines",
         ("limits", "batch", "enabled"): "improve_batch_enabled",
@@ -193,7 +213,10 @@ def _apply_config(
                 sources[field_name] = "env"
                 continue
         updates[field_name] = node
-        sources[field_name] = "profile" if _has_path(raw, path) else "preset"
+        if config_raw and _has_path(config_raw, path):
+            sources[field_name] = "config"
+        else:
+            sources[field_name] = "profile" if _has_path(raw, path) else "preset"
     apply_scenario(updates)
     return updates
 
@@ -274,6 +297,33 @@ def _check_referenced_files(
             )
 
 
+def _load_review_config(
+    profile_root: Path,
+    profile_name: str,
+    merged: dict[str, Any],
+    sources: dict[str, str],
+) -> dict[str, Any]:
+    """叠加用户配置 `<config>/profiles/<name>/review.yaml`（缺失即跳过）."""
+    path = _resolve_config_dir(profile_root) / "profiles" / profile_name / "review.yaml"
+    if not path.is_file():
+        return {}
+    config_raw = _read_yaml(path, kind="review config")
+    unknown = set(config_raw) - _ALLOWED_REVIEW_CONFIG_KEYS
+    if unknown:
+        raise ValueError(f"unknown review config fields: {sorted(unknown)} ({path})")
+    if config_raw.get("schema_version") != _SUPPORTED_SCHEMA:
+        raise ValueError(
+            f"unsupported review config schema_version: "
+            f"{config_raw.get('schema_version')!r} ({path})"
+        )
+    for key, value in config_raw.items():
+        if key == "schema_version":
+            continue
+        merged[key] = _deep_merge(merged.get(key), value)
+        sources[key] = "config"
+    return config_raw
+
+
 def load_profile(
     name: str | None = None,
     *,
@@ -330,6 +380,7 @@ def load_profile(
             continue
         merged[key] = _deep_merge(merged.get(key), value)
         sources[key] = "profile"
+    config_raw = _load_review_config(profile_root, profile_dir.name, merged, sources)
     language = merged.get("language")
     if not language:
         raise ValueError(f"profile missing language: {profile_dir}")
@@ -346,7 +397,7 @@ def load_profile(
         prompts,
         allow_missing_rules=allow_missing_rules,
     )
-    _apply_config(merged, raw, sources)
+    _apply_config(merged, raw, sources, config_raw)
     referenced = list(prompts.values()) + list(merged.get("rules") or [])
     if merged.get("dynamic_rules"):
         referenced.append(merged["dynamic_rules"])

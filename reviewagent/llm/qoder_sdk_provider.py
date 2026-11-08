@@ -83,7 +83,7 @@ access_token = _sdk.access_token
 query = _sdk.query
 
 
-# 默认模型；与 .env.example QODERCLI_MODEL=Lite 保持一致，调试用 Lite。
+# 默认模型；与 config/examples/instance.env.example 的 QODERCLI_MODEL=Lite 保持一致，调试用 Lite。
 DEFAULT_MODEL = "Lite"
 
 
@@ -553,7 +553,7 @@ class QoderSDKProvider:
         if not config.qoder_sdk_pat:
             raise QoderCLIError(
                 "QODER_SDK_PAT is required when using QoderSDKProvider "
-                "(set QODER_SDK_PAT in .env)"
+                "(set QODER_SDK_PAT in config/instance.env)"
             )
         self._pat = config.qoder_sdk_pat
         self._cli_path = _resolve_cli_path(

@@ -24,11 +24,15 @@ dependencies = [
     # 场景包 profile 清单 (profiles/*/profile.yaml)
     "pyyaml>=6.0",
     # qoder-agent-sdk (LLM Provider 适配层，替代旧 qodercli subprocess)
+    # 国际站点（QODER_SDK_EDITION=intl）用这个；国内站点见 extra: qoder-cn
     "qoder-agent-sdk>=1.0.0",
     # 工具
 ]
 
 [project.optional-dependencies]
+# 国内站点（QODER_SDK_EDITION=cn）的 SDK 品牌包；PIP 安装：
+#   pip install -e ".[qoder-cn]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+qoder-cn = ["qodercn-agent-sdk>=1.0.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

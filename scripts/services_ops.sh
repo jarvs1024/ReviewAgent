@@ -19,18 +19,13 @@
 set -eo pipefail
 
 # ============================================================
-# 配置 — 从 .env 动态读取
+# 配置 — 从 config/instance.env 动态读取（旧部署回退 .env）
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 
-# 加载 .env (如果存在)
-if [[ -f "${PROJECT_DIR}/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "${PROJECT_DIR}/.env"
-    set +a
-fi
+# shellcheck source=scripts/_env.sh
+source "${PROJECT_DIR}/scripts/_env.sh"
 
 WORKER_COUNT="${RQ_WORKER_COUNT:-3}"
 
@@ -56,7 +51,7 @@ ALL_SYSTEMD=(
     "${WEEKLY_SERVICES[@]}"
 )
 
-# qodercli: 从 .env 读取, 空则自动探测
+# qodercli: 从配置读取, 空则自动探测
 QODERCLI_NODE="${QODERCLI_NODE_PATH:-$(which node 2>/dev/null || true)}"
 QODERCLI_JS="${QODERCLI_JS_PATH:-$(readlink -f "$(which qodercli 2>/dev/null)" 2>/dev/null || true)}"
 QODERCLI_MODEL="${QODERCLI_MODEL:-DeepSeek-V4-Flash}"
@@ -304,11 +299,12 @@ do_status() {
     _info "dependencies:"
     echo ""
     local redis_ok=false
-    if command -v redis-cli &>/dev/null && redis-cli ping 2>/dev/null | grep -q PONG; then
+    local redis_url="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+    if command -v redis-cli &>/dev/null && redis-cli -u "${redis_url}" ping 2>/dev/null | grep -q PONG; then
         redis_ok=true
-    elif "${PROJECT_DIR}/.venv/bin/python" -c "import redis; redis.Redis().ping()" 2>/dev/null; then
+    elif "${PROJECT_DIR}/.venv/bin/python" -c "import redis,sys; redis.Redis.from_url(sys.argv[1]).ping()" "${redis_url}" 2>/dev/null; then
         redis_ok=true
-    elif python3 -c "import redis; redis.Redis().ping()" 2>/dev/null; then
+    elif python3 -c "import redis,sys; redis.Redis.from_url(sys.argv[1]).ping()" "${redis_url}" 2>/dev/null; then
         redis_ok=true
     fi
     if $redis_ok; then
@@ -324,8 +320,9 @@ do_status() {
     echo ""
     local rq_info
     rq_info=$("${PROJECT_DIR}/.venv/bin/python" -c "
+import sys
 import redis
-r = redis.Redis()
+r = redis.Redis.from_url(sys.argv[1])
 for q in ['${RQ_QUEUE_NAME:-review-v2}', '${RQ_WEEKLY_QUEUE_NAME:-review-weekly}']:
     pending = r.llen(q)
     try:
@@ -339,7 +336,7 @@ for q in ['${RQ_QUEUE_NAME:-review-v2}', '${RQ_WEEKLY_QUEUE_NAME:-review-weekly}
     except Exception:
         failed = 0
     print(f'  {q:30s} pending={pending}  failed={failed}')
-" 2>/dev/null) || rq_info="  (unable to query RQ queues)"
+" "${REDIS_URL:-redis://127.0.0.1:6379/0}" 2>/dev/null) || rq_info="  (unable to query RQ queues)"
     echo "$rq_info"
 
     echo ""
@@ -407,7 +404,7 @@ usage() {
     echo ""
     echo "Environment:"
     echo "  PROJECT_DIR     Project root (default: script's parent dir)"
-    echo "  RQ_WORKER_COUNT Number of workers (default: 3, from .env)"
+    echo "  RQ_WORKER_COUNT Number of workers (default: 3, from config/instance.env)"
     echo ""
     echo "Examples:"
     echo "  $0                        # status (default)"

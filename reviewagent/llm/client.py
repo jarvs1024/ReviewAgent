@@ -1,7 +1,7 @@
 """LLM Provider 工厂 — 根据 config.llm_provider 返回对应 provider 实例（单例）.
 
-上层通过 reviewagent.llm.get_client() 拿当前 provider；切换 provider 只需改 .env 的
-LLM_PROVIDER=opencode|qodercli，无需改业务代码.
+上层通过 reviewagent.llm.get_client() 拿当前 provider；切换 provider 只需改
+`config/instance.env` 的 LLM_PROVIDER=opencode|qodercli|qoder-sdk，无需改业务代码.
 """
 from __future__ import annotations
 

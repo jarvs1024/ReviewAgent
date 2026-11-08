@@ -5,7 +5,7 @@
   - verify_e2e 被 pkill 而 in-flight chain 还在排队
 
 用法:
-  set -a; source .env; set +a
+  set -a; source config/instance.env; set +a
   .venv/bin/python scripts/ops/cleanup_stuck_runs.py [--dry-run] [--since-hours 1]
 
 默认标记 status='failed' + error 含 'worker terminated by SIGKILL'.
@@ -21,7 +21,7 @@ import os
 def _ensure_env() -> None:
     for k in ("GITLAB_URL", "REVIEWAGENT_DATA_DIR"):
         if not os.environ.get(k):
-            raise RuntimeError(f"missing required env var: {k}; source .env first")
+            raise RuntimeError(f"missing required env var: {k}; source config/instance.env first")
 
 
 def main() -> int:

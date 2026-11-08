@@ -33,6 +33,23 @@ def _baseline_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_key, _value)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_user_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """仓库 `config/` 是部署覆盖层；单测默认隔离，避免随部署调参漂移.
+
+    必须是 session 级：module 级 fixture 早于 function 级 fixture 实例化。
+    `tests/test_config_docs.py` 需要校验仓库真实 `config/`，用 monkeypatch 覆盖。
+    """
+    path = tmp_path_factory.mktemp("no-user-config")
+    previous = os.environ.get("REVIEW_CONFIG_DIR")
+    os.environ["REVIEW_CONFIG_DIR"] = str(path)
+    yield
+    if previous is None:
+        os.environ.pop("REVIEW_CONFIG_DIR", None)
+    else:
+        os.environ["REVIEW_CONFIG_DIR"] = previous
+
+
 @pytest.fixture(autouse=True)
 def _restore_config_snapshots() -> Iterator[None]:
     """Snapshot/restore binder's explicit-env and the global current config.
