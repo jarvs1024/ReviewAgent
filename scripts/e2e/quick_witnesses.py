@@ -596,6 +596,43 @@ def check_review_config_dir(cfg: Any) -> str:
     return "review_config_dir: Config 值覆盖默认 <root>/config，空值回退默认"
 
 
+@witness("worker_count")
+def check_worker_count(cfg: Any) -> str:
+    from reviewagent.review.runner import worker_count
+
+    groups = [["a"], ["b"], ["c"], ["d"]]
+    assert worker_count(groups, _cfg(cfg, improve_parallel_workers=2)) == 2
+    assert worker_count(groups[:1], _cfg(cfg, improve_parallel_workers=3)) == 1
+    assert worker_count(groups, _cfg(cfg, improve_parallel_workers=1)) == 1
+    return "improve_parallel_workers: 4 组×3→2, 1 组×3→1, 4 组×1→1"
+
+
+@witness("diff_overflow")
+def check_diff_overflow(cfg: Any) -> str:
+    from reviewagent.commands._common import partition_overflow
+
+    diffs = {"a.py": "x" * 80, "b.py": "y" * 80, "c.py": "z" * 80}
+    scope, overflow = partition_overflow(diffs, 100)
+    assert scope == ["a.py"] and overflow == ["b.py", "c.py"], (scope, overflow)
+    single, single_overflow = partition_overflow({"a.py": "x" * 500}, 100)
+    assert single == ["a.py"] and single_overflow == [], (single, single_overflow)
+    unlimited, none_overflow = partition_overflow(diffs, 0)
+    assert unlimited == ["a.py", "b.py", "c.py"] and none_overflow == []
+    return "max_diff_chars: 100→scope 1/overflow 2；单大文件保留；0=不限"
+
+
+@witness("opencode_clip")
+def check_opencode_clip(cfg: Any) -> str:
+    from reviewagent.opencode.client import _clip_text
+
+    clipped = _clip_text("abcdef", 3)
+    assert clipped.startswith("abc")
+    assert "原始 6 字符" in clipped
+    assert _clip_text("abc", 3) == "abc"
+    assert _clip_text("abcdef", 10) == "abcdef"
+    return "opencode_max_diff_chars: 6 字符截到 3 附原始长度标记；未超限原样"
+
+
 def run_quick(cfg: Any = None) -> list[tuple[str, str]]:
     """执行全部快速档 witness，返回 `[(check_id, evidence)]`；失败直接抛出."""
     if cfg is None:

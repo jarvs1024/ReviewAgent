@@ -38,6 +38,13 @@ class OpencodeOutputError(OpencodeError):
     """opencode 输出无法解析为 JSON."""
 
 
+def _clip_text(text: str, limit: int) -> str:
+    """截断到 limit 字符并附加原始长度标记；未超限原样返回."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n\n[... diff 截断, 原始 {len(text)} 字符 ...]"
+
+
 @dataclass
 class OpencodeResult:
     """opencode run 结果 — 包含解析后的 dict 和 token 统计."""
@@ -159,10 +166,7 @@ class OpencodeClient:
                     except OSError as e:
                         raise OpencodeError(f"read file {fp} failed: {e}") from e
                     if len(content) > current_max:
-                        content = (
-                            content[:current_max]
-                            + f"\n\n[... diff 截断, 原始 {len(content)} 字符 ...]"
-                        )
+                        content = _clip_text(content, current_max)
                     prompt_text += f"\n\n## 文件: `{fp.name}`\n```\n{content}\n```\n"
 
                 parts: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]

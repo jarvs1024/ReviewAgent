@@ -116,6 +116,21 @@ def gitlab_get(path: str) -> Any:
     return json.loads(raw)
 
 
+def gitlab_raw(project_id: int, path: str, ref: str) -> str:
+    """读取仓库文件原文（`gitlab_request` 会 JSON 解码，raw 文件必须另走一条）."""
+    import urllib.parse
+
+    encoded = urllib.parse.quote(path, safe="")
+    status, raw = _http(
+        f"{gitlab_api_base()}/projects/{project_id}/repository/files/{encoded}/raw"
+        f"?ref={urllib.parse.quote(ref, safe='')}",
+        headers={"PRIVATE-TOKEN": gitlab_token()},
+    )
+    if status != 200:
+        raise RuntimeError(f"GitLab raw {path}@{ref} -> {status}: {raw[:200]!r}")
+    return raw.decode("utf-8", errors="replace")
+
+
 def gitlab_request(method: str, path: str, *, payload: dict | None = None) -> Any:
     """GitLab 写操作（建项目/建分支/建 MR/删除）；失败抛 RuntimeError."""
     body = json.dumps(payload).encode("utf-8") if payload is not None else None

@@ -295,6 +295,30 @@ _BASE_FILES: dict[str, str] = {
         "def load(items):\n"
         "    return [utils.normalise(item) for item in items]\n"
     ),
+    "app/api/__init__.py": '"""API package."""\n',
+    "app/api/handler.py": (
+        '"""HTTP handler."""\n\n\n'
+        "def handle(payload):\n"
+        "    return payload\n"
+    ),
+    "app/core/__init__.py": '"""Core package."""\n',
+    "app/core/engine.py": (
+        '"""Engine."""\n\n\n'
+        "def run(job):\n"
+        "    return job\n"
+    ),
+    "app/models/__init__.py": '"""Models package."""\n',
+    "app/models/item.py": (
+        '"""Item model."""\n\n\n'
+        "class Item:\n"
+        "    def __init__(self, name):\n"
+        "        self.name = name\n"
+    ),
+    "app/extra.py": (
+        '"""Extra helpers."""\n\n\n'
+        "def helper(value=None):\n"
+        "    return value\n"
+    ),
     "conftest.py": (
         "import pytest\n\n\n"
         "@pytest.fixture\n"
@@ -305,6 +329,15 @@ _BASE_FILES: dict[str, str] = {
         "from app.service import load\n\n\n"
         "def test_load():\n"
         '    assert load([" a "]) == ["a"]\n'
+    ),
+    # 仓库规则上下文（repo_context_files / rules_dir 的真实拉取对象）
+    "AGENTS.md": (
+        "# E2E fixture project\n\n"
+        "E2E repo context marker: prefer explicit imports over wildcard imports.\n"
+    ),
+    ".agents/rules/team.md": (
+        "# Team rules\n\n"
+        "Prefer explicit imports. E2E repo rule marker.\n"
     ),
 }
 
@@ -330,10 +363,35 @@ _CHANGE_FILES: dict[str, str] = {
         "def cache_value(key, cache={}):\n"
         "    return cache.get(key)\n"
     ),
+    # 关键路径：/api/ 与 /core/ 与 /models/ 命中 priority_paths
+    "app/api/handler.py": (
+        '"""HTTP handler."""\n\n\n'
+        "def handle(payload):\n"
+        "    if payload is None:\n"
+        "        return {}\n"
+        '    return {"value": payload, "echo": payload}\n'
+    ),
+    "app/core/engine.py": (
+        '"""Engine."""\n\n\n'
+        "def run(job, options={}):\n"
+        "    if job is None:\n"
+        "        return options\n"
+        "    return job\n"
+    ),
+    "app/models/item.py": (
+        '"""Item model."""\n\n\n'
+        "class Item:\n"
+        "    def __init__(self, name, tags=[]):\n"
+        "        self.name = name\n"
+        "        self.tags = tags\n"
+    ),
+    # 非关键路径的对照文件：diff 略大于 api/handler.py
     "app/extra.py": (
-        "import os\n\n\n"
+        '"""Extra helpers."""\n\n\n'
         "def unused_helper(value=None, options={}):\n"
-        "    return options\n"
+        "    return options\n\n\n"
+        "def echo(value):\n"
+        "    return value\n"
     ),
     # 测试/配置路径：应被过滤或抽样，不应产生行内评论
     "testcase/test_service.py": (
@@ -371,3 +429,48 @@ def create_review_fixture(round_idx: int, log: list[str], *, suffix: str = "") -
         target_branch="main",
         mr_iid=merge_request,
     )
+
+
+# ---------------------------------------------------------------------------
+# 抽样分支（真实对比 API 驱动 test_sampling 断言）
+# ---------------------------------------------------------------------------
+
+
+def create_sampling_branch(
+    pid: int,
+    branch: str,
+    count: int,
+    log: list[str],
+    *,
+    base: str = "main",
+    prefix: str = "testcase/sample",
+) -> str:
+    """单次 commits API 提交 count 个 testcase 文件，形成可 compare 的真实分支."""
+    actions = [
+        {
+            "action": "create",
+            "file_path": f"{prefix}_{idx:02d}.py",
+            "content": "def test_sample():\n    assert True\n",
+        }
+        for idx in range(1, count + 1)
+    ]
+    gitlab_request(
+        "POST",
+        f"/projects/{pid}/repository/commits",
+        payload={
+            "branch": branch,
+            "start_branch": base,
+            "commit_message": f"e2e: {count} sample cases",
+            "actions": actions,
+        },
+    )
+    log.append(f"[{now_iso()}] created sampling branch {branch} with {count} files")
+    return branch
+
+
+def delete_branch(pid: int, branch: str, log: list[str]) -> None:
+    gitlab_request(
+        "DELETE",
+        f"/projects/{pid}/repository/branches/{urllib.parse.quote(branch, safe='')}",
+    )
+    log.append(f"[{now_iso()}] deleted branch {branch}")

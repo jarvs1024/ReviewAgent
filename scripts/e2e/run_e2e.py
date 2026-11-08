@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.e2e import config_audit, fixtures, flows, report, stack  # noqa: E402
+from scripts.e2e import config_audit, fixtures, flows, real_config, report, stack  # noqa: E402
 
 _ENV_CANDIDATES = ("config/instance.env", ".env")
 
@@ -190,6 +190,17 @@ def _run_full(args: argparse.Namespace, logdir: Path, stamp: str) -> int:
             pid = fixture.project_id if fixture is not None else stack.project_id()
             if {"improve", "auto_chain"} & set(features):
                 results.extend(_config_observations(mr_iid, round_idx, effective_cfg, pid))
+            if fixture is not None:
+                real_log = [
+                    f"=== config_real round={round_idx} stamp={stamp} "
+                    f"mr={mr_iid} project={fixture.project_id}"
+                ]
+                extra = real_config.run(
+                    mr_iid, round_idx, fixture.project_id, effective_cfg, real_log
+                )
+                for result in extra:
+                    report.print_result(result)
+                results.extend(extra)
     finally:
         if original_pid is None:
             os.environ.pop("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", None)

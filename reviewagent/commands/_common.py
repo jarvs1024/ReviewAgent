@@ -68,6 +68,30 @@ def _split_diff_by_text(diff_text: str) -> dict[str, str]:
     return result
 
 
+def partition_overflow(
+    diff_by_file: dict[str, str], limit: int
+) -> tuple[list[str], list[str]]:
+    """按文件边界把 diff 拆成 in-scope / overflow 两组.
+
+    首个文件无论多大都留在 scope（后续 partial/patch 策略兜底），
+    其余文件按 sorted 顺序累加，超出 limit 的进 overflow。
+    limit <= 0 表示不限制。
+    """
+    files_in_scope: list[str] = []
+    files_overflow: list[str] = []
+    if limit <= 0:
+        return sorted(diff_by_file.keys()), files_overflow
+    total_chars = 0
+    for fp in sorted(diff_by_file.keys()):
+        file_chars = len(diff_by_file[fp])
+        if files_in_scope and (total_chars + file_chars > limit):
+            files_overflow.append(fp)
+        else:
+            total_chars += file_chars
+            files_in_scope.append(fp)
+    return files_in_scope, files_overflow
+
+
 class BaseCommandError(RuntimeError):
     """所有 ReviewAgent 命令共用基类错误."""
     pass
@@ -245,16 +269,9 @@ class BaseCommand:
             files_overflow: list[str] = []
             if config.max_diff_chars > 0 and len(diff_text) > config.max_diff_chars:
                 diff_by_file = _split_diff_by_text(diff_text)
-                total_chars = 0
-                for fp in sorted(diff_by_file.keys()):
-                    file_chars = len(diff_by_file[fp])
-                    # 已累加至少 1 个文件, 且再加就超 MAX_DIFF_CHARS → overflow
-                    # 单文件超限仍允许进入 scope (后续 partial/patch 模式兜底)
-                    if files_in_scope and (total_chars + file_chars > config.max_diff_chars):
-                        files_overflow.append(fp)
-                    else:
-                        total_chars += file_chars
-                        files_in_scope.append(fp)
+                files_in_scope, files_overflow = partition_overflow(
+                    diff_by_file, config.max_diff_chars
+                )
                 if files_overflow:
                     logger.info(
                         "{}.diff_size_limit project={} mr={} total_chars={} scope={} overflow={}",

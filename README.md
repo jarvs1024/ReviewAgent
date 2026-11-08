@@ -306,12 +306,17 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 ## 端到端验证
 
 ```bash
-# 快速档：进程内跑完整配置生效性审计（92 字段 witness + 18 组行为 delta），无需外部服务
+# 快速档：进程内跑完整配置生效性审计（92 字段 witness + 21 组行为 delta），无需外部服务
 .venv/bin/python scripts/e2e/run_e2e.py --tier fast
 
 # 全量档：临时 GitLab 项目/分支/MR + 真实 LLM/队列，跑 8 个功能并按真实产物校验配置
 .venv/bin/python scripts/e2e/run_e2e.py --tier full --round 1
 ```
+
+全量档除真实 suggestions 外，还会用 MR `/changes` 与 51 文件抽样分支的 compare
+结果直接跑 `planner.plan()`，逐条验证 `review_mode` / `priority_paths` /
+`full_files` / `test_sample_*`，并从仓库默认分支真实拉取 `AGENTS.md` 与 rules_dir
+（`scripts/e2e/real_config.py`）。
 
 两档共用同一份 witness 目录（`scripts/e2e/catalog.py`），报告写到
 `logs/e2e/report-<时间戳>.json`；`--only describe,improve` 可只跑部分功能，

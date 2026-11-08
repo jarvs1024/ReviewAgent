@@ -34,11 +34,14 @@
 - 实例配置模板迁到 `config/examples/instance.env.example`（原 `.env.example` 移除），
   其余字段指向 `docs/CONFIG.md`。
 - **统一端到端验证**：`scripts/e2e/run_e2e.py` 提供两档验证——`--tier fast` 在进程内
-  跑完整配置生效性审计（92 个 schema 字段逐条 witness + 18 组行为 delta，无需外部
+  跑完整配置生效性审计（92 个 schema 字段逐条 witness + 21 组行为 delta，无需外部
   服务），`--tier full` 用临时 GitLab 项目/分支/MR 跑 describe、improve、自动链、
   adopt/dismiss、UI Apply 识别、Telemetry API、周报共 8 个功能，并用真实 suggestions
-  断言限额/严重度/规则键等配置确实作用到产物。报告落在 `logs/e2e/report-*.json`；
-  `verify_e2e.py` 保留为全量档兼容入口。
+  断言限额/严重度/规则键等配置确实作用到产物。全量档新增真实 diff 规划断言
+  （`scripts/e2e/real_config.py`）：用 MR `/changes` 与抽样分支的 compare 数据直接跑
+  `planner.plan()`，逐条证明 `review_mode`、`priority_paths`、`full_files`、
+  `test_sample_*` 在真实文件集合上生效，并从真实仓库拉取 `AGENTS.md` + rules_dir。
+  报告落在 `logs/e2e/report-*.json`；`verify_e2e.py` 保留为全量档兼容入口。
 
 ### Changed
 

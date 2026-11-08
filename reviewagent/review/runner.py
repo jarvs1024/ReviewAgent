@@ -27,6 +27,11 @@ from reviewagent.review.validation import merge_chunks
 _DEFAULT_DYNAMIC_TIMEOUT_S = 35.0
 
 
+def worker_count(groups: list[list[str]], cfg: Any) -> int:
+    """并行 worker 数 = min(分组数, improve_parallel_workers)."""
+    return min(len(groups), cfg.improve_parallel_workers)
+
+
 @dataclass
 class Callbacks:
     """门面注入的绑定方法（prompt / 源码 / store 邻接的读取都在门面侧）."""
@@ -346,7 +351,7 @@ def run(ctx: RunContext) -> dict[str, Any]:
                 ctx.project_id, ctx.mr_iid, len(files_llm), len(groups), _batched, _merged_files,
             )
 
-    workers = min(len(groups), ctx.cfg.improve_parallel_workers)
+    workers = worker_count(groups, ctx.cfg)
 
     logger.info(
         "improve.parallel project={} mr={} files_to_review={} reuse={} groups={} workers={}",
