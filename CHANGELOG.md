@@ -42,6 +42,13 @@
   `planner.plan()`，逐条证明 `review_mode`、`priority_paths`、`full_files`、
   `test_sample_*` 在真实文件集合上生效，并从真实仓库拉取 `AGENTS.md` + rules_dir。
   报告落在 `logs/e2e/report-*.json`；`verify_e2e.py` 保留为全量档兼容入口。
+- **遥测字段级审计**：全量档新增 `scripts/e2e/telemetry_audit.py`，在功能用例跑完后
+  用真实 GitLab 产物 × DB 直读 × 读接口三方对账，输出
+  `telemetry:mr_activity` / `review_runs` / `suggestions` / `actions` / `file_state` /
+  `api_params` 6 项断言（字段逐条覆盖见 `reviewagent/telemetry/README.md`）。
+  E2E 不再在 auto_chain 前清空 `review_runs`（默认上限 30 本就够用），保留
+  "哪个 run 产出了哪些 suggestion" 的证据；空 `improved_code` 按删除整段的合法
+  形态校验（`existing_code` 非空 + note 含 suggestion 块），非空时与 note 正文比对。
 
 ### Changed
 
@@ -59,6 +66,18 @@
   `config.env_shadowed` 告警。
 
 ### Fixed
+
+- **数据采集补漏**：`review_runs.rule_keys_cited` / `suggestion_count`、
+  `suggestions.score` / `severity_source`、`suggestion_actions.head_sha_posted`
+  现在由真实 improve / adopt / dismiss 链路写入；webhook upsert 不再把事件操作者
+  当成 MR 作者，`[no_more_review]` 标记不再污染 `mr_activity.title`，真实 webhook
+  的 `created_at` / `updated_at` / `merged_at` 正确落库。
+- **遥测读接口参数**：`/runs` 与 `/dismissals` 的 `total` 改为过滤条件整表计数
+  （原为当前页大小）；`/mrs` 时间窗口改按 `created_at` 并支持 `until`
+  （原按 `updated_at`，窗口外 MR 会泄漏）；`/dismissals` 的 `rule_key` 匹配
+  `suggestions.rule_keys`、`until` 按 `dismissed_at`、`offset` 生效；
+  `/metrics/rules` 改按真实规则键聚合（原按 severity 兜底）；
+  `/metrics/authors` 合并 run 计数与 MR 计数。
 
 - 三个"改了不生效"的配置接线：`REVIEWAGENT_WEEKLY_TIMEZONE` 现在真正参与周报周边界
   计算（非法 IANA 名启动失败）、`REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 由

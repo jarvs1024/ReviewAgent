@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from reviewagent.telemetry.models import MRRecord
+from reviewagent.telemetry.models import MRRecord, ReviewRun
 from reviewagent.telemetry.store import Store
 
 
@@ -108,6 +108,65 @@ def test_adoption_source_persists_on_suggestion_and_action():
         actions = store.list_suggestion_actions(project_id=34, mr_iid=903)
         assert suggestion["adoption_source"] == "manual_change"
         assert actions[0]["adoption_source"] == "manual_change"
+    finally:
+        tmp.cleanup()
+
+
+def test_finish_run_persists_rule_keys_cited_and_suggestion_count():
+    store, tmp = _make_store()
+    try:
+        run_id = store.insert_run(ReviewRun(34, 904, "improve", "webhook"))
+        store.finish_run(
+            run_id, status="success",
+            rule_keys_cited=["R-ERR", "SSD-RULE-NO-BARE-PRINT"],
+            suggestion_count=2,
+        )
+        row = store.list_runs(project_id=34, mr_iid=904)[0]
+        assert row["rule_keys_cited"] == "R-ERR,SSD-RULE-NO-BARE-PRINT"
+        assert row["suggestion_count"] == 2
+    finally:
+        tmp.cleanup()
+
+
+def test_record_suggestion_persists_score():
+    store, tmp = _make_store()
+    try:
+        store.upsert_mr(MRRecord(34, 906, "score", "alice", "f", "m", "opened"))
+        store.record_suggestion(
+            project_id=34, mr_iid=906, note_id="score-1",
+            file_path="a.py", target_line=1, header="h", severity="high",
+            head_sha="sha", score=85, severity_source="rule",
+        )
+        row = store.get_suggestion_by_note_id("score-1")
+        assert row["score"] == 85
+        assert row["severity_source"] == "rule"
+    finally:
+        tmp.cleanup()
+
+
+def test_record_suggestion_score_defaults_to_none():
+    store, tmp = _make_store()
+    try:
+        store.upsert_mr(MRRecord(34, 907, "score", "alice", "f", "m", "opened"))
+        store.record_suggestion(
+            project_id=34, mr_iid=907, note_id="score-2",
+            file_path="a.py", target_line=1, header="h", severity="low", head_sha="sha",
+        )
+        row = store.get_suggestion_by_note_id("score-2")
+        assert row["score"] is None
+        assert row["severity_source"] is None
+    finally:
+        tmp.cleanup()
+
+
+def test_finish_run_defaults_rule_keys_cited_to_none_and_count_zero():
+    store, tmp = _make_store()
+    try:
+        run_id = store.insert_run(ReviewRun(34, 905, "describe", "webhook"))
+        store.finish_run(run_id, status="success")
+        row = store.list_runs(project_id=34, mr_iid=905)[0]
+        assert row["rule_keys_cited"] in (None, "")
+        assert row["suggestion_count"] == 0
     finally:
         tmp.cleanup()
 

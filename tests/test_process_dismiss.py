@@ -179,6 +179,7 @@ def test_dismiss_writes_audit_action(tmp_telemetry):
     assert dismiss_action is not None
     assert dismiss_action["actor_username"] == "root"
     assert dismiss_action["reason"] == "测试 reason"
+    assert dismiss_action["head_sha_posted"] == "abc"
 
 
 def _get_store():

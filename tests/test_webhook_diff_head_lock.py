@@ -76,6 +76,13 @@ def _make_payload(*, action: str, head_sha: str) -> dict[str, Any]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_mr_author_lookup(monkeypatch) -> None:
+    """单元测试不打 GitLab API: 作者回查固定返回 None (回退 payload)."""
+    import reviewagent.webhook.router as router_mod
+    monkeypatch.setattr(router_mod, "_mr_record_from_api", lambda mr: None)
+
+
 @pytest.fixture
 def locks(monkeypatch) -> _FakeLocks:
     fake = _FakeLocks()

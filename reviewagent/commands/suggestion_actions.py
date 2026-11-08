@@ -578,6 +578,7 @@ def process_dismiss(
         actor_username=actor_username,
         reason=reason,
         validation_status="ok",
+        head_sha_posted=(sug or {}).get("head_sha"),
     )
 
     # 4.5. 立即刷新 MR 顶部"检视汇总" (与下一次 improve run 之间无延迟)
@@ -763,6 +764,7 @@ def process_adopt(
             actor_username=actor_username,
             reason=reason or f"user /adopt after state={state}",
             validation_status=f"already-{state}",
+            head_sha_posted=sug.get("head_sha"),
         )
         # 3. 触发 re-improve: 用户主动表达意愿, 给他/她看到最新 diff
         reimprove_job = _maybe_enqueue_reimprove(
@@ -1047,6 +1049,7 @@ def mark_suggestion_applied_by_diff(
             reason="adopted via GitLab UI",
             validation_status="gitlab-ui-apply",
             adoption_source="ui_apply",
+            head_sha_posted=sug.get("head_sha"),
         )
     except Exception as e:  # pragma: no cover
         logger.warning("system_applied update failed: {}", e)
@@ -1184,6 +1187,7 @@ def _scan_and_mark_resolved_silent(
                 reason=reason,
                 validation_status=validation_status,
                 adoption_source=adoption_source,
+                head_sha_posted=sug.get("head_sha"),
             )
             result["updated"] += 1
             result["note_ids"].append(note_id)

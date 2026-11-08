@@ -80,6 +80,10 @@ def test_sync_resolved_uses_silent_helper(tmp_telemetry):
         sug = s.get_suggestion_by_note_id(note_id)
         assert sug["state"] == "resolved"
         assert sug["resolution_source"] == "gitlab_resolve"  # 来自 webhook 触发
+    actions = s.list_suggestion_actions(project_id=34, mr_iid=263, limit=100)
+    resolved_actions = [a for a in actions if a["action"] == "resolved"]
+    assert len(resolved_actions) == 2
+    assert {a["head_sha_posted"] for a in resolved_actions} == {"abc"}
 
 
 def test_sync_resolved_uses_correct_adoption_source(tmp_telemetry):
@@ -108,6 +112,30 @@ def test_sync_resolved_uses_correct_adoption_source(tmp_telemetry):
 
     sug = s.get_suggestion_by_note_id("src-test")
     assert sug["resolution_source"] == "gitlab_resolve"
+
+
+def test_ui_apply_action_records_posted_head_sha(tmp_telemetry):
+    """UI Apply → adopted action 必须记录建议发布时的 head_sha."""
+    from reviewagent.commands.suggestion_actions import mark_suggestion_applied_by_diff
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    _seed(s, note_id="ui-1")
+
+    with patch("reviewagent.commands.suggestion_actions.get_store", return_value=s), \
+         patch("reviewagent.commands.suggestion_actions.publish_overview"):
+        sug_id = mark_suggestion_applied_by_diff(
+            project_id=34, mr_iid=263,
+            file_path="a.py", target_line=10,
+            actor_username="root",
+        )
+
+    assert sug_id is not None
+    actions = s.list_suggestion_actions(project_id=34, mr_iid=263, limit=100)
+    adopted = [a for a in actions if a["action"] == "adopted"]
+    assert len(adopted) == 1
+    assert adopted[0]["validation_status"] == "gitlab-ui-apply"
+    assert adopted[0]["head_sha_posted"] == "abc"
 
 
 def test_sync_resolved_no_overview_call_when_no_updates(tmp_telemetry):

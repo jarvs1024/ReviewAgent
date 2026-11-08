@@ -78,6 +78,7 @@ def _callbacks(**overrides) -> PublishCallbacks:
         "diff_line_map": lambda: {},
         "head_sha": lambda: "head-1",
         "normalise": _normalise,
+        "score": lambda sug: 0,
         "validate": lambda **kw: {
             "action": "post",
             "new_line": kw["start_line"],

@@ -61,7 +61,8 @@ def run_chain_open(mr_iid: int, round_idx: int, log: list[str]) -> FeatureResult
     """merge_request open → pr_commands（describe + improve）."""
     stack.clear_ephemeral_locks(log)
     fixtures.reset_mr_describe_state(mr_iid, log)
-    fixtures.reset_mr_review_runs(mr_iid, log)
+    # 不清理 review_runs: 默认 max_review_calls_per_mr=30 远超 E2E 的 run 数;
+    # 删除历史会让 telemetry 审计失去「哪个 run 产出了这些 suggestion」的证据.
     before = len(stack.list_mr_runs(mr_iid))
     status, body = stack.post_webhook(stack.make_merge_request_payload(mr_iid, "open"), log)
     if status != 200 or body.get("status") not in ("queued", "skipped"):

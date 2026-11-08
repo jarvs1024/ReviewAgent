@@ -334,6 +334,8 @@ class BaseCommand:
                 cost_credits=cost_credits,
                 llm_provider=provider_name,
                 duration_ms=duration_ms,
+                rule_keys_cited=result_summary.get("rule_keys_cited") or None,
+                suggestion_count=int(result_summary.get("suggestion_count") or 0),
             )
             result_summary.setdefault("status", "success")
             result_summary["duration_ms"] = duration_ms

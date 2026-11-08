@@ -90,21 +90,6 @@ def reset_mr_describe_state(mr_iid: int, log: list[str], *, pid: int | None = No
     log.append(f"[{now_iso()}] reset description_generated=0 for mr {mr_iid} (rows={n})")
 
 
-def reset_mr_review_runs(mr_iid: int, log: list[str], *, pid: int | None = None) -> None:
-    """清该 MR 的 review_runs，让 max_review_calls 闸门重新放行."""
-    from reviewagent.telemetry.store import get_store
-
-    target = pid if pid is not None else project_id()
-    store = get_store()
-    with store._conn() as conn:
-        n = conn.execute(
-            "DELETE FROM review_runs WHERE project_id=? AND mr_iid=?",
-            (target, mr_iid),
-        ).rowcount
-        conn.commit()
-    log.append(f"[{now_iso()}] reset review_runs for mr {mr_iid} (rows={n})")
-
-
 def get_action_count(mr_iid: int, action: str, *, pid: int | None = None) -> int:
     from reviewagent.telemetry.store import get_store
 

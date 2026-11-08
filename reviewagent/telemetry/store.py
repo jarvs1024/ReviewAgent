@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS mr_activity (
     description_generated INTEGER DEFAULT 0,
     last_review_at      TIMESTAMP,
     last_activity_at    TIMESTAMP,
+    no_more_review      INTEGER DEFAULT 0,   -- 已发送 max_review_calls 提示
     PRIMARY KEY (project_id, mr_iid)
 );
 
@@ -279,6 +280,17 @@ class Store:
                 conn.execute("ALTER TABLE mr_activity ADD COLUMN last_activity_at TIMESTAMP")
                 # 新加列, 给所有现存 MR 回填 (MAX 语义, 不会回退)
                 self._backfill_last_activity(conn)
+            if "no_more_review" not in mr_columns:
+                conn.execute(
+                    "ALTER TABLE mr_activity ADD COLUMN no_more_review INTEGER DEFAULT 0"
+                )
+                # 旧实现把标记追加在 title 尾部 (污染采集数据) → 迁到独立列
+                conn.execute(
+                    "UPDATE mr_activity "
+                    "SET no_more_review = 1, "
+                    "    title = REPLACE(title, ' [no_more_review]', '') "
+                    "WHERE title LIKE '%no_more_review%'"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sug_cohort ON suggestions(mr_iid, cohort_key)"
             )
@@ -381,6 +393,26 @@ class Store:
                 WHERE project_id = ? AND mr_iid = ?
                 """,
                 (now, now, project_id, mr_iid),
+            )
+
+    def claim_no_more_review_notice(self, project_id: int, mr_iid: int) -> bool:
+        """原子认领 "已达最大检视次数" 提示: 首次返回 True, 后续返回 False."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE mr_activity SET no_more_review = 1 "
+                "WHERE project_id = ? AND mr_iid = ? "
+                "AND COALESCE(no_more_review, 0) = 0",
+                (project_id, mr_iid),
+            )
+            return cur.rowcount > 0
+
+    def reset_no_more_review_notice(self, project_id: int, mr_iid: int) -> None:
+        """释放认领 (提示发送失败时调用, 允许下次 push 重试)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE mr_activity SET no_more_review = 0 "
+                "WHERE project_id = ? AND mr_iid = ?",
+                (project_id, mr_iid),
             )
 
     def _backfill_last_activity(self, conn) -> None:
@@ -558,6 +590,8 @@ class Store:
         cost_credits: float = 0.0,
         duration_ms: int = 0,
         llm_provider: str | None = None,
+        rule_keys_cited: list[str] | None = None,
+        suggestion_count: int = 0,
     ) -> None:
         with self._conn() as conn:
             now = _fmt_dt(_utcnow())
@@ -566,13 +600,16 @@ class Store:
                 UPDATE review_runs
                 SET finished_at = ?, status = ?, error = ?, model = ?,
                     prompt_tokens = ?, completion_tokens = ?, llm_provider = ?,
-                    total_tokens = ?, cost_credits = ?, duration_ms = ?
+                    total_tokens = ?, cost_credits = ?, duration_ms = ?,
+                    rule_keys_cited = ?, suggestion_count = ?
                 WHERE id = ?
                 """,
                 (
                     now, status, error, model,
                     prompt_tokens, completion_tokens, llm_provider,
                     prompt_tokens + completion_tokens, cost_credits, duration_ms,
+                    ",".join(rule_keys_cited) if rule_keys_cited else None,
+                    suggestion_count,
                     run_id,
                 ),
             )
@@ -756,6 +793,7 @@ class Store:
         content_fingerprint: str | None = None,
         cohort_key: str | None = None,
         severity_source: str | None = None,
+        score: int | None = None,
     ) -> int:
         """记录 improve 发布的一条 inline suggestion (用于后续 /adopt 验证)."""
         with self._conn() as conn:
@@ -767,9 +805,9 @@ class Store:
                     existing_code, improved_code,
                     header, severity, head_sha,
                     rule_keys, one_sentence_summary, importance, label,
-                    fingerprint, content_fingerprint, cohort_key, severity_source, posted_at,
+                    fingerprint, content_fingerprint, cohort_key, severity_source, score, posted_at,
                     state, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
                 """,
                 (
                     project_id, mr_iid, note_id, file_path,
@@ -784,6 +822,7 @@ class Store:
                     content_fingerprint,
                     cohort_key,
                     severity_source,
+                    score,
                     _fmt_dt(_utcnow()),
                     _fmt_dt(_utcnow()),
                 ),
@@ -1611,12 +1650,12 @@ class Store:
             "adoption_pct": round(adoption_rate * 100, 1),
         }
 
-    def list_dismissals(
-        self, *, project_id=None, mr_iid=None, since=None, until=None,
-        rule_key=None, limit=200,
-    ):
+    @staticmethod
+    def _dismissal_where(
+        *, project_id=None, mr_iid=None, since=None, until=None, rule_key=None,
+    ) -> tuple[str, list]:
         clauses = ["s.state = 'dismissed'"]
-        params = []
+        params: list = []
         if project_id is not None: clauses.append("s.project_id = ?"); params.append(project_id)
         if mr_iid is not None: clauses.append("s.mr_iid = ?"); params.append(mr_iid)
         if since: clauses.append("datetime(s.dismissed_at) >= datetime(?)"); params.append(_norm_iso(since))
@@ -1624,13 +1663,37 @@ class Store:
         if rule_key:
             clauses.append("(',' || COALESCE(s.rule_keys,'') || ',') LIKE ?")
             params.append(f"%,{rule_key},%")
-        where = " WHERE " + " AND ".join(clauses)
+        return " WHERE " + " AND ".join(clauses), params
+
+    def list_dismissals(
+        self, *, project_id=None, mr_iid=None, since=None, until=None,
+        rule_key=None, limit=200, offset=0,
+    ):
+        where, params = self._dismissal_where(
+            project_id=project_id, mr_iid=mr_iid, since=since, until=until,
+            rule_key=rule_key,
+        )
         with self._conn() as conn:
             rows = conn.execute(
-                f"SELECT s.* FROM suggestions s{where} ORDER BY s.dismissed_at DESC LIMIT ?",
-                (*params, limit),
+                f"SELECT s.* FROM suggestions s{where} "
+                "ORDER BY s.dismissed_at DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def count_dismissals(
+        self, *, project_id=None, mr_iid=None, since=None, until=None,
+        rule_key=None,
+    ) -> int:
+        """与 list_dismissals 同过滤条件的总数 (分页 total 用)."""
+        where, params = self._dismissal_where(
+            project_id=project_id, mr_iid=mr_iid, since=since, until=until,
+            rule_key=rule_key,
+        )
+        with self._conn() as conn:
+            return int(conn.execute(
+                f"SELECT COUNT(*) AS n FROM suggestions s{where}", params,
+            ).fetchone()["n"])
 
     def dismissals_by_rule(self, *, project_id=None, since=None):
         rows = self.list_dismissals(project_id=project_id, since=since, limit=10000)
@@ -1764,6 +1827,39 @@ class Store:
         return [dict(r) for r in rows]
 
     # ---------- 查询 (Phase 3 数据采集用) ----------
+    @staticmethod
+    def _run_where(
+        *,
+        project_id: int | None = None,
+        mr_iid: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        command: str | None = None,
+        status: str | None = None,
+    ) -> tuple[str, list]:
+        clauses: list[str] = []
+        params: list = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if mr_iid is not None:
+            clauses.append("mr_iid = ?")
+            params.append(mr_iid)
+        if since:
+            clauses.append("datetime(started_at) >= datetime(?)")
+            params.append(_norm_iso(since))
+        if until:
+            clauses.append("datetime(started_at) < datetime(?)")
+            params.append(_norm_iso(until))
+        if command:
+            clauses.append("command = ?")
+            params.append(command)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
     def list_runs(
         self,
         *,
@@ -1788,27 +1884,10 @@ class Store:
             limit: 默认 100
             offset: 分页
         """
-        clauses: list[str] = []
-        params: list = []
-        if project_id is not None:
-            clauses.append("project_id = ?")
-            params.append(project_id)
-        if mr_iid is not None:
-            clauses.append("mr_iid = ?")
-            params.append(mr_iid)
-        if since:
-            clauses.append("datetime(started_at) >= datetime(?)")
-            params.append(_norm_iso(since))
-        if until:
-            clauses.append("datetime(started_at) < datetime(?)")
-            params.append(_norm_iso(until))
-        if command:
-            clauses.append("command = ?")
-            params.append(command)
-        if status:
-            clauses.append("status = ?")
-            params.append(status)
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        where, params = self._run_where(
+            project_id=project_id, mr_iid=mr_iid, since=since, until=until,
+            command=command, status=status,
+        )
         sql = (
             "SELECT * FROM review_runs" + where +
             " ORDER BY started_at DESC LIMIT ? OFFSET ?"
@@ -1817,6 +1896,27 @@ class Store:
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    def count_runs(
+        self,
+        *,
+        project_id: int | None = None,
+        mr_iid: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        command: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        """与 list_runs 同过滤条件的总数 (分页 total 用)."""
+        where, params = self._run_where(
+            project_id=project_id, mr_iid=mr_iid, since=since, until=until,
+            command=command, status=status,
+        )
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM review_runs" + where, params,
+            ).fetchone()
+        return int(row["n"])
 
     def summary(
         self,

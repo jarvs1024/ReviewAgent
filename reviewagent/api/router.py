@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from reviewagent.logging_setup import logger
-from reviewagent.telemetry.store import get_store, _enrich_web_url
+from reviewagent.telemetry.store import get_store
 
 
 router = APIRouter(prefix="/api/v1/telemetry", tags=["telemetry"])
@@ -95,7 +95,12 @@ async def list_runs(
         since=_parse_iso(since), until=_parse_iso(until),
         limit=limit, offset=offset,
     )
-    return {"total": len(runs), "limit": limit, "offset": offset, "runs": runs}
+    total = s.count_runs(
+        project_id=project_id, mr_iid=mr_iid,
+        command=command, status=status,
+        since=_parse_iso(since), until=_parse_iso(until),
+    )
+    return {"total": total, "limit": limit, "offset": offset, "runs": runs}
 
 
 @router.get("/runs/{run_id}")
@@ -179,22 +184,15 @@ async def mr_timeline(project_id: int, mr_iid: int, limit: int = Query(200, ge=1
 @router.get("/mrs")
 async def list_mrs(
     project_id: int | None = Query(None), state: str | None = Query(None),
-    since: str | None = Query(None), limit: int = Query(100, ge=1, le=1000),
+    since: str | None = Query(None), until: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
 ) -> dict[str, Any]:
-    s = get_store()
-    clauses, params = [], []
-    if project_id is not None:
-        clauses.append("project_id = ?"); params.append(project_id)
-    if state:
-        clauses.append("state = ?"); params.append(state)
-    if since:
-        clauses.append("updated_at >= ?"); params.append(_parse_iso(since))
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    with s._conn() as conn:  # noqa: SLF001
-        rows = conn.execute(f"SELECT * FROM mr_activity{where} ORDER BY updated_at DESC LIMIT ?", (*params, limit)).fetchall()
-    # 给每条 MR 加 web_url (调 GitLab API 查 path_with_namespace), 同一项目内只打一次 API.
-    # _enrich_web_url 失败静默, 缺失字段不影响主查询结果.
-    return {"total": len(rows), "mrs": [_enrich_web_url(dict(r)) for r in rows]}
+    # 时间窗口按 created_at (MR 开启时间), 与 list_mrs / mr_overview / 周报口径一致.
+    mrs = get_store().list_mrs(
+        project_id=project_id, state=state,
+        since=_parse_iso(since), until=_parse_iso(until), limit=limit,
+    )
+    return {"total": len(mrs), "mrs": mrs}
 
 
 @router.get("/mrs/{project_id}/{mr_iid}")
@@ -227,41 +225,75 @@ async def metrics_severity(project_id: int | None = Query(None), since: str | No
 
 
 @router.get("/metrics/rules")
-async def metrics_rules(project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None)) -> dict[str, Any]:
-    # 当前 suggestion schema 没有 rule_key；按 severity 返回稳定的前端兼容分组。
-    metrics = get_store().suggestion_metrics(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))
-    return {"rules": [{"rule_key": key, "count": count} for key, count in metrics["severity_counts"].items()]}
+async def metrics_rules(
+    project_id: int | None = Query(None), since: str | None = Query(None),
+    until: str | None = Query(None), top_n: int = Query(10, ge=1, le=100),
+) -> dict[str, Any]:
+    """suggestion.rule_keys 拆分计数 (真实的规则键, 不是 severity)."""
+    rows = get_store().rule_key_counts(
+        project_id=project_id, since=_parse_iso(since),
+        until=_parse_iso(until), top_n=top_n,
+    )
+    return {"rules": [{"rule_key": key, "count": count} for key, count in rows]}
 
 
 @router.get("/metrics/authors")
 async def metrics_authors(project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None)) -> dict[str, Any]:
     s = get_store()
-    clauses, params = ["1=1"], []
+    mr_clauses, mr_params = ["1=1"], []
     if project_id is not None:
-        clauses.append("project_id = ?"); params.append(project_id)
+        mr_clauses.append("project_id = ?"); mr_params.append(project_id)
     if since:
-        clauses.append("updated_at >= ?"); params.append(_parse_iso(since))
+        mr_clauses.append("datetime(created_at) >= datetime(?)"); mr_params.append(_parse_iso(since))
     if until:
-        clauses.append("updated_at < ?"); params.append(_parse_iso(until))
+        mr_clauses.append("datetime(created_at) < datetime(?)"); mr_params.append(_parse_iso(until))
+
+    run_clauses, run_params = ["1=1"], []
+    if project_id is not None:
+        run_clauses.append("project_id = ?"); run_params.append(project_id)
+    if since:
+        run_clauses.append("datetime(started_at) >= datetime(?)"); run_params.append(_parse_iso(since))
+    if until:
+        run_clauses.append("datetime(started_at) < datetime(?)"); run_params.append(_parse_iso(until))
+
     with s._conn() as conn:  # noqa: SLF001
-        rows = conn.execute(
-            f"SELECT COALESCE(NULLIF(author_sticky,''),'unknown') AS author, COUNT(*) AS runs "
-            f"FROM mr_activity WHERE {' AND '.join(clauses)} GROUP BY author ORDER BY runs DESC",
-            params,
+        mr_rows = conn.execute(
+            "SELECT COALESCE(NULLIF(author_sticky,''),'unknown') AS author, COUNT(*) AS mrs "
+            f"FROM mr_activity WHERE {' AND '.join(mr_clauses)} GROUP BY author",
+            mr_params,
         ).fetchall()
-    return {"authors": [dict(row) for row in rows]}
+        run_rows = conn.execute(
+            "SELECT COALESCE(NULLIF(actor_username,''),'unknown') AS author, COUNT(*) AS runs "
+            f"FROM review_runs WHERE {' AND '.join(run_clauses)} GROUP BY author",
+            run_params,
+        ).fetchall()
+
+    merged: dict[str, dict[str, Any]] = {}
+    for row in mr_rows:
+        merged.setdefault(row["author"], {"author": row["author"], "mrs": 0, "runs": 0})["mrs"] = row["mrs"]
+    for row in run_rows:
+        merged.setdefault(row["author"], {"author": row["author"], "mrs": 0, "runs": 0})["runs"] = row["runs"]
+    authors = sorted(merged.values(), key=lambda a: (-a["runs"], -a["mrs"], a["author"]))
+    return {"authors": authors}
 
 
 @router.get("/dismissals")
 async def dismissals(
     project_id: int | None = Query(None), mr_iid: int | None = Query(None), rule_key: str | None = Query(None),
-    since: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
+    since: str | None = Query(None), until: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=5000), offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    # rule_key is accepted for pr-agent dashboard compatibility; ReviewAgent stores severity instead.
-    rows = get_store().list_suggestion_actions(project_id=project_id, mr_iid=mr_iid, action="dismissed", since=_parse_iso(since), limit=limit)
-    if rule_key:
-        rows = [r for r in rows if r.get("file_path") == rule_key or r.get("reason") == rule_key]
-    return {"total": len(rows), "dismissals": rows}
+    s = get_store()
+    rows = s.list_dismissals(
+        project_id=project_id, mr_iid=mr_iid, rule_key=rule_key,
+        since=_parse_iso(since), until=_parse_iso(until),
+        limit=limit, offset=offset,
+    )
+    total = s.count_dismissals(
+        project_id=project_id, mr_iid=mr_iid, rule_key=rule_key,
+        since=_parse_iso(since), until=_parse_iso(until),
+    )
+    return {"total": total, "limit": limit, "offset": offset, "dismissals": rows}
 @router.get("/dismissals/by-rule")
 async def dismissals_by_rule(
     project_id: int | None = Query(None),

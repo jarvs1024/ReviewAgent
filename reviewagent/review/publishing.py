@@ -42,6 +42,7 @@ class PublishCallbacks:
     diff_line_map: Callable[[], dict[str, set[int]]]
     head_sha: Callable[[], str | None]
     normalise: Callable[[dict[str, Any]], dict[str, Any]]
+    score: Callable[[dict[str, Any]], int]
     validate: Callable[..., dict[str, Any]]
     detect_apply_risk: Callable[..., tuple[str, list[str]]]
     build_summary_placeholder: Callable[..., str]
@@ -137,6 +138,20 @@ def record_rule_keys(
         [*raw_keys, *[key for key in normalized if key not in extracted]]
     ))
     return merged
+
+
+def _posted_rule_keys(
+    inline_posted: list[dict[str, Any]], rule_set: Any,
+) -> list[str]:
+    """已发布建议引用到的规则键 (去重, 保留首次出现顺序) — 回填 review_runs."""
+    keys: list[str] = []
+    for item in inline_posted:
+        for key in record_rule_keys(
+            item.get("raw") or {}, item.get("normalised") or {}, rule_set=rule_set,
+        ):
+            if key not in keys:
+                keys.append(key)
+    return keys
 
 
 def _handle_cohort_reoccurrence(
@@ -678,6 +693,8 @@ def publish(
                         fingerprint=fingerprint,
                         content_fingerprint=content_fingerprint,
                         cohort_key=cohort_key,
+                        severity_source="rule" if rule_keys else "llm",
+                        score=callbacks.score(normalised),
                     )
                     # Batch3: 同 cohort 上一代是 applied/dismissed 且当前问题
                     # 仍然存在 → supersede 旧记录, 把新一条标 generation+1.
@@ -793,6 +810,8 @@ def publish(
         "suggestions_count": len(suggestions),
         "inline_posted": len(inline_posted),
         "inline_skipped": len(inline_skipped),
+        "rule_keys_cited": _posted_rule_keys(inline_posted, rule_set),
+        "suggestion_count": len(inline_posted),
     }
 
 

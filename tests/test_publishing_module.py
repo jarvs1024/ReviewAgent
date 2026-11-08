@@ -157,6 +157,7 @@ def _noop_callbacks(**overrides):
         "diff_line_map": lambda: {},
         "head_sha": lambda: "",
         "normalise": _stub_normalise,
+        "score": lambda sug: 0,
         "validate": lambda **kw: {"action": "drop", "new_line": 0, "reason": "drop"},
         "detect_apply_risk": lambda **kw: ("ok", []),
         "build_summary_placeholder": lambda *a, **kw: "## 改进总览 V1\n\n_加载中…_",
@@ -201,9 +202,76 @@ def test_publish_drop_action_appends_skipped_without_posting_inline():
         "suggestions_count": 1,
         "inline_posted": 0,
         "inline_skipped": 1,
+        "rule_keys_cited": [],
+        "suggestion_count": 0,
     }
     gitlab.post_mr_discussion.assert_not_called()
     gitlab.update_mr_comment.assert_not_called()
+
+
+def test_publish_returns_posted_rule_keys_and_suggestion_count(tmp_telemetry):
+    from reviewagent.review.publishing import PublishContext, publish
+
+    rule_set = _real_rule_set()
+    gitlab = MagicMock()
+    gitlab.post_mr_comment.return_value = 7001
+    gitlab.post_mr_discussion.return_value = "note-42"
+    ctx = PublishContext(project_id=34, mr_iid=3, gitlab=gitlab)
+    raw = {
+        "file": "x.py", "start_line": 3, "header": "静默吞异常",
+        "improved_code": "x = 1", "rationale": "违反 R-ERR",
+    }
+    callbacks = _noop_callbacks(
+        score=lambda sug: 77,
+        validate=lambda **kw: {
+            "action": "post", "new_line": kw["start_line"],
+            "reason": "ok", "normalised_code": "x = 1",
+        },
+    )
+    result = publish(
+        ctx, {"summary_md": "", "suggestions": [raw]},
+        rule_set=rule_set, profile=None, cfg=None, callbacks=callbacks,
+    )
+    assert result["inline_posted"] == 1
+    assert result["suggestion_count"] == 1
+    assert result["rule_keys_cited"] == ["R-ERR"]
+
+    from reviewagent.telemetry.store import get_store
+    row = get_store().get_suggestion_by_note_id("note-42")
+    assert row["score"] == 77
+    assert row["severity_source"] == "rule"
+    assert row["rule_keys"] == "R-ERR"
+
+
+def test_publish_marks_severity_source_llm_without_rule_keys(tmp_telemetry):
+    from reviewagent.review.publishing import PublishContext, publish
+
+    rule_set = _real_rule_set()
+    gitlab = MagicMock()
+    gitlab.post_mr_comment.return_value = 7002
+    gitlab.post_mr_discussion.return_value = "note-43"
+    ctx = PublishContext(project_id=34, mr_iid=4, gitlab=gitlab)
+    raw = {
+        "file": "x.py", "start_line": 5, "header": "命名建议",
+        "improved_code": "y = 2", "rationale": "变量名不够直观",
+    }
+    callbacks = _noop_callbacks(
+        score=lambda sug: 41,
+        validate=lambda **kw: {
+            "action": "post", "new_line": kw["start_line"],
+            "reason": "ok", "normalised_code": "y = 2",
+        },
+    )
+    result = publish(
+        ctx, {"summary_md": "", "suggestions": [raw]},
+        rule_set=rule_set, profile=None, cfg=None, callbacks=callbacks,
+    )
+    assert result["rule_keys_cited"] == []
+
+    from reviewagent.telemetry.store import get_store
+    row = get_store().get_suggestion_by_note_id("note-43")
+    assert row["score"] == 41
+    assert row["severity_source"] == "llm"
 
 
 # ---------- rule keys (dedup / record) ----------

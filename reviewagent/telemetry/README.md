@@ -110,7 +110,7 @@
 
 | 方法 | 用途 |
 |---|---|
-| `record_suggestion(*, project_id, mr_iid, note_id, file_path, target_line, target_line_end=None, existing_code=None, improved_code=None, header=None, severity=None, head_sha, rule_keys=None, one_sentence_summary=None, importance=None, label=None, fingerprint=None, content_fingerprint=None, cohort_key=None, severity_source=None) -> int` | INSERT 一条 inline suggestion, 同步 touch `last_activity_at`。`posted_at` 与 `created_at` 同时写 `_utcnow()` (当前实现等价)。`content_fingerprint` 是 Batch5 的行号变化场景 dedup (existing_code normalize 后 hash) |
+| `record_suggestion(*, project_id, mr_iid, note_id, file_path, target_line, target_line_end=None, existing_code=None, improved_code=None, header=None, severity=None, head_sha, rule_keys=None, one_sentence_summary=None, importance=None, label=None, fingerprint=None, content_fingerprint=None, cohort_key=None, severity_source=None, score=None) -> int` | INSERT 一条 inline suggestion, 同步 touch `last_activity_at`。`posted_at` 与 `created_at` 同时写 `_utcnow()` (当前实现等价)。`severity_source` 由 publishing 给出 (`rule` = 命中规则键, `llm` = 纯 LLM), `score` 是 `improve_min_score` 过滤用的内部评分。`content_fingerprint` 是 Batch5 的行号变化场景 dedup (existing_code normalize 后 hash) |
 | `suggestion_exists_by_fingerprint(project_id, mr_iid, fingerprint, head_sha="") -> bool` | 跨次精确指纹 dedup (主键命中即返回 True)。Z3+ 行为: 已处理状态 (applied/dismissed/resolved) 永远命中; `state="open"` 必须 `head_sha` 一致 (force-push 后残留 → 放行重新识别), 防止 fingerprint 维度因 head_sha 变化误命中 |
 | `suggestion_exists_at_line(project_id, mr_iid, file_path, target_line, severity="", head_sha="", line_tolerance=0, rule_keys=None, existing_code="") -> bool` | 跨次 heuristic dedup (`file, line±tolerance, state=open[, rule_keys 重叠 | content_fingerprint 命中]` + `head_sha` 兜底), 详见下方"关键行为"。`existing_code` 用于 content_fingerprint dedup (行号变化如 Apply docstring 后 +1 仍能命中, Batch5; MR301/aa87d4c 补充: 无 rule_keys 时退化为 content_fingerprint 维度拦住重复发布); `severity` 保留参数仅为向后兼容, 当前实现不再按 severity 过滤 |
 | `list_suggestion_headers(project_id, mr_iid) -> list[dict]` | 轻量列表 (file / line / header / severity / fp_short 前 8 位), 给 agent prompt 注入避免重复提 |
@@ -123,7 +123,7 @@
 | `update_suggestion_note_id(suggestion_id, new_note_id)` | webhook /adopt 兜底命中后回写真实 GitLab note_id |
 | `list_suggestions(*, project_id, mr_iid, state, since, until, limit=100, offset=0) -> list[dict]` | 多条件分页 (created_at DESC, id DESC) |
 | `get_reviewed_file_shas(project_id, mr_iid) -> dict[str, str]` | V8 增量检视: 返回 `{file_path: head_sha}` ——每个文件最近一次被检视时的 head_sha (不区分 state, dismissed/applied 的文件复用)。无 suggestion 的文件不在结果中 → 调用方视为首次检视 (commit 7708877) |
-| `upsert_file_review_state(*, project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count=0) -> None` | V9 UPSERT 单文件检视状态 (主键 `(project_id, mr_iid, file_path)` 冲突则覆盖)。即使本轮 0 建议也写, 避免下一轮对"上次 0 产出"文件空跑 LLM |
+| `upsert_file_review_state(*, project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count=0, profile_fingerprint=None, ruleset_fingerprint=None) -> None` | V9 UPSERT 单文件检视状态 (主键 `(project_id, mr_iid, file_path)` 冲突则覆盖)。即使本轮 0 建议也写, 避免下一轮对"上次 0 产出"文件空跑 LLM; `profile_fingerprint` / `ruleset_fingerprint` 记录本轮生效的场景包与规则集, 供审计判断该行是"谁在哪里"产出的 |
 | `get_file_review_states(project_id, mr_iid) -> dict[str, dict]` | V9 拉取该 MR 所有文件检视状态 `{file_path: {blob_sha, head_sha, suggestion_count}}`, 给 improve 顶部做"内容未变 → 复用上次"决策 |
 | `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比) |
 | `suggestion_metrics(*, project_id, since, until) -> dict` | 周报 / 仪表盘维度: `state_counts` / `severity_counts` / `action_counts` / `adoption_rate` (0~1 小数) / `adoption_pct` |
@@ -237,9 +237,9 @@
 | `rule_keys` | text | comma-joined 规则键 (e.g. `SSD-RULE-NO-LOG-EXC`) |
 | `one_sentence_summary` | text | 一句话摘要 |
 | `importance` | int | LLM 给的重要性 (1-10) |
-| `score` | int | score_filter 用的内部评分 (预留, 当前未写入) |
+| `score` | int | `improve_min_score` 过滤用的内部评分 (improve 发布时写入) |
 | `label` | text | improve prompt 给的标签 |
-| `severity_source` | text | rule / pattern / llm 来源 (预留字段, 当前未写入) |
+| `severity_source` | text | `rule` (命中规则键) / `llm` (纯 LLM), improve 发布时写入 |
 | `fingerprint` | text | 单条 suggestion 指纹 (跨次去重主键) |
 | `content_fingerprint` | text | existing_code normalize 后 hash，行号变化 (如 Apply docstring 后 +1) 仍能命中 dedup (Batch5) |
 | `cohort_key` | text | 同类 bug 聚合键 (跨次去重兜底) |
@@ -320,7 +320,7 @@
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/health` | DB 连接 + `mr_activity` / `review_runs` 行数 |
-| GET | `/runs` | run 列表 (`project_id` / `mr_iid` / `command` / `status` / `since` / `until` / `limit` / `offset`) |
+| GET | `/runs` | run 列表 (`project_id` / `mr_iid` / `command` / `status` / `since` / `until` / `limit` / `offset`); 响应 `total` 是过滤条件整表计数, 不是当前页大小 |
 | GET | `/runs/{run_id}` | 单 run 详情 (404 if not found) |
 | GET | `/summary` | 聚合: `since` / `until` / `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens}}` / `by_status` / `by_day` / `top_mrs` (前 10) |
 | GET | `/mr/{project_id}/{mr_iid}` | MR 元信息 + `recent_runs` (最近 50 条); 顺手 enrich `web_url` |
@@ -328,15 +328,15 @@
 | GET | `/mr/{project_id}/{mr_iid}/suggestions` | MR 的 suggestion 列表 (`state` 过滤 + 分页; 响应里加 `state_label` / `adoption_source_label`) |
 | GET | `/mr/{project_id}/{mr_iid}/stats` | state / action / severity 计数 + `adoption_rate` (applied / processed 百分比) |
 | GET | `/mr/{project_id}/{mr_iid}/timeline` | run + suggestion_posted + suggestion_action 三方归并时间线 (at DESC), 响应 `{"events": [{at, event_type, event_id, detail, state}]}`。event_type=`run` 时 state=status; event_type=`suggestion_action` 时 state=validation_status; event_type=`suggestion_posted` 时 state=suggestion.state |
-| GET | `/mrs` | MR 列表 (`project_id` / `state` / `since` / `limit`); enrich `web_url` (调 GitLab API, 项目级缓存) |
+| GET | `/mrs` | MR 列表 (`project_id` / `state` / `since` / `until` / `limit`); 时间窗口按 `created_at` (与 `/summary` / 周报口径一致); enrich `web_url` |
 | GET | `/mrs/{project_id}/{mr_iid}` | alias of `/mr/{project_id}/{mr_iid}` (兼容 pr-agent 风格) |
 | GET | `/mrs/{project_id}/{mr_iid}/dismissals` | MR 的 dismiss 详情 (含 `dismissed_reason`, 按 `dismissed_at DESC`) |
-| GET | `/dismissals` | dismiss 列表 (`project_id` / `mr_iid` / `since` / `limit`); `rule_key` 参数语义: 匹配 `file_path == rule_key` OR `reason == rule_key` (兼容前端传 file 名当 key 的用法, **不匹配** `suggestions.rule_keys` 字段, 注意) |
+| GET | `/dismissals` | dismiss 列表 (`project_id` / `mr_iid` / `rule_key` / `since` / `until` / `limit` / `offset`); 时间窗口按 `dismissed_at`; `rule_key` 匹配 `suggestions.rule_keys` CSV 中的完整键; 响应 `total` 是过滤条件整表计数 |
 | GET | `/dismissals/by-rule` | dismiss 按 `suggestions.rule_keys` 聚合 (含 `(no_rule_key)` 兜底 + 每条 rule 的 `reasons[]` 分布) |
 | GET | `/metrics/overview` | `summary` 合并 `suggestion_metrics` (state_counts / severity_counts / action_counts / adopted / dismissed / resolved / adoption_rate) |
 | GET | `/metrics/severity` | severity 维度计数 |
-| GET | `/metrics/rules` | **当前按 severity 兼容分组返回** (前端 dashboard 直接消费), 不是真正按 `rule_keys` 聚合。要按 rule_key 维度用 `Store.distinct_rule_keys(*, project_id, mr_iid)` 拉去重列表, 或 `Store.rule_key_counts(*, project_id, since, until, top_n=5)` 直接拿计数 (这俩方法无 REST 端点暴露) |
-| GET | `/metrics/authors` | 按 `author_sticky` 聚合的 MR 活跃度 (没有 author 维度的 suggestion / run 计数) |
+| GET | `/metrics/rules` | 真实规则键维度计数: `Store.rule_key_counts` 拆分 `suggestions.rule_keys` CSV, 按 `count` 降序取 `top_n` (默认 10) |
+| GET | `/metrics/authors` | 作者维度活跃度: `mr_activity.author_sticky` 的 MR 数 (created_at 窗口) + `review_runs.actor_username` 的 run 数 (started_at 窗口), 按 run 数 / MR 数降序 |
 | GET | `/weekly-reports` | 列出 `data/weekly_reports/weekly-*.json`；`project_id` 过滤按 JSON 内容里的 `project_id` 字段；`limit` 默认 20 |
 | GET | `/weekly-reports/{name}` | 读取单个周报 JSON (防 `../` 路径穿越) |
 
@@ -509,8 +509,30 @@ curl http://127.0.0.1:3000/api/v1/telemetry/mrs/34/134/dismissals
 curl http://127.0.0.1:3000/api/v1/telemetry/weekly-reports
 ```
 
-## Reconciler（周期性安全网）
+### 字段级审计（`--tier full`）
 
+功能用例跑完后，全量档追加 6 项 `telemetry:*` 断言（`scripts/e2e/telemetry_audit.py`），
+用真实 GitLab 产物 × DB 直读 × 读接口三方对账：
+
+| 检查 | 断言 |
+|---|---|
+| `telemetry:mr_activity` | `title` 未被 `[no_more_review]` 污染；分支 / state / `created_at`(±2s) 与 GitLab 一致；`author_username` / `author_sticky` 是 MR 作者而非事件操作者；`last_activity_at` 已写 |
+| `telemetry:review_runs` | 每条 run 有 `started_at` / `command` / `triggered_by`，终态有 `finished_at` 且不早于开始；`total_tokens = prompt + completion`；success run 有 `model` / `llm_provider`；note 触发的 run 有 `actor_username`；success improve run 的 `suggestion_count` 覆盖其 `[started, finished)` 窗口内落库的 suggestions，`rule_keys_cited` 包含这些 suggestion 的规则键 |
+| `telemetry:suggestions` | 文件在 MR `/changes` 内、`target_line > 0`、severity 合法、`head_sha` = MR head、`note_id` 能在 GitLab discussions 找到、`severity_source ∈ {rule, llm}`、`score` 为整数、rule 来源必须有 `rule_keys`、`posted_at` / `created_at` 非空；`improved_code` 非空时须原样出现在对应 GitLab note 正文中（防 DB 与发布内容漂移），为空时仅允许"删除整段"形态（`existing_code` 非空且 note 内含 suggestion 块） |
+| `telemetry:actions` | action ∈ {adopted, dismissed}，`actor_username` / `validation_status` / `head_sha_posted` / `created_at` 齐全，`head_sha_posted = suggestion.head_sha`；dismiss 后 suggestion 为 `dismissed` 且镜像 reason；adopt 校验通过 (`ok` / `already-*` / `late-detect-apply`) 时 suggestion 为 `applied`/`resolved`；实际跑过 `/adopt` `/dismiss` 时必须各有一条 |
+| `telemetry:file_state` | 每行有 `blob_sha` / `head_sha`(= MR head) / `profile_fingerprint` / `ruleset_fingerprint` / `reviewed_at`；有 suggestion 的文件都被 `reviewed_file_state` 覆盖 |
+| `telemetry:api_params` | `/runs` `total` 是整表计数不是页大小；`/mrs` 在 `created_at ± 1h` 内命中、在 `+2h..+3h` 不命中（防 `updated_at` 泄漏）；`/dismissals` 的 `total` / `rule_key` / `until`(按最早 `dismissed_at`) / `offset` 全部生效；`/metrics/rules` 键集合等于 DB 规则键；`/metrics/authors` 的 MR/run 汇总等于 DB 计数 |
+
+取数顺序固定为 `settle_runs`（等 running run 收尾）→ DB 快照 → GitLab 期望值 →
+HTTP 读接口。快照先于 HTTP，审计期间后台新增数据不会造成假阴性；settle 超时
+（默认 240s）时计数类断言放宽为"不小于快照"，其余字段断言不变。
+
+纯断言函数 `audit_*` 不触网，单测在 `tests/test_e2e_telemetry_audit.py`（31 例）。
+
+注意：真实 `/adopt` 在目标行未修改时会校验失败（`validation_status=target-unchanged`），
+此时 action 仍记为 `adopted`，但 suggestion 保持 `open` —— 审计按校验结果区分这两种状态。
+
+## Reconciler（周期性安全网）
 GitLab 17.5 偶尔不发 "marked this discussion as resolved" webhook 给 note_events hook。`publish_overview` 顶部 pre-reconcile 已覆盖 "click 后还有 push /adopt /dismiss 等其他事件" 的场景；但 "纯 click-only 无任何后续事件" 的极端场景下没有事件触发 publish_overview，DB 会永远停在 `state='open'`。
 
 两层防御：
@@ -579,7 +601,7 @@ launchctl load ~/Library/LaunchAgents/com.jarvs.reviewagent.reconciler.plist
 | 端点 `/mrs/{...}/timeline` | ✅ | ✅ | 合并 run + suggestion + action |
 | 端点 `/weekly-reports` | ✅ | ✅ | 列表 + 单条读取 |
 | 字段 `cohort_key` | ✅ | ✅ | 内部去重 |
-| 字段 `severity_source` | ✅ | ✅ | 预留写入 |
+| 字段 `severity_source` | ✅ | ✅ | `rule` / `llm`，发布时写入 |
 | Severity 规则文件 (.agents/rules) | ✅ | ✅ | 走 `repo_context` 自动加载 |
 
 ## 周报 (`reviewagent/reporting/`)

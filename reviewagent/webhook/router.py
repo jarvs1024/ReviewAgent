@@ -74,6 +74,25 @@ async def webhook(request: Request) -> dict:
 
 # ---------- MR / Push Hook ----------
 
+def _mr_record_from_api(mr: "MRHookPayload"):
+    """从 GitLab API 取 MR 真实作者 (webhook `user` 是事件操作者).
+
+    merge / update 等事件的 payload user 是 push/merge 的人, 不是 MR 作者;
+    作者信息只能从 API 查. 失败返回 None, 调用方回退 payload 构造的记录.
+    """
+    from reviewagent.gitlab.client import client as gl
+    from reviewagent.telemetry.models import MRRecord
+
+    try:
+        return MRRecord.from_gitlab(gl.get_mr(mr.project_id, mr.mr_iid))
+    except Exception as e:  # noqa: BLE001 — 作者修正失败不阻塞 webhook
+        logger.warning(
+            "webhook.mr_author_lookup failed (non-fatal) project={} mr={}: {}",
+            mr.project_id, mr.mr_iid, e,
+        )
+        return None
+
+
 def _upsert_mr_from_hook(payload: dict, mr: "MRHookPayload") -> None:
     """从 webhook payload 构造 MRRecord 并 upsert 到 SQLite.
 
@@ -100,6 +119,11 @@ def _upsert_mr_from_hook(payload: dict, mr: "MRHookPayload") -> None:
         updated_at=_parse_dt(obj.get("updated_at")),
         merged_at=_parse_dt(obj.get("merged_at")),
     )
+    # open / reopen 的 actor 就是 MR 作者; 其余事件 (update/merge/close) 的
+    # actor 是操作者, 需回查 API 还原真实作者. 作者缺失时同样回查.
+    if mr.action not in ("open", "reopen") or not username:
+        record = _mr_record_from_api(mr) or record
+
     store = get_store()
     store.upsert_mr(record)
     logger.info("webhook.mr_upsert project={} mr={} state={}", mr.project_id, mr.mr_iid, mr.state)
@@ -202,19 +226,11 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
             "webhook.skip max_review_calls project={} mr={} count={} limit={}",
             mr.project_id, mr.mr_iid, current_count, _config.max_review_calls_per_mr,
         )
-        # 一次性发 "no more review" 提示 (用 telemetry 记 flag, 避免重复刷屏)
+        # 一次性发 "no more review" 提示 (用 mr_activity.no_more_review 认领, 避免重复刷屏)
         try:
             from reviewagent.telemetry.store import get_store
             store = get_store()
-            with store._conn() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM mr_activity "
-                    "WHERE project_id=? AND mr_iid=? AND title LIKE '%no_more_review%' "
-                    "LIMIT 1",
-                    (mr.project_id, mr.mr_iid),
-                ).fetchone()
-                already_posted = row is not None
-            if not already_posted:
+            if store.claim_no_more_review_notice(mr.project_id, mr.mr_iid):
                 msg = (
                     f"ℹ️ 本 MR 已达最大检视次数 ({current_count} 次, 上限 "
                     f"{_config.max_review_calls_per_mr}); 后续 push 不再触发自动检视. "
@@ -223,18 +239,12 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
                 # 用直接的 gitlab client (mr 对象没暴露 .gitlab)
                 from reviewagent.gitlab.client import GitLabClient
                 _gl = GitLabClient()
-                _gl.post_mr_comment(mr.project_id, mr.mr_iid, msg)
-                # 在 mr_activity.title 末尾加个标记 (cosmetic)
                 try:
-                    with store._conn() as conn:
-                        conn.execute(
-                            "UPDATE mr_activity SET title = title || ' [no_more_review]' "
-                            "WHERE project_id=? AND mr_iid=? AND title NOT LIKE '%[no_more_review]%'",
-                            (mr.project_id, mr.mr_iid),
-                        )
-                        conn.commit()
+                    _gl.post_mr_comment(mr.project_id, mr.mr_iid, msg)
                 except Exception:
-                    pass
+                    # 发送失败 → 释放认领, 下次 push 再试
+                    store.reset_no_more_review_notice(mr.project_id, mr.mr_iid)
+                    raise
                 logger.info(
                     "webhook.no_more_review_notice posted project={} mr={}",
                     mr.project_id, mr.mr_iid,

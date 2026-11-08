@@ -317,7 +317,7 @@ def test_adopt_skipped_state_applied_replies_and_audits(tmp_telemetry):
     # 3. 用户的 reason 写进 audit
     conn = sqlite3.connect(tmp_telemetry)
     rows = conn.execute(
-        "SELECT actor_username, action, reason, validation_status "
+        "SELECT actor_username, action, reason, validation_status, head_sha_posted "
         "FROM suggestion_actions "
         "WHERE suggestion_note_id='already-applied-1' AND validation_status='already-applied'"
     ).fetchall()
@@ -326,6 +326,7 @@ def test_adopt_skipped_state_applied_replies_and_audits(tmp_telemetry):
     assert rows[0][0] == "root"
     assert rows[0][1] == "adopted"
     assert rows[0][2] == "fix"
+    assert rows[0][4] == head_sha
     # 4. enqueue_improve 被调用
     assert mock_enqueue.called
 

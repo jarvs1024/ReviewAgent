@@ -478,11 +478,16 @@ class ImproveCommand(BaseCommand):
         try:
             from reviewagent.telemetry.store import get_store
             _store = get_store()
+            profile, rule_set, _policy = self._lazy_deps()
+            profile_fp = getattr(profile, "fingerprint", "") or None
+            ruleset_fp = getattr(rule_set, "fingerprint", "") or None
             for fp in files:
                 _store.upsert_file_review_state(
                     project_id=self.project_id, mr_iid=self.mr_iid,
                     file_path=fp, blob_sha=self._file_blob_sha(fp, ws),
                     head_sha=head_sha, suggestion_count=per_file_counts.get(fp, 0),
+                    profile_fingerprint=profile_fp,
+                    ruleset_fingerprint=ruleset_fp,
                 )
         except Exception as e:
             logger.warning("improve.upsert_file_state_failed (non-fatal): {}", e)
@@ -1168,6 +1173,7 @@ class ImproveCommand(BaseCommand):
             diff_line_map=self._diff_line_map,
             head_sha=self._get_mr_head_sha,
             normalise=self._normalise_suggestion,
+            score=self._score_suggestion,
             validate=self._validate_suggestion,
             detect_apply_risk=self._detect_apply_risk,
             build_summary_placeholder=self._build_summary_placeholder,

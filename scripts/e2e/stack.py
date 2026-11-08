@@ -275,6 +275,10 @@ def make_merge_request_payload(
             "target_branch": mr["target_branch"],
             "state": "opened",
             "action": action,
+            # 真实 webhook 带这三个时间戳; 缺失会让 mr_activity.created_at 落 NULL.
+            "created_at": mr.get("created_at"),
+            "updated_at": mr.get("updated_at"),
+            "merged_at": mr.get("merged_at"),
             "last_commit": {"id": mr["sha"]},
             "diff_refs": {
                 "head_sha": mr["sha"],

@@ -325,6 +325,34 @@ def test_profile_scenario_isolation_across_data_dirs(tmp_path, profile):
         verify_job(tampered)
 
 
+def test_improve_upsert_file_states_forwards_fingerprints(monkeypatch):
+    """improve 收尾写 reviewed_file_state 时必须带 profile/规则集指纹.
+
+    漏写会让下一轮 `plan()` 把"指纹为 NULL 的旧行"当作不可复用, 且审计无法判断
+    该文件是哪套场景包检视过的.
+    """
+    from reviewagent.commands.improve import ImproveCommand
+
+    calls: list[dict] = []
+
+    class _Store:
+        def upsert_file_review_state(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: _Store())
+    monkeypatch.setattr(ImproveCommand, "_file_blob_sha", lambda self, fp, ws: "blob-x")
+
+    cmd = ImproveCommand(project_id=34, mr_iid=7)
+    cmd._upsert_file_review_states(["pkg/a.py"], SimpleNamespace(worktree="/tmp"), "head-1", {})
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["profile_fingerprint"]
+    assert call["ruleset_fingerprint"]
+    assert call["head_sha"] == "head-1"
+    assert call["suggestion_count"] == 0
+
+
 def test_get_store_follows_current_data_dir(tmp_path, monkeypatch):
     """`get_store()` 单例必须读当前 data_dir 的 telemetry.db — 换目录后不串数据.
 

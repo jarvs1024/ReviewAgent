@@ -191,6 +191,7 @@ async def test_update_does_not_supersede_unapplied_open_suggestions(monkeypatch)
     fake_locks.should_skip_max_review_calls.return_value = (False, 0)
     fake_locks.should_skip_cooldown.return_value = True
     monkeypatch.setattr(router, "locks", fake_locks)
+    monkeypatch.setattr(router, "_mr_record_from_api", lambda mr: None)
 
     store = MagicMock()
     monkeypatch.setattr("reviewagent.telemetry.store.get_store", lambda: store)
