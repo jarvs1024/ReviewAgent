@@ -70,7 +70,9 @@ bash scripts/restart_local.sh
 * `instance.env` 会被 systemd `EnvironmentFile` 和 shell `source` 同时读取，
   因此**注释必须单独成行**，不要写行尾 `#`（systemd 不会剥离行尾注释）。
 * 含空格的值必须加双引号，例如 `REVIEWAGENT_WEEKLY_CRON_SCHEDULE="Mon 09:00"`。
-* `review.yaml` 只允许 `file_filter` / `scoring` / `limits` / `context` 四组；
+* `review.yaml` 只允许 `file_filter` / `scoring` / `limits` / `context` /
+  `repo_context` / `reporting` 六组（`reporting` 仅开放展示/扫描类键：
+  `weekly_title`、`repo_scan_extensions`、`repo_scan_entry_files`）；
   写错组名或字段名会启动失败（fail-fast），避免"改了没生效"。
 * 密钥只放 `instance.env`；`review.yaml` 会入库，禁止写入 token / webhook。
 * 本目录默认取 `profiles/` 的同级目录；整个目录搬到别处时才需要

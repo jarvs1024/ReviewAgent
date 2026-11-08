@@ -1,6 +1,6 @@
 # 场景调参：ssd-python-autotest（叠加在 profiles/ssd-python-autotest 之上）
 #
-# 只允许四组：file_filter / scoring / limits / context。
+# 只允许六组：file_filter / scoring / limits / context / repo_context / reporting。
 # 只写"与场景包默认不同"的值；不写的键沿用 profile.yaml / preset。
 # 本文件会入库，禁止写入 token / webhook 等密钥（密钥只放 config/instance.env）。
 #

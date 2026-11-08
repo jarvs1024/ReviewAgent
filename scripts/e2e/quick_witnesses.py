@@ -409,7 +409,12 @@ def check_test_feature_keywords(cfg: Any) -> str:
 
 @witness("plan_filters")
 def check_plan_filters(cfg: Any) -> str:
-    base = _cfg(cfg, improve_review_mode="business", improve_test_sample_paths=())
+    base = _cfg(
+        cfg,
+        improve_review_mode="business",
+        improve_test_sample_paths=(),
+        improve_skip_test_paths=("tests/", "/tests/", "test_", "_test.", ".test.", "conftest.py"),
+    )
     excluded = _plan(base, ["pkg/app.py", "docs/readme.md"])
     assert excluded.files == ("pkg/app.py",), excluded.files
     flipped = _plan(_cfg(base, review_exclude_extensions=(".py",)), ["pkg/app.py", "docs/readme.md"])

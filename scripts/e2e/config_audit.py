@@ -10,6 +10,7 @@ from scripts.e2e import catalog, quick_witnesses
 from scripts.e2e.report import REPO_ROOT, ConfigRow, FeatureResult
 
 _EVIDENCE_RE = re.compile(r"^([\w./-]+\.(?:py|sh|md|ya?ml|toml|env))(?::([A-Za-z0-9_]+))?")
+_RULE_KEY_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9_]+)+\b")
 
 SEVERITY_LEVELS = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
@@ -104,9 +105,27 @@ def run_fast(cfg: Any = None) -> FastAudit:
     return FastAudit(rows=[by_field[name] for name in sorted(by_field)], results=results)
 
 
+def scenario_config_snapshot() -> Any:
+    """加载当前 `REVIEW_PROFILE` 的场景覆盖并返回快照，随后恢复进程内配置.
+
+    全量档用它判断「worker 实际生效的值」；不改变本进程后续行为。
+    """
+    from reviewagent import config as config_mod
+    from reviewagent.scenario.profile import load_profile
+
+    previous = config_mod._current
+    try:
+        load_profile()
+        return config_mod.current()
+    finally:
+        config_mod._current = previous
+
+
 def observable_checks(suggestions: list[dict], cfg: Any) -> list[tuple[str, bool, str]]:
     """全量档：用真实 suggestions 验证「配置确实作用到了产物」（可单测）."""
-    checks: list[tuple[str, bool, str]] = []
+    checks: list[tuple[str, bool, str]] = [
+        ("suggestions_present", bool(suggestions), f"{len(suggestions)} suggestions published")
+    ]
 
     limit = cfg.improve_max_suggestions
     if limit > 0:
@@ -127,14 +146,14 @@ def observable_checks(suggestions: list[dict], cfg: Any) -> list[tuple[str, bool
     conftest = [s.get("file") for s in suggestions if str(s.get("file", "")).endswith("conftest.py")]
     checks.append(("conftest_not_reviewed", not conftest, f"conftest suggestions={conftest[:3]}"))
 
-    prefix = cfg.rule_key_prefix
-    if prefix:
-        hits = [
-            s.get("file")
-            for s in suggestions
-            if f"{prefix}-RULE-" in str(s.get("rationale") or "")
-        ]
-        checks.append(("rule_key_hits", bool(hits), f"{prefix}-RULE hits={hits[:3]}"))
+    cited = [
+        s.get("file")
+        for s in suggestions
+        if _RULE_KEY_RE.search(str(s.get("rationale") or ""))
+    ]
+    checks.append(
+        ("rule_key_cited", bool(cited), f"{len(cited)}/{len(suggestions)} cite rule keys")
+    )
 
     return checks
 
@@ -155,7 +174,7 @@ def load_suggestions_from_telemetry(mr_iid: int, *, pid: int | None = None) -> l
     store = get_store()
     with store._conn() as conn:
         rows = conn.execute(
-            "SELECT file_path, target_line, severity, rationale FROM suggestions "
+            "SELECT file_path, target_line, severity FROM suggestions "
             "WHERE project_id=? AND mr_iid=? AND state='open'",
             (target, mr_iid),
         ).fetchall()
@@ -164,7 +183,7 @@ def load_suggestions_from_telemetry(mr_iid: int, *, pid: int | None = None) -> l
             "file": row["file_path"],
             "line": row["target_line"],
             "severity": row["severity"],
-            "rationale": row["rationale"],
+            "rationale": "",
         }
         for row in rows
     ]

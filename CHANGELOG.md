@@ -33,6 +33,12 @@
   `tests/runtime/test_ops_drill.py` 覆盖备份恢复往返与孤儿 run 清扫。
 - 实例配置模板迁到 `config/examples/instance.env.example`（原 `.env.example` 移除），
   其余字段指向 `docs/CONFIG.md`。
+- **统一端到端验证**：`scripts/e2e/run_e2e.py` 提供两档验证——`--tier fast` 在进程内
+  跑完整配置生效性审计（92 个 schema 字段逐条 witness + 18 组行为 delta，无需外部
+  服务），`--tier full` 用临时 GitLab 项目/分支/MR 跑 describe、improve、自动链、
+  adopt/dismiss、UI Apply 识别、Telemetry API、周报共 8 个功能，并用真实 suggestions
+  断言限额/严重度/规则键等配置确实作用到产物。报告落在 `logs/e2e/report-*.json`；
+  `verify_e2e.py` 保留为全量档兼容入口。
 
 ### Changed
 
@@ -45,9 +51,16 @@
   `ExecStartPre=... reviewagent config check`。
 - 日志与运维文档的事件名以代码为准：`chain.lock_timeout`、`improve.record_suggestion failed`。
 - 非法配置值改为启动即失败（`config check` / binder 校验），不再静默回退默认值。
+- `review.yaml` 支持嵌套键校验，并开放 `repo_context` 与 `reporting`（仅
+  `weekly_title` / `repo_scan_*` 展示类键）两组；env 压过 `review.yaml` 时记录
+  `config.env_shadowed` 告警。
 
 ### Fixed
 
+- 三个"改了不生效"的配置接线：`REVIEWAGENT_WEEKLY_TIMEZONE` 现在真正参与周报周边界
+  计算（非法 IANA 名启动失败）、`REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 由
+  `services_ops.sh` 渲染为 systemd timer drop-in、`review_config_dir` 的 Config 值
+  （非仅 env）也参与用户配置目录解析。
 - worktree 路径增加每次运行唯一的后缀，并在创建前清理超过 6 小时的孤儿目录；
   链锁丢失导致同一 MR/SHA 的并发链不再互相删除工作区（表现为 `worktree 不存在`
   与 `output not JSON` 的 describe 失败）。

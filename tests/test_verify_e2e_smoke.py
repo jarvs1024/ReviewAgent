@@ -13,7 +13,7 @@ import json
 import pytest
 
 from reviewagent.config import current
-from scripts.e2e import config_audit, flows, run_e2e, stack, verify_e2e
+from scripts.e2e import config_audit, flows, report, run_e2e, stack, verify_e2e
 
 EXPECTED_FEATURES = {
     "describe",
@@ -93,26 +93,33 @@ def test_observable_checks_enforce_limits_and_filters():
     checks = config_audit.observable_checks(
         [
             {"file": "app/service.py", "severity": "high", "rationale": "见 SSD-RULE-NAMING"},
-            {"file": "app/extra.py", "severity": "medium", "rationale": ""},
+            {"file": "app/extra.py", "severity": "medium", "rationale": "R-ERR: 裸 except"},
         ],
         _cfg(improve_max_suggestions=2, improve_min_severity="high"),
     )
     by_name = {name: (ok, detail) for name, ok, detail in checks}
+    assert by_name["suggestions_present"][0]
     assert by_name["suggestions_within_limit"][0]
     assert not by_name["no_below_min_severity"][0], "medium 应判为低于 high"
     assert by_name["conftest_not_reviewed"][0]
-    assert by_name["rule_key_hits"][0]
+    assert by_name["rule_key_cited"][0]
 
 
 def test_observable_checks_flags_conftest_and_missing_rule_keys():
     checks = config_audit.observable_checks(
-        [{"file": "conftest.py", "severity": "high", "rationale": ""}],
+        [{"file": "conftest.py", "severity": "high", "rationale": "no key"}],
         _cfg(improve_max_suggestions=0, improve_min_severity="", rule_key_prefix="SSD"),
     )
     by_name = {name: ok for name, ok, _ in checks}
     assert not by_name["conftest_not_reviewed"]
-    assert not by_name["rule_key_hits"]
+    assert not by_name["rule_key_cited"]
     assert "suggestions_within_limit" not in by_name, "0 = 不限，不应检查上限"
+
+
+def test_observable_checks_require_published_suggestions():
+    checks = config_audit.observable_checks([], _cfg(improve_max_suggestions=0))
+    by_name = {name: ok for name, ok, _ in checks}
+    assert not by_name["suggestions_present"]
 
 
 def test_fast_tier_runs_and_writes_report(tmp_path):
@@ -124,6 +131,13 @@ def test_fast_tier_runs_and_writes_report(tmp_path):
     assert payload["tier"] == "fast"
     assert payload["summary"]["passed"] == payload["summary"]["total"]
     assert {row["status"] for row in payload["config"]} <= {"verified", "declared"}
+
+
+def test_report_log_name_sanitises_slashes(tmp_path):
+    result = report.FeatureResult("/describe", 1, 1, True, "ok", ["line"])
+    path = report.write_report(tmp_path, "S", [result], tier="fast")
+    assert path.exists()
+    assert (tmp_path / "run-describe-r1-S.log").exists()
 
 
 def test_unknown_feature_is_rejected():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,11 @@ def default_logdir() -> Path:
     return REPO_ROOT / "logs" / "e2e"
 
 
+def _slug(name: str) -> str:
+    """feature 名可能带 `/`（`/describe`），落文件名时统一换成 `-`."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "feature"
+
+
 def print_result(result: FeatureResult) -> None:
     marker = "✅" if result.passed else "❌"
     print(
@@ -69,7 +75,7 @@ def write_report(
     """写 `report-<stamp>.json` + 每个 feature 的明细日志；返回报告路径."""
     logdir.mkdir(parents=True, exist_ok=True)
     for result in results:
-        log_path = logdir / f"run-{result.feature}-r{result.round}-{stamp}.log"
+        log_path = logdir / f"run-{_slug(result.feature)}-r{result.round}-{stamp}.log"
         log_path.write_text("\n".join(result.log), encoding="utf-8")
 
     passed, total = summarize(results)

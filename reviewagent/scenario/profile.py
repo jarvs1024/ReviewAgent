@@ -6,7 +6,8 @@
   `profiles/_presets/<name>.yaml`；preset 不得再 `extends`（只允许一级继承）；
 * 用户可改的场景值放在 `<config>/profiles/<name>/review.yaml`，叠加在
   profile.yaml 之上（config > profile > preset > schema 默认），只允许
-  `file_filter` / `scoring` / `limits` / `context` 四组；
+  `file_filter` / `scoring` / `limits` / `context` / `repo_context` / `reporting`
+  六组（`reporting` 仅展示/扫描类键）；
 * 未知字段 / 未知 preset / 多级继承 / 非法 `extends` 名称一律启动失败；
 * profile 中的场景字段通过 `config.apply_scenario()` 应用到运行时配置；
   显式 env 仍然优先（§5.4：env 只覆盖运行配置，不污染 profile 数据）；

@@ -21,28 +21,50 @@ from scripts.e2e.stack import (
 # ---------------------------------------------------------------------------
 
 
-def find_open_suggestion(mr_iid: int, log: list[str], *, pid: int | None = None) -> dict | None:
-    """找一个 open suggestion（优先指定 MR，其次同项目任意 MR）."""
+def find_open_suggestion(
+    mr_iid: int, log: list[str], *, pid: int | None = None, timeout_s: int = 120
+) -> dict | None:
+    """找一个 open suggestion（优先指定 MR，其次同项目任意 MR）.
+
+    suggestion 是 improve 收尾阶段异步落库的，紧随其后跑 adopt/dismiss 可能还看不到；
+    这里短轮询等它出现，超时才判负。
+    """
     from reviewagent.telemetry.store import get_store
 
     target = pid if pid is not None else project_id()
     store = get_store()
-    with store._conn() as conn:
-        row = conn.execute(
-            "SELECT project_id, mr_iid, note_id, file_path, target_line, head_sha "
-            "FROM suggestions WHERE project_id=? AND mr_iid=? AND state='open' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (target, mr_iid),
-        ).fetchone()
-        if not row:
+    deadline = time.time() + timeout_s
+    row = None
+    while time.time() < deadline:
+        with store._conn() as conn:
+            # 已有 action 的 note 不能再选：adopt 落库到 state 翻转之间有几秒窗口，
+            # 不排除的话 dismiss 会挑到同一条 suggestion。
             row = conn.execute(
-                "SELECT project_id, mr_iid, note_id, file_path, target_line, head_sha "
-                "FROM suggestions WHERE project_id=? AND state='open' "
-                "ORDER BY created_at DESC LIMIT 1",
-                (target,),
+                "SELECT s.project_id, s.mr_iid, s.note_id, s.file_path, s.target_line, s.head_sha "
+                "FROM suggestions s WHERE s.project_id=? AND s.mr_iid=? AND s.state='open' "
+                "AND NOT EXISTS (SELECT 1 FROM suggestion_actions a "
+                "  WHERE a.project_id=s.project_id AND a.mr_iid=s.mr_iid "
+                "    AND a.suggestion_note_id=s.note_id) "
+                "ORDER BY s.created_at DESC LIMIT 1",
+                (target, mr_iid),
             ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT s.project_id, s.mr_iid, s.note_id, s.file_path, s.target_line, s.head_sha "
+                    "FROM suggestions s WHERE s.project_id=? AND s.state='open' "
+                    "AND NOT EXISTS (SELECT 1 FROM suggestion_actions a "
+                    "  WHERE a.project_id=s.project_id AND a.mr_iid=s.mr_iid "
+                    "    AND a.suggestion_note_id=s.note_id) "
+                    "ORDER BY s.created_at DESC LIMIT 1",
+                    (target,),
+                ).fetchone()
+        if row:
+            break
+        time.sleep(3)
     if not row:
-        log.append(f"[{now_iso()}] WARN: no open suggestion anywhere in telemetry")
+        log.append(
+            f"[{now_iso()}] WARN: no open suggestion in telemetry after {timeout_s}s"
+        )
         return None
     suggestion = dict(row)
     log.append(
@@ -199,6 +221,24 @@ def open_merge_request(pid: int, source: str, target: str, title: str, log: list
     return mr_iid
 
 
+def wait_for_mr_diff(pid: int, mr_iid: int, log: list[str], *, timeout_s: int = 120) -> bool:
+    """等 GitLab 算出 MR diff.
+
+    刚创建的 MR，`/changes` 可能短暂返回空列表；此时发命令会得到
+    「MR has no diff (empty or binary-only)」，因此夹具先就绪再继续。
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        data = gitlab_request("GET", f"/projects/{pid}/merge_requests/{mr_iid}/changes")
+        changes = data.get("changes") if isinstance(data, dict) else None
+        if changes:
+            log.append(f"[{now_iso()}] MR !{mr_iid} diff ready ({len(changes)} files)")
+            return True
+        time.sleep(2)
+    log.append(f"[{now_iso()}] WARN: MR !{mr_iid} diff still empty after {timeout_s}s")
+    return False
+
+
 def delete_project(pid: int, log: list[str]) -> None:
     gitlab_request("DELETE", f"/projects/{pid}")
     log.append(f"[{now_iso()}] deleted project {pid}")
@@ -225,6 +265,21 @@ def register_webhook(pid: int, url: str, secret: str, log: list[str]) -> int:
 def project_webhooks(pid: int) -> list[dict[str, Any]]:
     data = gitlab_request("GET", f"/projects/{pid}/hooks")
     return list(data) if isinstance(data, list) else []
+
+
+def mr_discussion_bodies(pid: int, mr_iid: int) -> list[str]:
+    """取 MR 行内评论正文（DiffNote），用于验证规则键确实发布到了 GitLab."""
+    discussions = gitlab_request(
+        "GET", f"/projects/{pid}/merge_requests/{mr_iid}/discussions?per_page=100"
+    )
+    bodies: list[str] = []
+    for discussion in discussions if isinstance(discussions, list) else []:
+        for note in discussion.get("notes", []):
+            if note.get("system"):
+                continue
+            if note.get("type") == "DiffNote" or note.get("position"):
+                bodies.append(str(note.get("body") or ""))
+    return bodies
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +364,7 @@ def create_review_fixture(round_idx: int, log: list[str], *, suffix: str = "") -
     create_branch(pid, source, "main", log)
     commit_files(pid, source, _CHANGE_FILES, "e2e: change", log)
     merge_request = open_merge_request(pid, source, "main", f"E2E 真实变更 r{round_idx}", log)
+    wait_for_mr_diff(pid, merge_request, log)
     return GitlabFixture(
         project_id=pid,
         source_branch=source,

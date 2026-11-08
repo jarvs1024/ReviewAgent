@@ -68,8 +68,17 @@ def run_chain_open(mr_iid: int, round_idx: int, log: list[str]) -> FeatureResult
         return FeatureResult(
             "auto_chain", round_idx, mr_iid, False, f"webhook status={status} body={body}", log
         )
+    queued = body.get("commands") or []
+    # describe + improve 是两个独立 job：只等「有一个 run 结束」会提前返回，
+    # 后续 adopt/dismiss 就赶在 improve 发评论之前跑，找不到 suggestion。
+    expected = max(1, len(queued) if isinstance(queued, list) else 1)
     res = stack.wait_for_new_run(
-        mr_iid, before, expect_status="terminal", expected_min_increase=1, timeout_s=600, log=log
+        mr_iid,
+        before,
+        expect_status="terminal",
+        expected_min_increase=expected,
+        timeout_s=600,
+        log=log,
     )
     if not res.get("ok"):
         return FeatureResult("auto_chain", round_idx, mr_iid, False, f"timeout waits; {res}", log)

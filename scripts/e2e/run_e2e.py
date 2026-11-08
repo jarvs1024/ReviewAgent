@@ -61,7 +61,19 @@ def _preflight_ok(preflight: list[tuple[str, bool, str]]) -> bool:
 
 
 def _run_fast(logdir: Path, stamp: str) -> int:
-    audit = config_audit.run_fast()
+    """快速档：按当前 `REVIEW_PROFILE` 的生效值跑 witness，不依赖外部服务."""
+    try:
+        cfg = config_audit.scenario_config_snapshot()
+    except Exception as exc:  # noqa: BLE001 - 场景包错误要在报告里可见
+        result = report.FeatureResult(
+            "config:scenario_snapshot", 1, 0, False, f"{type(exc).__name__}: {exc}", []
+        )
+        report.print_result(result)
+        path = report.write_report(logdir, stamp, [result], tier="fast")
+        print(f"\n=== DONE tier=fast: scenario config failed. report={path}")
+        return 1
+
+    audit = config_audit.run_fast(cfg)
     for result in audit.results:
         report.print_result(result)
     path = report.write_report(
@@ -71,6 +83,27 @@ def _run_fast(logdir: Path, stamp: str) -> int:
     print(f"  config witness: {config_audit.write_config_summary(audit.rows)}")
     print(f"\n=== DONE tier=fast: {passed}/{total} witnesses passed. report={path}")
     return 0 if audit.ok else 1
+
+
+def _config_observations(
+    mr_iid: int, round_idx: int, cfg: object, pid: int
+) -> list[report.FeatureResult]:
+    """用该轮真实 suggestions 断言配置确实作用到了产物."""
+    suggestions = config_audit.load_suggestions_from_telemetry(mr_iid, pid=pid)
+    bodies = fixtures.mr_discussion_bodies(pid, mr_iid)
+    published = "\n".join(bodies)
+    for suggestion in suggestions:
+        suggestion["rationale"] = published
+    log = [
+        f"[{stack.now_iso()}] observable config checks pid={pid} mr={mr_iid} "
+        f"suggestions={len(suggestions)} diff_notes={len(bodies)}"
+    ]
+    results: list[report.FeatureResult] = []
+    for name, ok, detail in config_audit.observable_checks(suggestions, cfg):
+        result = report.FeatureResult(f"config:{name}", round_idx, mr_iid, ok, detail, log)
+        report.print_result(result)
+        results.append(result)
+    return results
 
 
 def _round_mrs(args: argparse.Namespace, stamp: str) -> tuple[list[int], list[fixtures.GitlabFixture]]:
@@ -110,6 +143,19 @@ def _run_full(args: argparse.Namespace, logdir: Path, stamp: str) -> int:
         print(f"\n=== DONE tier=full: config witness failed. report={path}")
         return 1
 
+    try:
+        effective_cfg = config_audit.scenario_config_snapshot()
+    except Exception as exc:  # noqa: BLE001 - 场景包错误要在报告里可见
+        result = report.FeatureResult(
+            "config:scenario_snapshot", 1, 0, False, f"{type(exc).__name__}: {exc}", []
+        )
+        report.print_result(result)
+        path = report.write_report(
+            logdir, stamp, [result], tier="full", config_rows=audit.rows, preflight=preflight
+        )
+        print(f"\n=== DONE tier=full: scenario config failed. report={path}")
+        return 1
+
     features = _parse_features(args.only)
     try:
         mrs, created = _round_mrs(args, stamp)
@@ -141,6 +187,9 @@ def _run_full(args: argparse.Namespace, logdir: Path, stamp: str) -> int:
                     )
                 report.print_result(result)
                 results.append(result)
+            pid = fixture.project_id if fixture is not None else stack.project_id()
+            if {"improve", "auto_chain"} & set(features):
+                results.extend(_config_observations(mr_iid, round_idx, effective_cfg, pid))
     finally:
         if original_pid is None:
             os.environ.pop("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", None)

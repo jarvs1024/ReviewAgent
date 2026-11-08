@@ -303,6 +303,20 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 > `config/profiles/<name>/review.yaml` 里调整，环境变量只作临时调试；
 > 实例平面字段放 `config/instance.env`。完整说明见 [`config/README.md`](config/README.md)。
 
+## 端到端验证
+
+```bash
+# 快速档：进程内跑完整配置生效性审计（92 字段 witness + 18 组行为 delta），无需外部服务
+.venv/bin/python scripts/e2e/run_e2e.py --tier fast
+
+# 全量档：临时 GitLab 项目/分支/MR + 真实 LLM/队列，跑 8 个功能并按真实产物校验配置
+.venv/bin/python scripts/e2e/run_e2e.py --tier full --round 1
+```
+
+两档共用同一份 witness 目录（`scripts/e2e/catalog.py`），报告写到
+`logs/e2e/report-<时间戳>.json`；`--only describe,improve` 可只跑部分功能，
+`--keep` 保留临时 GitLab 项目，`scripts/e2e/verify_e2e.py` 是全量档兼容入口。
+
 ---
 
 ## 当前状态与路线图
