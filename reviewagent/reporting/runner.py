@@ -16,9 +16,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from reviewagent.logging_setup import logger
 
@@ -36,9 +37,19 @@ from .notifiers.dingtalk import DingTalkNotifier
 from .renderer import render_markdown, split_markdown
 
 
+def _resolve_tz(name: str) -> tzinfo:
+    """把 `REVIEWAGENT_WEEKLY_TIMEZONE` 解析成 tzinfo；非法值直接失败."""
+    try:
+        return ZoneInfo(name)
+    except (ValueError, OSError, ZoneInfoNotFoundError) as exc:
+        raise ValueError(
+            f"invalid weekly timezone {name!r}: use an IANA name like Asia/Shanghai"
+        ) from exc
+
+
 def _week_bounds(
     now: datetime | None = None,
-    tz: timezone | None = None,
+    tz: tzinfo | None = None,
     week_offset: int = 0,
 ) -> tuple[datetime, datetime]:
     """算本周 (或 N 周前) 的 (week_start, week_end).
@@ -49,6 +60,8 @@ def _week_bounds(
         # 默认 Asia/Shanghai (UTC+8)
         tz = tz or timezone(timedelta(hours=8))
         now = datetime.now(tz)
+    elif tz is not None and now.tzinfo is not None:
+        now = now.astimezone(tz)
     if now.tzinfo is None:
         now = now.replace(tzinfo=tz)
     monday = now - timedelta(days=now.weekday())
@@ -154,7 +167,7 @@ def run_weekly_job(
         )
         output_dir = _main_config.weekly_reports_dir
 
-    tz = timezone(timedelta(hours=8))  # Asia/Shanghai
+    tz = _resolve_tz(cfg.timezone)
     week_start, week_end = _week_bounds(now=now, tz=tz, week_offset=week_offset)
 
     logger.info(

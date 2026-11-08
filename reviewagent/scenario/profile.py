@@ -42,8 +42,102 @@ _ALLOWED_PROFILE_KEYS = {
     "repo_context", "capabilities", "security", "file_filter", "scoring", "reporting",
     "limits", "context",
 }
-# 用户配置只开放"按场景调参"的四组；身份 / 规则 / 提示词仍由场景包作者维护。
-_ALLOWED_REVIEW_CONFIG_KEYS = {"schema_version", "file_filter", "scoring", "limits", "context"}
+# 用户配置只开放"按场景调参"的组；身份 / 规则 / 提示词仍由场景包作者维护。
+_ALLOWED_REVIEW_CONFIG_KEYS = {
+    "schema_version", "file_filter", "scoring", "limits", "context",
+    "repo_context", "reporting",
+}
+# `reporting.actions_file` 是场景包内的代码路径引用，开放给用户会造成越界读取，
+# 因此只开放展示/扫描类键。
+_REPORTING_USER_KEYS = frozenset({"weekly_title", "repo_scan_extensions", "repo_scan_entry_files"})
+
+_SCENARIO_MAPPING: dict[tuple[str, ...], str] = {
+    ("file_filter", "exclude_extensions"): "review_exclude_extensions",
+    ("file_filter", "skip_paths"): "improve_skip_test_paths",
+    ("file_filter", "priority_paths"): "improve_keyword_paths",
+    ("scoring", "feature_keywords"): "improve_test_feature_keywords",
+    ("scoring", "review_mode"): "improve_review_mode",
+    ("scoring", "test_sample_paths"): "improve_test_sample_paths",
+    ("scoring", "test_sample_max"): "improve_test_sample_max",
+    ("scoring", "min_score"): "improve_min_score",
+    ("scoring", "min_severity"): "improve_min_severity",
+    ("context", "partial_context_lines"): "improve_partial_context_lines",
+    ("context", "patch_context_lines"): "improve_patch_context_lines",
+    ("limits", "max_suggestions"): "improve_max_suggestions",
+    ("limits", "max_suggestions_per_file"): "improve_max_suggestions_per_file",
+    ("limits", "min_suggestions_per_file"): "improve_min_suggestions_per_file",
+    ("limits", "max_files_to_review"): "improve_max_files_to_review",
+    ("limits", "max_diff_chars"): "max_diff_chars",
+    ("limits", "opencode_max_diff_chars"): "opencode_max_diff_chars",
+    ("limits", "full_files"): "improve_full_files",
+    ("limits", "full_source_max_bytes"): "improve_full_source_max_bytes",
+    ("limits", "new_file_full"): "improve_new_file_full",
+    ("limits", "parallel_workers"): "improve_parallel_workers",
+    ("limits", "clip_diff_lines"): "improve_clip_diff_lines",
+    ("limits", "batch", "enabled"): "improve_batch_enabled",
+    ("limits", "batch", "max_diff_lines"): "improve_batch_max_diff_lines",
+    ("limits", "batch", "max_files"): "improve_batch_max_files",
+    ("limits", "batch", "max_total_lines"): "improve_batch_max_total_lines",
+    ("repo_context", "files"): "repo_context_files",
+    ("repo_context", "rules_dir"): "repo_context_rules_dir",
+    ("repo_context", "max_lines"): "repo_context_max_lines",
+    ("rule_keys", "repo_prefix"): "rule_key_prefix",
+}
+for _weight in ("diff", "keyword", "density", "test_feature"):
+    _SCENARIO_MAPPING[("scoring", "priority_weights", _weight)] = f"improve_priority_weight_{_weight}"
+
+
+def _review_config_whitelist() -> dict[str, dict[str, frozenset[str] | None]]:
+    """从映射表派生 review.yaml 的嵌套白名单（leaf -> 子键集合 / None）."""
+    allowed: dict[str, dict[str, frozenset[str] | None]] = {}
+    for path in _SCENARIO_MAPPING:
+        group, rest = path[0], path[1:]
+        if group not in _ALLOWED_REVIEW_CONFIG_KEYS:
+            continue
+        bucket = allowed.setdefault(group, {})
+        if len(rest) == 1:
+            bucket.setdefault(rest[0], None)
+        else:
+            nested = bucket.get(rest[0])
+            merged = set(nested or ())
+            merged.add(rest[1])
+            bucket[rest[0]] = frozenset(merged)
+    allowed["reporting"] = {key: None for key in _REPORTING_USER_KEYS}
+    return allowed
+
+
+_REVIEW_CONFIG_WHITELIST = _review_config_whitelist()
+
+
+def _validate_review_config(data: dict[str, Any], path: Path) -> None:
+    """顶层分组 + 嵌套键 + 分组类型全部校验（拼错必须启动失败）."""
+    unknown = set(data) - _ALLOWED_REVIEW_CONFIG_KEYS
+    if unknown:
+        raise ValueError(f"unknown review config fields: {sorted(unknown)} ({path})")
+    for group, value in data.items():
+        if group == "schema_version" or value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ValueError(f"review config group {group!r} must be a mapping ({path})")
+        allowed = _REVIEW_CONFIG_WHITELIST.get(group, {})
+        bad: list[str] = []
+        for key, sub in value.items():
+            if key not in allowed:
+                bad.append(f"{group}.{key}")
+                continue
+            nested = allowed[key]
+            if nested is None:
+                continue
+            if not isinstance(sub, dict):
+                raise ValueError(
+                    f"review config group {group}.{key} must be a mapping ({path})"
+                )
+            bad.extend(f"{group}.{key}.{name}" for name in set(sub) - nested)
+        if bad:
+            raise ValueError(
+                f"unknown review config fields: {sorted(bad)} ({path}); "
+                f"allowed={sorted(_REVIEW_CONFIG_WHITELIST.get(group, {}))}"
+            )
 
 
 @dataclass(frozen=True)
@@ -104,6 +198,11 @@ def _resolve_config_dir(profile_root: Path) -> Path:
     override = spec_env_override(SCHEMA_BY_NAME["review_config_dir"])
     if override is not UNSET:
         return Path(override).expanduser().resolve()
+    from reviewagent.config import current
+
+    configured = current().review_config_dir
+    if configured:
+        return Path(configured).expanduser().resolve()
     return (profile_root.parent / "config").resolve()
 
 
@@ -153,40 +252,7 @@ def _apply_config(
     sources: dict[str, str],
     config_raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    mapping = {
-        ("file_filter", "exclude_extensions"): "review_exclude_extensions",
-        ("file_filter", "skip_paths"): "improve_skip_test_paths",
-        ("file_filter", "priority_paths"): "improve_keyword_paths",
-        ("scoring", "feature_keywords"): "improve_test_feature_keywords",
-        ("scoring", "review_mode"): "improve_review_mode",
-        ("scoring", "test_sample_paths"): "improve_test_sample_paths",
-        ("scoring", "test_sample_max"): "improve_test_sample_max",
-        ("scoring", "min_score"): "improve_min_score",
-        ("scoring", "min_severity"): "improve_min_severity",
-        ("context", "partial_context_lines"): "improve_partial_context_lines",
-        ("context", "patch_context_lines"): "improve_patch_context_lines",
-        ("limits", "max_suggestions"): "improve_max_suggestions",
-        ("limits", "max_suggestions_per_file"): "improve_max_suggestions_per_file",
-        ("limits", "min_suggestions_per_file"): "improve_min_suggestions_per_file",
-        ("limits", "max_files_to_review"): "improve_max_files_to_review",
-        ("limits", "max_diff_chars"): "max_diff_chars",
-        ("limits", "opencode_max_diff_chars"): "opencode_max_diff_chars",
-        ("limits", "full_files"): "improve_full_files",
-        ("limits", "full_source_max_bytes"): "improve_full_source_max_bytes",
-        ("limits", "new_file_full"): "improve_new_file_full",
-        ("limits", "parallel_workers"): "improve_parallel_workers",
-        ("limits", "clip_diff_lines"): "improve_clip_diff_lines",
-        ("limits", "batch", "enabled"): "improve_batch_enabled",
-        ("limits", "batch", "max_diff_lines"): "improve_batch_max_diff_lines",
-        ("limits", "batch", "max_files"): "improve_batch_max_files",
-        ("limits", "batch", "max_total_lines"): "improve_batch_max_total_lines",
-        ("repo_context", "files"): "repo_context_files",
-        ("repo_context", "rules_dir"): "repo_context_rules_dir",
-        ("repo_context", "max_lines"): "repo_context_max_lines",
-        ("rule_keys", "repo_prefix"): "rule_key_prefix",
-    }
-    for weight in ("diff", "keyword", "density", "test_feature"):
-        mapping[("scoring", "priority_weights", weight)] = f"improve_priority_weight_{weight}"
+    mapping = _SCENARIO_MAPPING
     explicit = explicit_env()
     updates: dict[str, Any] = {}
     for path, field_name in mapping.items():
@@ -202,6 +268,7 @@ def _apply_config(
         if spec.env and spec.env in explicit:
             # env 在 config 导入时已生效：保持现状，不用 profile 值覆盖。
             sources[field_name] = "env"
+            _warn_env_shadowed(field_name, spec.env, config_raw, path, getattr(current_config(), field_name))
             continue
         if spec.env:
             # env 可能在 config 导入之后才设置（测试 / 二次加载）：统一经
@@ -211,6 +278,7 @@ def _apply_config(
             if env_value is not UNSET:
                 updates[field_name] = env_value
                 sources[field_name] = "env"
+                _warn_env_shadowed(field_name, spec.env, config_raw, path, env_value)
                 continue
         updates[field_name] = node
         if config_raw and _has_path(config_raw, path):
@@ -219,6 +287,39 @@ def _apply_config(
             sources[field_name] = "profile" if _has_path(raw, path) else "preset"
     apply_scenario(updates)
     return updates
+
+
+def current_config() -> Any:
+    from reviewagent.config import current
+
+    return current()
+
+
+def _warn_env_shadowed(
+    field_name: str,
+    env_name: str,
+    config_raw: dict[str, Any] | None,
+    path: tuple[str, ...],
+    effective: Any,
+) -> None:
+    """env 压过 review.yaml 时留痕：否则用户改了 review.yaml 却看不到任何效果."""
+    if not config_raw or not _has_path(config_raw, path):
+        return
+    node: Any = config_raw
+    for part in path:
+        node = node[part]
+    if isinstance(node, (list, tuple)) and isinstance(effective, (list, tuple)):
+        differed = list(node) != list(effective)
+    else:
+        differed = node != effective
+    if differed:
+        logger.warning(
+            "config.env_shadowed field={} env={} config_value={!r} effective={!r}",
+            field_name,
+            env_name,
+            node,
+            effective,
+        )
 
 
 def _fingerprint(root: Path, merged: dict[str, Any], files: list[str]) -> str:
@@ -308,9 +409,7 @@ def _load_review_config(
     if not path.is_file():
         return {}
     config_raw = _read_yaml(path, kind="review config")
-    unknown = set(config_raw) - _ALLOWED_REVIEW_CONFIG_KEYS
-    if unknown:
-        raise ValueError(f"unknown review config fields: {sorted(unknown)} ({path})")
+    _validate_review_config(config_raw, path)
     if config_raw.get("schema_version") != _SUPPORTED_SCHEMA:
         raise ValueError(
             f"unsupported review config schema_version: "

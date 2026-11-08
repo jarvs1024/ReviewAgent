@@ -182,3 +182,93 @@ def test_review_config_changes_fingerprint(tmp_path, config_dir):
     second = load_profile("alt", root=tmp_path)
 
     assert first.fingerprint != second.fingerprint
+
+
+def test_review_config_nested_typo_rejected(tmp_path, config_dir):
+    """嵌套拼错必须启动失败 —— 否则静默不生效（limits.max_suggestion）。"""
+    _write_profile(tmp_path, "alt")
+    _write_review(config_dir, "alt", {"schema_version": 1, "limits": {"max_suggestion": 3}})
+
+    with pytest.raises(ValueError, match=r"unknown review config fields: \['limits\.max_suggestion'\]"):
+        load_profile("alt", root=tmp_path)
+
+
+def test_review_config_nested_batch_typo_rejected(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(
+        config_dir, "alt",
+        {"schema_version": 1, "limits": {"batch": {"enable": True}}},
+    )
+
+    with pytest.raises(ValueError, match=r"limits\.batch\.enable"):
+        load_profile("alt", root=tmp_path)
+
+
+def test_review_config_group_must_be_mapping(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(config_dir, "alt", {"schema_version": 1, "limits": 5})
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_profile("alt", root=tmp_path)
+
+
+def test_review_config_priority_weights_nested_allowed(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(
+        config_dir, "alt",
+        {"schema_version": 1, "scoring": {"priority_weights": {"diff": 11.5}}},
+    )
+
+    load_profile("alt", root=tmp_path)
+
+    assert current().improve_priority_weight_diff == 11.5
+
+
+def test_review_config_repo_context_and_reporting_groups(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(
+        config_dir, "alt",
+        {
+            "schema_version": 1,
+            "repo_context": {"files": ["AGENTS.md", "CONTRIBUTING.md"], "max_lines": 300},
+            "reporting": {"weekly_title": "自定标题", "repo_scan_extensions": [".py"]},
+        },
+    )
+
+    profile = load_profile("alt", root=tmp_path)
+
+    assert current().repo_context_files == ("AGENTS.md", "CONTRIBUTING.md")
+    assert current().repo_context_max_lines == 300
+    assert profile.reporting["weekly_title"] == "自定标题"
+    assert profile.reporting["repo_scan_extensions"] == [".py"]
+    assert profile.sources["repo_context_files"] == "config"
+
+
+def test_review_config_reporting_actions_file_not_user_overridable(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(
+        config_dir, "alt",
+        {"schema_version": 1, "reporting": {"actions_file": "../../escape.yaml"}},
+    )
+
+    with pytest.raises(ValueError, match=r"reporting\.actions_file"):
+        load_profile("alt", root=tmp_path)
+
+
+def test_env_override_shadowing_review_config_logs_warning(tmp_path, config_dir, monkeypatch):
+    _write_profile(tmp_path, "alt")
+    _write_review(config_dir, "alt", {"schema_version": 1, "limits": {"max_suggestions": 7}})
+    monkeypatch.setenv("IMPROVE_MAX_SUGGESTIONS", "3")
+    warnings: list[str] = []
+
+    def _capture(message, *args, **_kwargs):
+        warnings.append(message.format(*args) if args else message)
+
+    from reviewagent.scenario import profile as profile_mod
+
+    monkeypatch.setattr(profile_mod.logger, "warning", _capture)
+
+    load_profile("alt", root=tmp_path)
+
+    assert current().improve_max_suggestions == 3
+    assert any("config.env_shadowed" in msg and "improve_max_suggestions" in msg for msg in warnings)

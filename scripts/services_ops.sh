@@ -130,11 +130,35 @@ _terminate_worker_jobs() {
 }
 
 # ============================================================
+# 周报定时 (REVIEWAGENT_WEEKLY_CRON_SCHEDULE 生效点)
+# ============================================================
+WEEKLY_TIMER_DROPIN_DIR="/etc/systemd/system/reviewagent-weekly.timer.d"
+
+render_weekly_timer() {
+    printf '[Timer]\nOnCalendar=%s\n' "${REVIEWAGENT_WEEKLY_CRON_SCHEDULE:-Mon 10:30}"
+}
+
+apply_weekly_schedule() {
+    [[ -d /etc/systemd/system ]] || return 0
+    [[ -n "${REVIEWAGENT_WEEKLY_CRON_SCHEDULE:-}" ]] || return 0
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        _warn "weekly schedule: skipped drop-in (needs root)"
+        return 0
+    fi
+    mkdir -p "$WEEKLY_TIMER_DROPIN_DIR"
+    render_weekly_timer > "$WEEKLY_TIMER_DROPIN_DIR/schedule.conf"
+    systemctl daemon-reload
+    _ok "weekly timer OnCalendar=${REVIEWAGENT_WEEKLY_CRON_SCHEDULE}"
+}
+
+# ============================================================
 # 核心操作
 # ============================================================
 do_start() {
     _info "Starting all services ..."
     echo ""
+
+    apply_weekly_schedule
 
     # 1) systemd 服务 (批量启动)
     local svcs_to_start=()
@@ -196,6 +220,8 @@ do_stop() {
 do_restart() {
     _info "Restarting all services ..."
     echo ""
+
+    apply_weekly_schedule
 
     # 1) systemd 服务 (批量重启, 减少中断时间)
     systemctl restart "${SYSTEMD_SERVICES[@]}"
@@ -401,10 +427,12 @@ usage() {
     echo "  status         Show detailed service status"
     echo "  logs           Tail all service logs in real-time"
     echo "  clean-pycache  Remove __pycache__ and restart services"
+    echo "  render-weekly-timer  Print the weekly timer drop-in (OnCalendar from env)"
     echo ""
     echo "Environment:"
     echo "  PROJECT_DIR     Project root (default: script's parent dir)"
     echo "  RQ_WORKER_COUNT Number of workers (default: 3, from config/instance.env)"
+    echo "  REVIEWAGENT_WEEKLY_CRON_SCHEDULE  systemd OnCalendar (applied on start/restart)"
     echo ""
     echo "Examples:"
     echo "  $0                        # status (default)"
@@ -425,6 +453,7 @@ case "$cmd" in
     status)         do_status         ;;
     logs)           do_logs           ;;
     clean-pycache)  do_clean_pycache  ;;
+    render-weekly-timer) render_weekly_timer ;;
     -h|--help|help) usage             ;;
     *)
         _fail "Unknown command: $cmd"
