@@ -78,13 +78,18 @@ _RULE_REF_CACHE: dict[str, re.Pattern[str]] = {}
 def rule_ref_pattern(rule_prefix: str) -> re.Pattern[str]:
     """按前缀缓存「仓库规则引用」正则（`{prefix}-RULE-*`）.
 
-    与旧 `_RULE_EXEMPT_REGEX`（`\\b{prefix}-RULE-\\w+\\b`）逐字等价，保证评分
-    与严重度豁免的判定与重构前完全一致；按前缀缓存，不做 import-time 单值绑定.
+    显式前缀时与旧 `_RULE_EXEMPT_REGEX`（`\\b{prefix}-RULE-\\w+\\b`）逐字等价，
+    保证评分与严重度豁免的判定与重构前完全一致；`auto`（默认）时匹配任意
+    大写前缀，仓库规则键随被检仓库变化，不在工具里写死.
     """
-    pattern = _RULE_REF_CACHE.get(rule_prefix)
+    value = (rule_prefix or "").strip()
+    auto = value.lower() in {"", "auto", "*"}
+    cache_key = "auto" if auto else value
+    pattern = _RULE_REF_CACHE.get(cache_key)
     if pattern is None:
-        pattern = re.compile(rf"\b{re.escape(rule_prefix)}-RULE-\w+\b")
-        _RULE_REF_CACHE[rule_prefix] = pattern
+        source = r"[A-Z][A-Z0-9]*-RULE-\w+" if auto else rf"{re.escape(value)}-RULE-\w+"
+        pattern = re.compile(rf"\b{source}\b")
+        _RULE_REF_CACHE[cache_key] = pattern
     return pattern
 
 

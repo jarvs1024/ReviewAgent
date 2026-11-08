@@ -114,7 +114,7 @@ class TelemetryCollector:
             stats["dismissal_reasons"] = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
 
             # ---- 新增 pr_agent 风格字段 (放在 data 顶层) ----
-            # 规则 key 翻译为直观类别名(动态解析: SSD 来自 .agents/rules, R-* 来自提示词模板),
+            # 规则 key 翻译为直观类别名(动态解析: 仓库规则来自运行时发现的规则文件, R-* 来自提示词模板),
             # 供 LLM 汇总 + 兜底渲染都用
             resolver = RuleNameResolver.from_repo(pid)
             top_rules_friendly = [(resolver.translate(rk), n) for rk, n in top_rules]
@@ -220,10 +220,9 @@ class TelemetryCollector:
             "  · 「类型注解缺失 ×N → 启用 ruff `ANN` / mypy strict 加入 CI 一次性消存量」",
             "  · 「裸 except Exception ×N → 用 ruff `BLE` + logging.exception 加 CI 阻断」",
             "  · 「R-RES 资源句柄 ×N → 强制 `with` 上下文管理，扫一遍存量 open 调用」",
-            "规则前缀 → 建议动作映射（你可以参考，但要根据 top_rules 实际命名取最贴的那一条）：",
-            "  SSD-RULE-TYPEHINTS, SSD-RULE-DOCSTRING-REQUIRED, SSD-RULE-NO-LOG-EXC, SSD-RULE-NO-BARE-PRINT,",
-            "  SSD-RULE-NO-MUTABLE-DEFAULT, SSD-RULE-RESOURCE-CONTEXT-MANAGER, SSD-RULE-FORBIDDEN-COMMENT,",
-            "  SSD-RULE-FORBIDDEN-WILDCARD-IMPORT, R-LOOP, R-RES, R-ERR, R-SHELL, R-CI, R-OTHER-IMPACT:*",
+            "规则名 → 建议动作参考（不是固定字典：仓库规则随项目变化，以本周数据里已翻译的类别名为准）：",
+            "  类型注解 / docstring / 日志 / print / 可变默认参数 / 资源管理 / 导入等类别 → 对应 CI 工具；",
+            "  R-LOOP, R-RES, R-ERR, R-SHELL, R-CI, R-OTHER-IMPACT:*",
             "输出格式：每个动作前用 `- **`粗体中文问题类别名**` ×N`：具体动作`**；",
             "若 top 类别没在映射里，也要**根据本周实际命名给一条具体动作**，不要退化成套话。",
             "",

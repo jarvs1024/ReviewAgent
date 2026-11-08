@@ -187,8 +187,8 @@ def test_collect_refs_default_has_no_type_or_exclude_flags(monkeypatch):
     assert _g_values(argv) == []
 
 
-def test_collect_refs_profile_excludes_match_legacy_list(monkeypatch):
-    """默认 profile 的 dynamic_rules 提供与旧硬编码逐字一致的排除项."""
+def test_collect_refs_profile_excludes_drive_rg(monkeypatch):
+    """默认 profile 的 dynamic_rules 排除项按场景声明，逐字传给 rg."""
     from reviewagent.scenario.dynamic import load_dynamic_rules
     from reviewagent.scenario.profile import load_profile
 
@@ -196,6 +196,9 @@ def test_collect_refs_profile_excludes_match_legacy_list(monkeypatch):
     assert params["excludes"] == [
         "!reviewagent/**",
         "!tests/**",
+        "!docs/**",
+        "!tmp_scripts/**",
+        "!settings/**",
         "!.venv/**",
         "!**/__pycache__/**",
         "!.git/**",

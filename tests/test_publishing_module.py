@@ -129,8 +129,9 @@ def test_load_rule_actions_from_profile():
     from reviewagent.scenario.profile import load_profile
 
     actions = load_rule_actions(load_profile(None))
-    assert len(actions) == 14
-    assert actions["SSD-RULE-TYPEHINTS"] == "启用 ruff `ANN`/mypy strict 加入 CI, 一次性消存量"
+    # 仓库规则键不在场景包里登记（随被检仓库变化），只保留通用规则动作。
+    assert len(actions) == 6
+    assert not any(key.endswith("-RULE-TYPEHINTS") for key in actions)
     assert actions["R-OTHER-IMPACT"] == "对跨文件函数签名变化在 MR 描述里点出 caller, 拉对应 owner review"
     assert actions["R-CI"] == "对并行用例加临时目录 PID 隔离 / 串行锁, 修 flaky"
 
@@ -293,13 +294,18 @@ def test_dedup_rule_keys_uses_key_patterns_extract_only():
 
 
 def test_record_rule_keys_prefers_raw_and_appends_promotions():
+    import dataclasses
+
     from reviewagent.review.publishing import record_rule_keys
 
-    rule_set = _real_rule_set()
+    rule_set = dataclasses.replace(
+        _real_rule_set(),
+        promotions=({"to_key": "ACME-RULE-WILDCARD", "when_any": ["from foo import *", "通配符"]},),
+    )
     normalised = {"rationale": "from foo import *", "header": "通配符 import"}
     raw = {"rule_keys": ["R-OTHER-IMPACT:wildcard_import"]}
     keys = record_rule_keys(raw, normalised, rule_set=rule_set)
-    assert keys == ["R-OTHER-IMPACT:wildcard_import", "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
+    assert keys == ["R-OTHER-IMPACT:wildcard_import", "ACME-RULE-WILDCARD"]
 
 
 def test_record_rule_keys_uses_normalize_when_raw_empty():
@@ -330,13 +336,18 @@ def test_record_rule_keys_ignores_header_only_keys():
 
 
 def test_record_rule_keys_promotes_from_header_only():
-    """header 含 `wildcard`（rationale 为空）仍需追加 wildcard 硬规则键（旧行为）."""
+    """header 命中 promotion（rationale 为空）时仍追加目标键——提升由 profile 配置驱动."""
+    import dataclasses
+
     from reviewagent.review.publishing import record_rule_keys
 
-    rule_set = _real_rule_set()
+    rule_set = dataclasses.replace(
+        _real_rule_set(),
+        promotions=({"to_key": "ACME-RULE-WILDCARD", "when_any": ["wildcard"]},),
+    )
     normalised = {"rationale": "", "header": "Wildcard import detected"}
     keys = record_rule_keys({}, normalised, rule_set=rule_set)
-    assert keys == ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
+    assert keys == ["ACME-RULE-WILDCARD"]
 
 
 def test_record_rule_keys_extracts_from_rationale_only():
@@ -349,14 +360,19 @@ def test_record_rule_keys_extracts_from_rationale_only():
 
 
 def test_record_rule_keys_appends_promotion_without_duplicating():
+    import dataclasses
+
     from reviewagent.review.publishing import record_rule_keys
 
-    rule_set = _real_rule_set()
+    rule_set = dataclasses.replace(
+        _real_rule_set(),
+        promotions=({"to_key": "ACME-RULE-WILDCARD", "when_any": ["wildcard"]},),
+    )
     normalised = {"rationale": "wildcard import detected", "header": ""}
     keys = record_rule_keys({"rule_keys": ["R-ERR"]}, normalised, rule_set=rule_set)
-    assert keys == ["R-ERR", "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
+    assert keys == ["R-ERR", "ACME-RULE-WILDCARD"]
 
     already = record_rule_keys(
-        {"rule_keys": ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]}, normalised, rule_set=rule_set
+        {"rule_keys": ["ACME-RULE-WILDCARD"]}, normalised, rule_set=rule_set
     )
-    assert already == ["SSD-RULE-FORBIDDEN-WILDCARD-IMPORT"]
+    assert already == ["ACME-RULE-WILDCARD"]

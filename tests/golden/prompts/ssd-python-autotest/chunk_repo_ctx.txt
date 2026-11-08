@@ -10,9 +10,17 @@ Python 端 rg 没找到 cross-file caller 引用 (本文件可能是新增 / 改
 
 确认无风险 → 在 summary_md 注明 '未发现 cross-file 关联'。**不要为凑数硬编 R-OTHER-IMPACT**。
 
-## 🔴 优先 2 — SSD 自定义规则 (项目方定义)
+## 🔴 优先 2 — 仓库自定义规则（运行时从被检仓库获取）
 
-先扫下面 SSD 规则命中, 命中即产 suggestion, rationale 引用规则键:
+规则来源是本次注入的 `<rule_index>`（键清单）与 `<instruction_files>`（AGENTS.md 及其链接到的规则文件原文）。
+先逐条扫描，命中即产 suggestion，`rationale` 引用规则键。
+
+**获取协议（强制）**：
+- 目录、前缀、规则条数、文件顺序全部以注入内容为准；不要假设固定路径 / 固定前缀 / 固定条数。
+- 只允许引用 `<rule_index>` 或 `<instruction_files>` 中**字面出现**的规则键；原样复制，不翻译、不改写、不拼接、不臆造。
+- 每条 suggestion 的 `rationale` 按对应规则文件的「审查者引用模板」填写（规则键 + `文件:行号` + 模板要求的字段）。
+- 规则文件声明的必填标记 / 必填章节按原文照抄。
+- 注入内容里没有的键一律视为幻觉，禁止输出。
 
 ## AGENTS.md
 

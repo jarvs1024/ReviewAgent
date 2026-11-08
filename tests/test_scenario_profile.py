@@ -86,8 +86,8 @@ def test_default_profile_applies_scenario_config():
     assert cfg.improve_review_mode == "auto"
     assert cfg.repo_context_files == ("AGENTS.md",)
     assert cfg.review_exclude_extensions[0] == ".md"
-    # rule_keys 是 profile.yaml 的身份/内容键：值仍来自场景包
-    assert cfg.rule_key_prefix == "SSD"
+    # rule_keys 是 profile.yaml 的身份/内容键：auto=不绑定具体仓库前缀
+    assert cfg.rule_key_prefix == "auto"
     assert profile.sources["rule_keys"] == "profile"
     assert profile.sources["rule_key_prefix"] == "profile"
     # test_paths 从 preset 的 scoring.test_paths 提升为顶层键

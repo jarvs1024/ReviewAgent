@@ -6,8 +6,8 @@
 
 设计: 不硬编码任何规则字典, 跟随规则定义动态解析 ——
 
-- **SSD-RULE-* (自定义/仓库规则)**: 动态解析被扫描仓库的 ``.agents/rules`` 目录
-  (路径来自 ``config.repo_context_rules_dir``, 前缀来自 ``config.rule_key_prefix``),
+- **SSD-RULE-* (自定义/仓库规则)**: 动态解析被扫描仓库里发现的规则文件
+  (与检视链路同一套“入口文件 → 链接”发现器, 不绑定目录/前缀/条数),
   优先取 ``index.md`` 的 One-line summary 列作友好描述; 取不到则对后缀做尽力可读化。
   规则集随仓库变化自动发现, 新增自定义规则不会再露出原始机器 key。
 
@@ -21,7 +21,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from reviewagent.config import config
+# 任意大写前缀的仓库规则键（`SSD-RULE-X` / `ACME-RULE-X` 等），不绑定具体仓库。
+_REPO_KEY_RE = re.compile(r"^(?P<prefix>[A-Z][A-Z0-9]*)[-_]RULE[-_](?P<suffix>.+)$")
 
 # --------------------------------------------------------------------------
 # 通用规则 (R-*) + 跨文件 (R-OTHER-IMPACT:*) + 兜底 (R-OTHER:*)
@@ -83,19 +84,18 @@ def _load_generic_map() -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
-# SSD-RULE-* (自定义规则) —— 动态解析被扫描仓库 .agents/rules 目录
+# <PREFIX>-RULE-* (仓库自定义规则) —— 动态解析被扫描仓库发现的规则文件
 # --------------------------------------------------------------------------
 def _load_ssd_map(project_id: int) -> dict[str, str]:
-    """从被扫描仓库的 .agents/rules 动态解析规则键 -> 友好描述.
+    """从被扫描仓库发现的规则文件解析规则键 -> 友好描述.
 
     优先读 index.md 的 One-line summary 列; 取不到则用规则文件名后缀做可读化兜底。
-    规则集随仓库变化自动发现, 无需在代码里登记。
+    规则集随仓库变化自动发现（目录/前缀/条数均不假设），无需在代码里登记。
     """
     from reviewagent.gitlab.client import client as gitlab_client
     from reviewagent.logging_setup import logger
     from reviewagent.repo_context import fetch_rule_files
 
-    prefix = config.rule_key_prefix or "SSD"
     result: dict[str, str] = {}
     try:
         files = fetch_rule_files(gitlab_client, project_id)
@@ -113,7 +113,7 @@ def _load_ssd_map(project_id: int) -> dict[str, str]:
             break
     if index_text:
         pat = re.compile(
-            rf"`({re.escape(prefix)}-RULE-[A-Z0-9-]+)`\s*\|[^\n|]*\|[^\n|]*\|\s*([^\n|]+?)\s*\|"
+            r"`([A-Z][A-Z0-9]*-RULE-[A-Z0-9-]+)`\s*\|[^\n|]*\|[^\n|]*\|\s*([^\n|]+?)\s*\|"
         )
         for mm in pat.finditer(index_text):
             key, summary = mm.group(1), mm.group(2).strip().rstrip(".")
@@ -123,9 +123,9 @@ def _load_ssd_map(project_id: int) -> dict[str, str]:
     # 兜底: 规则文件名后缀做可读化 (覆盖 index.md 未列出的规则文件)
     for path in files:
         stem = Path(path).stem
-        mm = re.match(rf"{re.escape(prefix)}-RULE-(.+)", stem)
+        mm = _REPO_KEY_RE.match(stem)
         if mm and stem not in result:
-            result[stem] = _humanize(mm.group(1))
+            result[stem] = _humanize(mm.group("suffix"))
     return result
 
 
@@ -160,7 +160,6 @@ class RuleNameResolver:
         if not key:
             return "其他"
         k = key.strip()
-        prefix = config.rule_key_prefix or "SSD"
 
         # 跨文件影响
         if k.startswith("R-OTHER-IMPACT:"):
@@ -168,12 +167,12 @@ class RuleNameResolver:
                 return self.generic_map[k]
             suf = k.split(":", 1)[1].strip()
             return f"跨文件影响({_humanize(suf)})"
-        # 自定义规则 SSD-RULE-*
-        if k.startswith(f"{prefix}-RULE-"):
+        # 仓库自定义规则 <任意前缀>-RULE-*
+        repo_match = _REPO_KEY_RE.match(k)
+        if repo_match:
             if k in self.ssd_map:
                 return self.ssd_map[k]
-            suf = k.split("-RULE-", 1)[1].strip()
-            return _humanize(suf)
+            return _humanize(repo_match.group("suffix").strip())
         # 通用规则 R-XXX / R-OTHER:*
         if k.startswith("R-"):
             if k in self.generic_map:
@@ -208,12 +207,12 @@ def translate_rule_key(
             return gmap[k]
         suf = k.split(":", 1)[1].strip()
         return f"跨文件影响({_humanize(suf)})"
-    # 2) 自定义 SSD-RULE-*
-    if k.startswith("SSD-RULE-") or k.startswith("SSD-RULE_"):  # 容错
+    # 2) 仓库自定义规则: 任意大写前缀 + -RULE-
+    repo_match = _REPO_KEY_RE.match(k)
+    if repo_match:
         if k in smap:
             return smap[k]
-        suf = k.split("-RULE-", 1)[1] if "-RULE-" in k else k.split("_RULE_", 1)[1]
-        return _humanize(suf)
+        return _humanize(repo_match.group("suffix").strip())
     # 3) 通用规则 R-* (含 R-XXX / R-OTHER:* / 标准 R-FOO)
     if k.startswith("R-"):
         if k in gmap:

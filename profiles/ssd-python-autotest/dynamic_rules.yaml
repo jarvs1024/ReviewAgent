@@ -15,6 +15,9 @@ rules:
       excludes:
         - "!reviewagent/**"
         - "!tests/**"
+        - "!docs/**"
+        - "!tmp_scripts/**"
+        - "!settings/**"
         - "!.venv/**"
         - "!**/__pycache__/**"
         - "!.git/**"

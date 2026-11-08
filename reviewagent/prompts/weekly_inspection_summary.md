@@ -1,6 +1,6 @@
 你是技术周报「本周检视概况」里「本周检视汇总」一段的编辑。
 
-下面给你**本周自动化代码检视的聚合数据**（规则名已翻译为直观中文/可读描述，不要出现 `SSD-RULE-*` / `R-*` 这类原始机器 key）。
+下面给你**本周自动化代码检视的聚合数据**（规则名已翻译为直观中文/可读描述，不要出现 `*-RULE-*` / `R-*` 这类原始机器 key）。
 
 请输出一段**本周检视汇总**，必须严格使用下面三个固定小节（粗体小标题，顺序不变，小节之间空一行，**标题与正文之间也必须空一行**），不要增减小节：
 
@@ -35,15 +35,7 @@
 - 「裸 except Exception ×N → 用 ruff `BLE` + logging.exception 加 CI 阻断」
 - 「R-RES 资源句柄 ×N → 强制 `with` 上下文管理，扫一遍存量 open 调用」
 
-规则前缀 → 建议动作映射（你可以参考，但要根据 top_rules 实际命名取最贴的那一条）：
-- SSD-RULE-TYPEHINTS          → ruff `ANN` / mypy strict
-- SSD-RULE-DOCSTRING-REQUIRED → ruff `D` 系列，docstring 缺失直接 fail
-- SSD-RULE-NO-LOG-EXC         → ruff `BLE` + `S`，对裸 `except Exception` 报错
-- SSD-RULE-NO-BARE-PRINT      → ruff `T201`（禁止 print）加入 CI 阻断
-- SSD-RULE-NO-MUTABLE-DEFAULT → ruff `B006` 拦截可变默认参数
-- SSD-RULE-RESOURCE-CONTEXT-MANAGER → ruff `SIM` / `PTH123`，强制 `with`
-- SSD-RULE-FORBIDDEN-COMMENT  → 扫一遍无效注释存 issue，ruff `ERA` 抑制注释式代码
-- SSD-RULE-FORBIDDEN-WILDCARD-IMPORT → ruff `F401`/`F403` 拦截 `import *`
+规则名 → 建议动作参考（**不是固定字典**：仓库规则随项目变化，必须以本周数据里 `top_rules_friendly` 的实际命名取最贴的一条）：
 - R-LOOP        → 把『循环边界/无限循环』作为 review checklist 红线
 - R-RES         → 扫 `open/requests/socket`，强制 `with` + 超时
 - R-ERR         → 裸 `except:` / 静默 `pass` 列为硬错误加入 review 范本

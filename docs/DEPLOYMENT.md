@@ -303,6 +303,7 @@ systemctl list-timers 'reviewagent-*.timer' --no-pager
 curl -s http://127.0.0.1:3000/health
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/readyz   # 期望 200
 # readyz 200 = profile / RuleSet / instance / SQLite / Redis 全通过；503 时 body 的 reasons 直接指出缺项
+# 200 body 里的 profile / profile_fingerprint 是服务进程实际加载的场景包，可与磁盘当前指纹核对
 
 # 4. 启动日志里的指纹（API 与 worker 必须一致）
 journalctl -u reviewagent-webhook -n 200 | grep -E 'config.resolved|bootstrap.ready'

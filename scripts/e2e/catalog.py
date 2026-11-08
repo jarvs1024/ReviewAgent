@@ -111,7 +111,7 @@ _WITNESSES: tuple[Witness, ...] = (
     _live("repo_context_files",
           "scenario/rules/repo.py:_fetch_all_rule_files；全量档真实仓库拉取 AGENTS.md"),
     _live("repo_context_rules_dir",
-          "scenario/rules/repo.py:_fetch_all_rule_files；全量档真实仓库 rules_dir 拉取"),
+          "scenario/rules/repo.py:_fetch_all_rule_files；显式覆盖（默认空=按入口链接发现），全量档校验链接文件"),
     _behavior("rule_key_prefix", "rule_key_prefix",
               "scenario/rules/keys.py + review/validation.py:396；规则键命名空间"),
     _behavior("repo_context_max_lines", "repo_context_max_lines",

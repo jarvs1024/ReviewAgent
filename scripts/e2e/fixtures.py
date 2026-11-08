@@ -304,6 +304,16 @@ _BASE_FILES: dict[str, str] = {
         "def helper(value=None):\n"
         "    return value\n"
     ),
+    # 与真实 SSD 仓库同构的库层路径：命中 review.yaml 的 priority_paths
+    "testlib/lib_baw/e2e_helper.py": (
+        '"""E2E priority helper."""\n\n\n'
+        "def ping(disk):\n"
+        "    return disk\n\n\n"
+        "def collect(disk):\n"
+        "    return [disk]\n\n\n"
+        "def reset(disk):\n"
+        "    return None\n"
+    ),
     "conftest.py": (
         "import pytest\n\n\n"
         "@pytest.fixture\n"
@@ -315,10 +325,11 @@ _BASE_FILES: dict[str, str] = {
         "def test_load():\n"
         '    assert load([" a "]) == ["a"]\n'
     ),
-    # 仓库规则上下文（repo_context_files / rules_dir 的真实拉取对象）
+    # 仓库规则上下文（入口文件 + 链接发现的规则文件）
     "AGENTS.md": (
         "# E2E fixture project\n\n"
-        "E2E repo context marker: prefer explicit imports over wildcard imports.\n"
+        "E2E repo context marker: prefer explicit imports over wildcard imports.\n\n"
+        "规则入口：[`.agents/rules/team.md`](.agents/rules/team.md)\n"
     ),
     ".agents/rules/team.md": (
         "# Team rules\n\n"
@@ -348,7 +359,21 @@ _CHANGE_FILES: dict[str, str] = {
         "def cache_value(key, cache={}):\n"
         "    return cache.get(key)\n"
     ),
-    # 关键路径：/api/ 与 /core/ 与 /models/ 命中 priority_paths
+    # 关键路径对照：命中 priority_paths 的 /testlib/lib_baw/（改动小于 extra.py）
+    "testlib/lib_baw/e2e_helper.py": (
+        '"""E2E priority helper."""\n\n'
+        "from framework import logger\n\n\n"
+        "def ping(disk):\n"
+        '    logger.info("e2e helper ping")\n'
+        "    return disk\n\n\n"
+        "def collect(disk):\n"
+        '    logger.info("e2e helper collect")\n'
+        "    return [disk]\n\n\n"
+        "def reset(disk):\n"
+        '    logger.info("e2e helper reset")\n'
+        "    return None\n"
+    ),
+    # 关键路径：/api/ 与 /core/ 与 /models/ 不命中当前场景包的 priority_paths
     "app/api/handler.py": (
         '"""HTTP handler."""\n\n\n'
         "def handle(payload):\n"

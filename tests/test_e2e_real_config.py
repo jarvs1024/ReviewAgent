@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import difflib
 
 import pytest
 
@@ -30,19 +31,23 @@ def _scenario_cfg():
 
 
 def _review_cfg():
-    """按 config/profiles/ssd-python-autotest/review.yaml 的生效值固定夹具."""
+    """镜像 `config/profiles/ssd-python-autotest/review.yaml` 的当前生效值.
+
+    单测隔离了用户 `config/` 目录，所以这里显式固定；改 review.yaml 时同步更新。
+    """
     base, _profile = _scenario_cfg()
     return dataclasses.replace(
         base,
         improve_review_mode="test",
-        improve_skip_test_paths=("conftest.py",),
+        improve_skip_test_paths=("tests/", "tmp_scripts/", "docs/", "tools/"),
         improve_keyword_paths=(
-            "/services/", "/api/", "/core/", "/main.", "/models/", "/handlers/",
-            "/routers/", "/pages/", "/locators/", "/fixtures/", "/conftest.py",
+            "/testcase/", "/testlib/lib_baw/", "/testlib/lib_bmaw/", "/testlib/lib_caw/",
+            "/test_components/", "/domain/", "/infrastructure/", "/framework/",
+            "/conftest.py",
         ),
         improve_test_sample_paths=("testcase/",),
         improve_test_sample_max=50,
-        improve_max_suggestions=10,
+        improve_max_suggestions=20,
         improve_min_severity="medium",
         improve_full_files=5,
         improve_max_files_to_review=60,
@@ -61,13 +66,38 @@ def _added_diff(path: str, content: str) -> str:
     return "\n".join(head + [f"+{line}" for line in lines]) + "\n"
 
 
+def _modified_diff(path: str, base: str, new: str) -> str:
+    """模拟 GitLab 对已存在文件的 diff（真实 MR 里夹具文件是修改而不是新增）."""
+    hunks = list(
+        difflib.unified_diff(
+            base.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            n=3,
+        )
+    )
+    head = [
+        f"diff --git a/{path} b/{path}",
+        "index 1111111..2222222 100644",
+        f"--- a/{path}",
+        f"+++ b/{path}",
+    ]
+    return "".join(head + hunks[2:])
+
+
 def _changes(paths: dict[str, str]) -> real_config.ChangeSet:
     files = tuple(sorted(paths))
-    return real_config.ChangeSet(
-        files,
-        {fp: _added_diff(fp, content) for fp, content in paths.items()},
-        dict(paths),
-    )
+    diffs = {}
+    new_files = set()
+    for fp, content in paths.items():
+        base = fixtures._BASE_FILES.get(fp)
+        if base is None:
+            diffs[fp] = _added_diff(fp, content)
+            new_files.add(fp)
+        else:
+            diffs[fp] = _modified_diff(fp, base, content)
+    return real_config.ChangeSet(files, diffs, dict(paths), frozenset(new_files))
 
 
 def test_review_config_checks_pass_on_fixture_changes() -> None:

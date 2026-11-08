@@ -331,8 +331,36 @@ def make_note_payload(
     }
 
 
+def current_profile() -> tuple[str, str]:
+    """当前磁盘上的生效场景包 `(name, fingerprint)`（env 由调用方先注入）."""
+    from reviewagent.scenario.profile import load_profile
+
+    profile = load_profile(None)
+    return profile.name, profile.fingerprint
+
+
+def _check_profile_freshness() -> tuple[bool, str]:
+    """运行中的 API 必须加载当前磁盘场景包.
+
+    改完 prompts/profile 忘记重启本地栈时，队列里的 job 会全部被
+    `job.profile_mismatch` 拒绝，表现为全量档莫名超时；这里提前暴露。
+    """
+    status, raw = _http(f"{api_base()}/readyz", timeout=5)
+    body = json.loads(raw) if raw else {}
+    name, fingerprint = current_profile()
+    served_name = body.get("profile")
+    served_fp = body.get("profile_fingerprint")
+    ok = status == 200 and served_name == name and served_fp == fingerprint
+    detail = (
+        f"served={str(served_name)}/{str(served_fp)[:12]} current={name}/{fingerprint[:12]}"
+    )
+    if not ok:
+        detail += "（场景包有改动但服务未重启 → bash scripts/restart_local.sh）"
+    return ok, detail
+
+
 def probe() -> list[tuple[str, bool, str]]:
-    """全量档前置检查：API / telemetry / Redis 都必须在位."""
+    """全量档前置检查：API / telemetry / Redis 都必须在位，且服务加载的是当前场景包."""
     checks: list[tuple[str, bool, str]] = []
     for name, url in (("api.readyz", f"{api_base()}/readyz"), ("telemetry.health", f"{telemetry_base()}/health")):
         try:
@@ -340,6 +368,11 @@ def probe() -> list[tuple[str, bool, str]]:
             checks.append((name, status == 200, f"{status} {raw[:80].decode('utf-8', errors='ignore')}"))
         except Exception as exc:  # noqa: BLE001 - 探针必须汇总而不是中断
             checks.append((name, False, f"{type(exc).__name__}: {exc}"))
+    try:
+        ok, detail = _check_profile_freshness()
+        checks.append(("profile.freshness", ok, detail))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("profile.freshness", False, f"{type(exc).__name__}: {exc}"))
     try:
         checks.append(("redis.ping", bool(redis_client().ping()), "ok"))
     except Exception as exc:  # noqa: BLE001

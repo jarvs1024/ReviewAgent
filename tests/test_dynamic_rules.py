@@ -116,6 +116,9 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
         "excludes": [
             "!reviewagent/**",
             "!tests/**",
+            "!docs/**",
+            "!tmp_scripts/**",
+            "!settings/**",
             "!.venv/**",
             "!**/__pycache__/**",
             "!.git/**",

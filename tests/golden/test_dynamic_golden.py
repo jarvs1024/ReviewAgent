@@ -83,6 +83,9 @@ def test_declared_templates_and_params_match_legacy_profile(profile):
         "excludes": [
             "!reviewagent/**",
             "!tests/**",
+            "!docs/**",
+            "!tmp_scripts/**",
+            "!settings/**",
             "!.venv/**",
             "!**/__pycache__/**",
             "!.git/**",

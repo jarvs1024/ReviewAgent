@@ -7,6 +7,13 @@
 
 ### Changed
 
+- **仓库规则改为运行时动态发现**：不再写死 `.agents/rules` 目录与 `SSD` 前缀。
+  从入口文件（默认 `AGENTS.md`）跟随 Markdown 链接发现规则索引与规则文件，
+  `index.md` 自动展开同目录兄弟文件，目录链接展开一层（深度 ≤2、≤60 个文件、
+  单文件 ≤512KB）；运行时生成 `<rule_index>`（键/级别/标题），截断时模型仍能拿到
+  完整键清单。`REPO_CONTEXT_RULES_DIR` 改为可选显式覆盖（默认空=自动发现），
+  `RULE_KEY_PREFIX=auto` 识别任意 `<大写前缀>-RULE-<键>`。仓库规则新增/删除/改写
+  无需改工具代码；规则来源随被检仓库默认分支实时生效。
 - **场景配置两层收敛（删除 preset/extends 层）**：`profiles/_presets/` 与
   `profile.yaml` 的 `extends` 继承机制移除——其全部取值与 schema 默认值逐项相同，
   属纯重复定义。生效优先级收敛为 **schema 默认值 <
@@ -17,6 +24,10 @@
 
 ### Added
 
+- **`/readyz` 回显生效场景包指纹**：200 响应新增 `profile` / `profile_fingerprint`
+  （服务进程实际加载的内容），可与磁盘当前指纹核对；全量档 E2E 预检据此新增
+  `profile.freshness` 检查——改完 prompts/profile 忘记重启本地栈时立即失败并提示
+  重启，而不是等队列 job 被 `job.profile_mismatch` 拒绝后超时。
 - **`profile list` / `profile switch` CLI**：`reviewagent profile list` 列出可用
   场景包（`*` 标记当前生效）；`reviewagent profile switch <name>` 校验目标场景包
   后原位改写 `instance.env` 的 `REVIEW_PROFILE` / `REVIEWAGENT_DATA_DIR`（保留注释

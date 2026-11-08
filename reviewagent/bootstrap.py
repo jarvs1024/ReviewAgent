@@ -267,6 +267,11 @@ def startup(kind: str) -> BootstrapResult:
     return result
 
 
+def started() -> BootstrapResult | None:
+    """最近一次成功启动的快照（未启动返回 None）；`/readyz` 用它暴露生效指纹."""
+    return _state
+
+
 def reset_for_tests() -> None:
     """清空启动缓存 / 激活状态 / RuleSet / 追加的 readiness 钩子（仅测试使用）."""
     global _state

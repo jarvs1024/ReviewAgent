@@ -122,8 +122,8 @@ def record_rule_keys(
 
     精确键抽取仍只看 rationale（旧 record 正则不扫 header，header 里的普通规则键
     是展示文案，写进待采纳键会与旧行为产生 parity 差异）；promotion 则扫描
-    rationale + header —— 旧实现只有 header 命中 `wildcard` 时也会追加
-    `SSD-RULE-FORBIDDEN-WILDCARD-IMPORT`。
+    rationale + header —— 提升目标由 profile `rule_key_promotions` 配置，
+    不写死具体仓库规则键。
     """
     raw_keys = _raw_rule_keys(raw)
     text = _record_rule_key_text(normalised)
@@ -521,7 +521,7 @@ def publish(
                 # rule_keys 用于 dedup 精确化: 不同规则即使 (file, line±2) 重叠
                 # 也不应误杀 (例: NO-MUTABLE-DEFAULT L10 vs NO-LOG-EXC L12)
                 # === 兜底: LLM 不输出 rule_keys 字段时, 从 rationale/header
-                #     抽 R-XXX / R-OTHER:* / SSD-RULE-* 前缀, 避免 dedup 退化为
+                #     抽 R-XXX / R-OTHER:* / *-RULE-* 前缀, 避免 dedup 退化为
                 #     纯 (file, line) 兜底而误杀不同规则的建议
                 #     (MR 239 other.py L4 medium R-OTHER:magic_number
                 #      被 L2 low SSD-RULE-TYPEHINTS 命中 → skip).
@@ -659,7 +659,7 @@ def publish(
                     existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
                     # === 跨次去重: file+line+existing_code 的指纹 ===
                     import hashlib as _hl
-                    # LLM 不输出 rule_keys 字段 → 从 rationale 文本里抽 R-XXX / R-OTHER / SSD-RULE-* 前缀;
+                    # LLM 不输出 rule_keys 字段 → 从 rationale 文本里抽 R-XXX / R-OTHER / *-RULE-* 前缀;
                     # 显式给出时保留旧优先级, 只追加 promotion 派生键 (见 record_rule_keys).
                     rule_keys = record_rule_keys(raw, normalised, rule_set=rule_set)
                     # 与 dedup_check 同一 helper — 保证两边 fp 一致.

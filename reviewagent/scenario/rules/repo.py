@@ -11,6 +11,12 @@
     - 提取规则键 (如 ZLG-RULE-NO-LOG-EXC)
     - TTL 缓存避免重复 API 调用
 
+规则文件**不假设固定目录/前缀/条数**：从 `repo_context_files` 入口文件
+（默认 `AGENTS.md`）出发，跟随其中的 Markdown 链接发现规则索引与规则文件；
+`index.md` 自动展开同目录，目录链接展开其一层的 `.md`；`repo_context_rules_dir`
+保留为显式覆盖（默认空=自动）。发现结果同时生成运行时 `<rule_index>`，
+保证截断时模型仍能拿到完整键清单。
+
 `parse_repo_overlay` 把仓库规则表（Markdown 表格行）转成请求级 `Rule` 覆盖：
 * 仓库新规则：键命中 `base.key_patterns.is_repo(key)`，任意键均可新增；
 * 场景规则覆盖：键是内置键且已在 `base.index_by_key` 中（同键覆盖，spec §6.4），
@@ -20,12 +26,14 @@
 """
 from __future__ import annotations
 
+import posixpath
 import re
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import replace
 from html import escape
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from reviewagent.logging_setup import logger
 from reviewagent.scenario.rules.model import Rule
@@ -43,6 +51,19 @@ MARKDOWN_FENCE = "`````"
 
 _SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 _REPO_RULE_PRIORITY = 1000
+
+# 动态发现护栏：入口→index→规则文件 至多两跳；文件数与单文件体积设上限，
+# 避免 AGENTS.md 链接到整个文档树时把默认分支全部拉下来。
+_MAX_LINK_DEPTH = 2
+_MAX_DISCOVERED_FILES = 60
+_MAX_RULE_FILE_BYTES = 512 * 1024
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)")
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+# 运行时规则索引使用通用仓库键形状（任意大写前缀），与具体仓库无关。
+_REPO_KEY_SOURCE = r"[A-Z][A-Z0-9]*-RULE-[A-Z0-9-]+"
+_REPO_KEY_RE = re.compile(_REPO_KEY_SOURCE)
+_HEADING_RE = re.compile(r"^###\s+(\S+)(?:\s+(.*))?$")
 
 # ---------- 缓存 ----------
 _CACHE_MAX_SIZE = 64
@@ -83,15 +104,22 @@ _RULE_KEY_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
 
 
 def _rule_key_pattern() -> re.Pattern[str]:
-    """构建规则键正则: <PREFIX>-RULE-<KEY>."""
-    from reviewagent.config import current
+    """构建规则键正则: `<PREFIX>-RULE-<KEY>`；auto 时匹配任意大写前缀."""
+    from reviewagent.scenario.rules.keys import repo_key_source
 
-    prefix = current().rule_key_prefix or "ZLG"
+    prefix = repo_key_source(current_prefix())
     pat = _RULE_KEY_PATTERN_CACHE.get(prefix)
     if pat is None:
-        pat = re.compile(rf"(?<![\w])({re.escape(prefix)}-RULE-[A-Z0-9-]+)(?![\w])")
+        pat = re.compile(rf"(?<![\w])({prefix})(?![\w])")
         _RULE_KEY_PATTERN_CACHE[prefix] = pat
     return pat
+
+
+def current_prefix() -> str:
+    """当前配置的仓库规则前缀（惰性读配置，避免 import 期绑定）."""
+    from reviewagent.config import current
+
+    return current().rule_key_prefix
 
 
 def extract_rule_keys(text: str) -> list[str]:
@@ -146,8 +174,9 @@ def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str
         return ""
 
     normalize = _normalize_enabled()
+    items = list(files.items())
 
-    for path, content in files.items():
+    for index, (path, content) in enumerate(items):
         if normalize:
             content = normalize_untrusted(content)
         scope = path.rsplit("/", 1)[0] if "/" in path else "repo-root"
@@ -162,10 +191,17 @@ def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str
             "",
         ]
         content_lines = content.rstrip().splitlines()
-        reserved = len(file_header) + len(file_footer) + 1
-        available = max_lines - len(parts) - reserved
+        # 每个文件最小占用：2 行头 + 3 行尾 + 1 行分隔。后续文件先预留，
+        # 避免第一个超大文件吃光预算导致其后的规则文件被静默丢弃。
+        reserved = 6
+        remaining = len(items) - index
+        keep_for_later = 6 * (remaining - 1)
+        budget_left = max_lines - len(parts)
+        fair_share = max(0, budget_left // remaining - reserved)
+        available = max(0, budget_left - reserved - keep_for_later)
+        available = min(available, fair_share) if remaining > 1 else available
         if available < 0 or (content_lines and available < 1):
-            break
+            continue
 
         parts.extend(file_header)
         if available >= len(content_lines):
@@ -174,9 +210,6 @@ def render_instruction_files(files: dict[str, str], max_lines: int = 500) -> str
             if available > 1:
                 parts.extend(content_lines[: available - 1])
             parts.append(TRUNCATION_MARKER)
-            parts.extend(file_footer)
-            break
-
         parts.extend(file_footer)
 
     parts.append(closing_tag)
@@ -189,8 +222,151 @@ _files_cache: dict[str, dict[str, str]] = {}
 _files_cache_ts: dict[str, float] = {}
 
 
+def _parse_markdown_links(text: str) -> list[str]:
+    """提取 Markdown 内联链接目标（`[text](target)`），保持出现顺序."""
+    return [m.group(1).strip() for m in _MD_LINK_RE.finditer(text or "")]
+
+
+def _resolve_repo_link(target: str, base_dir: str) -> tuple[str, bool] | None:
+    """把 Markdown 链接解析为仓库相对路径.
+
+    只接受仓库内相对链接：拒绝外链 / 绝对路径 / 反斜杠 / `..` 段；
+    返回 `(path, is_dir)`，无法安全解析时返回 None。
+    """
+    raw = target.strip().strip("<>").strip()
+    if not raw or raw.startswith("#"):
+        return None
+    if _SCHEME_RE.match(raw):
+        return None
+    raw = unquote(raw.split("#", 1)[0].split("?", 1)[0]).strip()
+    if not raw or raw.startswith("/") or "\\" in raw:
+        return None
+    is_dir = raw.endswith("/")
+    raw = raw.rstrip("/")
+    if not raw:
+        return None
+    if any(seg == ".." for seg in raw.split("/")):
+        return None
+    resolved = posixpath.normpath(posixpath.join(base_dir, raw))
+    if resolved in ("", ".", "..") or resolved.startswith(("../", "/")):
+        return None
+    return resolved, is_dir
+
+
+def _list_md_files(
+    gitlab_client: Any, project_id: int, directory: str, ref: str, *, recursive: bool
+) -> list[str]:
+    """列出目录下的 `.md` blob 路径（不抛错，失败返回空）."""
+    try:
+        tree = gitlab_client.list_repository_tree(
+            project_id, directory, ref, recursive=recursive
+        )
+    except Exception as e:
+        logger.warning(
+            "repo_context.list_dir failed project={} dir={}: {}", project_id, directory, e
+        )
+        return []
+    return [
+        str(item.get("path") or "")
+        for item in tree or []
+        if item.get("type") == "blob" and str(item.get("path") or "").endswith(".md")
+    ]
+
+
+def _read_rule_file(
+    gitlab_client: Any, project_id: int, path: str, ref: str
+) -> str | None:
+    """读取单个规则文件；超限 / 失败返回 None."""
+    try:
+        content = gitlab_client.get_file_at_sha(project_id, path, ref)
+    except Exception as e:
+        logger.warning("repo_context.read_file failed project={} file={}: {}", project_id, path, e)
+        return None
+    if not content:
+        return None
+    if len(content.encode("utf-8")) > _MAX_RULE_FILE_BYTES:
+        logger.warning(
+            "repo_context.file_too_large project={} file={} bytes={} limit={}",
+            project_id, path, len(content.encode("utf-8")), _MAX_RULE_FILE_BYTES,
+        )
+        return None
+    return content.rstrip()
+
+
+def _discover_rule_files(
+    gitlab_client: Any,
+    project_id: int,
+    default_branch: str,
+    entry_files: tuple[str, ...],
+    explicit_dir: str,
+) -> dict[str, str]:
+    """从入口文件跟随 Markdown 链接发现规则文件（不假设目录/前缀/条数）."""
+    files: dict[str, str] = {}
+    queue: deque[tuple[str, int]] = deque()
+    queued: set[str] = set()
+    for entry in entry_files:
+        path = entry.strip()
+        while path.startswith("./"):
+            path = path[2:]
+        path = path.lstrip("/")
+        if path and path not in queued:
+            queued.add(path)
+            queue.append((path, 0))
+
+    while queue and len(files) < _MAX_DISCOVERED_FILES:
+        path, depth = queue.popleft()
+        content = _read_rule_file(gitlab_client, project_id, path, default_branch)
+        if content is None:
+            continue
+        files[path] = content
+        if depth >= _MAX_LINK_DEPTH or not path.lower().endswith(".md"):
+            continue
+
+        base_dir = posixpath.dirname(path)
+        targets: list[tuple[str, bool]] = []
+        for target in _parse_markdown_links(content):
+            resolved = _resolve_repo_link(target, base_dir)
+            if resolved is not None:
+                targets.append(resolved)
+
+        # index.md 的兄弟文件即规则文件（未必逐个被链接），自动展开一层。
+        if posixpath.basename(path).lower() == "index.md":
+            for sibling in _list_md_files(
+                gitlab_client, project_id, base_dir, default_branch, recursive=False
+            ):
+                targets.append((sibling, False))
+
+        for target, is_dir in targets:
+            if depth + 1 > _MAX_LINK_DEPTH:
+                continue
+            if is_dir:
+                discovered = _list_md_files(
+                    gitlab_client, project_id, target, default_branch, recursive=False
+                )
+            elif target.lower().endswith(".md"):
+                discovered = [target]
+            else:
+                continue
+            for item in discovered:
+                if item not in queued:
+                    queued.add(item)
+                    queue.append((item, depth + 1))
+
+    # 显式目录覆盖（兼容旧配置）：自动发现之后补充，保持“入口文件在前”。
+    if explicit_dir:
+        for path in _list_md_files(
+            gitlab_client, project_id, explicit_dir.strip("/"), default_branch, recursive=True
+        ):
+            if path in files or len(files) >= _MAX_DISCOVERED_FILES:
+                continue
+            content = _read_rule_file(gitlab_client, project_id, path, default_branch)
+            if content is not None:
+                files[path] = content
+    return files
+
+
 def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]:
-    """从仓库默认分支读取所有规则文件 (AGENTS.md + rules_dir). 带 TTL 缓存."""
+    """从仓库默认分支读取规则文件（入口链接发现 + 可选目录覆盖）. 带 TTL 缓存."""
     from reviewagent.config import current
 
     cfg = current()
@@ -215,46 +391,11 @@ def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]
         logger.warning("repo_context.get_default_branch failed project={}: {}", project_id, e)
         return {}
 
-    files: dict[str, str] = {}
+    files = _discover_rule_files(
+        gitlab_client, project_id, default_branch, tuple(context_files), rules_dir
+    )
 
-    # 1. 读取配置中列出的文件 (AGENTS.md 等)
-    for file_path in context_files:
-        file_path = file_path.strip()
-        if not file_path:
-            continue
-        try:
-            content = gitlab_client.get_file_at_sha(project_id, file_path, default_branch)
-        except Exception as e:
-            logger.warning("repo_context.read_file failed project={} file={}: {}", project_id, file_path, e)
-            continue
-        if content:
-            files[file_path] = content.rstrip()
-
-    # 2. 读取规则目录下的所有 .md 文件
-    if rules_dir:
-        try:
-            tree = gitlab_client.list_repository_tree(project_id, rules_dir, default_branch)
-        except Exception as e:
-            logger.warning("repo_context.list_rules_dir failed project={} dir={}: {}", project_id, rules_dir, e)
-            tree = []
-
-        for item in tree:
-            if item.get("type") != "blob":
-                continue
-            path = item.get("path", "")
-            if not path.endswith(".md"):
-                continue
-            if path in files:
-                continue
-            try:
-                content = gitlab_client.get_file_at_sha(project_id, path, default_branch)
-            except Exception as e:
-                logger.warning("repo_context.read_rule failed project={} file={}: {}", project_id, path, e)
-                continue
-            if content:
-                files[path] = content.rstrip()
-
-    # 更新缓存
+    # 更新缓存（空结果也缓存，避免故障期反复打 API）
     _files_cache[cache_key] = files
     _files_cache_ts[cache_key] = time.monotonic()
 
@@ -266,6 +407,60 @@ def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]
         )
 
     return files
+
+
+def _repo_rule_entries(files: dict[str, str]) -> dict[str, dict[str, str]]:
+    """从已抓取文本抽取仓库规则键 → {severity,title}（表格行 + `### KEY 标题`）."""
+    entries: dict[str, dict[str, str]] = {}
+    for content in files.values():
+        in_fence = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            heading = _HEADING_RE.match(stripped)
+            if heading:
+                key = heading.group(1).strip("`")
+                if _REPO_KEY_RE.fullmatch(key):
+                    entry = entries.setdefault(key, {"severity": "", "title": ""})
+                    if heading.group(2) and not entry["title"]:
+                        entry["title"] = heading.group(2).strip()
+                continue
+            if not stripped.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            key = cells[0].strip("`").strip() if cells else ""
+            if not _REPO_KEY_RE.fullmatch(key):
+                continue
+            entry = entries.setdefault(key, {"severity": "", "title": ""})
+            severity = cells[1].lower() if len(cells) > 1 else ""
+            if severity in _SEVERITIES:
+                entry["severity"] = severity
+            if len(cells) > 2 and cells[2] and not entry["title"]:
+                entry["title"] = cells[2].strip("`").strip()
+    return entries
+
+
+def render_rule_index(files: dict[str, str]) -> str:
+    """渲染运行时 `<rule_index>`：本次发现的仓库规则键全集（不落盘、不入库）."""
+    entries = _repo_rule_entries(files)
+    if not entries:
+        return ""
+    lines = [
+        '<rule_index note="keys discovered from repository default branch; copy verbatim">'
+    ]
+    for key, entry in entries.items():
+        parts = [key]
+        if entry["severity"]:
+            parts.append(entry["severity"])
+        if entry["title"]:
+            parts.append(entry["title"])
+        lines.append(" | ".join(parts))
+    lines.append("</rule_index>")
+    return "\n".join(lines)
 
 
 def fetch_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]:
@@ -290,8 +485,14 @@ def build_repo_context(gitlab_client: Any, project_id: int) -> str:
     if not files:
         return ""
 
-    result = render_instruction_files(files, current().repo_context_max_lines)
-    return result
+    index = render_rule_index(files)
+    budget = current().repo_context_max_lines
+    if not index:
+        return render_instruction_files(files, budget)
+    rendered = render_instruction_files(
+        files, max(1, budget - len(index.splitlines()) - 1)
+    )
+    return f"{index}\n{rendered}".strip() if rendered else index
 
 
 # ---------- 请求级 overlay ----------

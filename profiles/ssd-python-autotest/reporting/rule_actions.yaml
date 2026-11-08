@@ -1,11 +1,6 @@
-SSD-RULE-TYPEHINTS: "启用 ruff `ANN`/mypy strict 加入 CI, 一次性消存量"
-SSD-RULE-DOCSTRING-REQUIRED: "在 pre-commit 跑 ruff `D` 系列, docstring 缺失直接 fail"
-SSD-RULE-NO-LOG-EXC: "用 ruff `BLE` + `S` (logging 规范) 加 CI, 对裸 `except Exception` 报错"
-SSD-RULE-NO-BARE-PRINT: "用 ruff `T201` (禁止 print) 加入 CI 阻断列表"
-SSD-RULE-NO-MUTABLE-DEFAULT: "用 ruff `B006` 拦截可变默认参数"
-SSD-RULE-RESOURCE-CONTEXT-MANAGER: "用 ruff `SIM`/`PTH123` 拦截裸 open/close, 强制 with 语句"
-SSD-RULE-FORBIDDEN-COMMENT: "把无效注释扫一遍存 issue, 用 ruff `ERA` 抑制注释式代码"
-SSD-RULE-FORBIDDEN-WILDCARD-IMPORT: "用 ruff `F401`/`F403` 拦截 `from foo import *`"
+# 通用规则键 -> 改进行动建议（周报展示用）。
+# 仓库自定义规则键不在此登记：它们随被检仓库变化，由运行时发现的规则原文提供标题，
+# 周报里未登记的键会回退到规则名解析（reporting/rule_translate.py）。
 R-LOOP: "把『循环边界/无限循环』作为 review checklist 红线条款"
 R-RES: "扫一遍 `open/requests/socket` 调用, 强制 `with` + 超时"
 R-ERR: "把裸 `except:` 与静默 `pass` 列为硬错误, 加入 review 范本"

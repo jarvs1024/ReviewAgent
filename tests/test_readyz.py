@@ -24,11 +24,33 @@ def test_readyz_returns_ok_when_runtime_ready(client, monkeypatch):
     monkeypatch.setattr(
         main_module.bootstrap, "runtime_readiness", lambda: (True, [])
     )
+    monkeypatch.setattr(main_module.bootstrap, "started", lambda: None)
 
     resp = client.get("/readyz")
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_readyz_exposes_active_profile_fingerprint(client, monkeypatch):
+    """服务端加载的是哪个场景包内容必须可观测（E2E 预检 / 部署核对都用它）."""
+    monkeypatch.setattr(main_module.bootstrap, "runtime_readiness", lambda: (True, []))
+    monkeypatch.setattr(
+        main_module.bootstrap,
+        "started",
+        lambda: bootstrap.BootstrapResult(
+            "ssd-python-autotest", "abc123", data_dir=__import__("pathlib").Path("data")
+        ),
+    )
+
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ok",
+        "profile": "ssd-python-autotest",
+        "profile_fingerprint": "abc123",
+    }
 
 
 def test_readyz_returns_503_with_reasons_when_unready(client, monkeypatch):

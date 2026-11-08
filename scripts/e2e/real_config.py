@@ -23,9 +23,11 @@ from typing import Any
 from scripts.e2e import fixtures, stack
 from scripts.e2e.report import FeatureResult
 
-API_FILE = "app/api/handler.py"
+# 关键路径夹具与真实场景包同构：/testlib/lib_baw/ 命中 priority_paths，
+# app/extra.py 作对照（不命中任何关键路径，diff 更大）。
+API_FILE = "testlib/lib_baw/e2e_helper.py"
 EXTRA_FILE = "app/extra.py"
-PRIORITY_FILES = ("app/api/handler.py", "app/core/engine.py", "app/models/item.py")
+PRIORITY_FILES = (API_FILE,)
 
 SAMPLING_COUNT = 51
 SAMPLING_BRANCH_FMT = "e2e/sampling-r{}"
@@ -248,7 +250,7 @@ class _StackGitlabClient:
 
 
 def audit_repo_context(project_id: int, cfg: Any, log: list[str]) -> list[tuple[str, bool, str]]:
-    """从真实仓库默认分支拉取 AGENTS.md + rules_dir 并渲染."""
+    """从真实仓库默认分支拉取入口文件 + 链接发现的规则文件并渲染."""
     from reviewagent.scenario.rules import repo
 
     client = _StackGitlabClient()
@@ -261,12 +263,15 @@ def audit_repo_context(project_id: int, cfg: Any, log: list[str]) -> list[tuple[
     expected = [p for p in cfg.repo_context_files if p.strip()]
     rules_dir = (cfg.repo_context_rules_dir or "").rstrip("/")
     dir_files = [p for p in files if rules_dir and p.startswith(f"{rules_dir}/")]
+    linked = [p for p in files if p not in expected]
     ok = (
         bool(expected)
         and all(p in files for p in expected)
         and (not rules_dir or bool(dir_files))
+        and bool(linked)
         and "<instruction_files>" in block
         and "E2E repo context marker" in block
+        and "E2E repo rule marker" in block
     )
     log.append(
         f"[{stack.now_iso()}] repo_context pid={project_id} expected={expected} "
@@ -276,7 +281,7 @@ def audit_repo_context(project_id: int, cfg: Any, log: list[str]) -> list[tuple[
         (
             "repo_context",
             ok,
-            f"expected={expected} dir={rules_dir} -> files={sorted(files)} "
+            f"expected={expected} dir={rules_dir} linked={linked} -> files={sorted(files)} "
             f"rendered={len(block)}B",
         )
     ]

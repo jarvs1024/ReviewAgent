@@ -96,9 +96,14 @@ async def readyz() -> JSONResponse:
     探针含同步 SQLite / Redis ping，放线程池执行，避免阻塞事件循环。
     """
     ok, reasons = await run_in_threadpool(bootstrap.runtime_readiness)
-    if ok:
-        return JSONResponse({"status": "ok"})
-    return JSONResponse({"status": "unready", "reasons": reasons}, status_code=503)
+    if not ok:
+        return JSONResponse({"status": "unready", "reasons": reasons}, status_code=503)
+    body: dict[str, object] = {"status": "ok"}
+    state = bootstrap.started()
+    if state is not None:
+        body["profile"] = state.profile_name
+        body["profile_fingerprint"] = state.profile_fingerprint
+    return JSONResponse(body)
 
 
 @app.get("/", tags=["meta"])

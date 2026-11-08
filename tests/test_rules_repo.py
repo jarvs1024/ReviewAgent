@@ -80,7 +80,7 @@ def test_extract_rule_keys_in_order_without_duplicates():
     text = (
         "先看 SSD-RULE-NO-LOG-EXC，再看 SSD-RULE-OTHER。\n"
         "重复 SSD-RULE-NO-LOG-EXC 与 SSD-RULE-FORBIDDEN-WILDCARD-IMPORT。\n"
-        "不要误抽: XSSD-RULE-BAD, SSD-RULE-lower。\n"
+        "不要误抽: SSD-RULE-lower。\n"
     )
     assert extract_rule_keys(text) == [
         "SSD-RULE-NO-LOG-EXC",
@@ -88,6 +88,12 @@ def test_extract_rule_keys_in_order_without_duplicates():
         "SSD-RULE-FORBIDDEN-WILDCARD-IMPORT",
     ]
     assert extract_rule_keys("") == []
+
+
+def test_extract_rule_keys_auto_prefix_accepts_any_uppercase_namespace():
+    """默认 auto 前缀不绑定具体仓库：ACME-RULE-* 与 SSD-RULE-* 同形同权."""
+    text = "ACME-RULE-CASE-ALLURE 与 SSD-RULE-NO-LOG-EXC，重复 ACME-RULE-CASE-ALLURE"
+    assert extract_rule_keys(text) == ["ACME-RULE-CASE-ALLURE", "SSD-RULE-NO-LOG-EXC"]
 
 
 # ---------------- overlay：场景规则同键覆盖 / 仓库新增 / 忽略自由文本 ----------------
