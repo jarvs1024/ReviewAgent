@@ -20,6 +20,8 @@ import fcntl
 import os
 import shutil
 import subprocess
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -166,13 +168,44 @@ def _fetch_sha(bare: Path, git_url: str, sha: str) -> None:
 
 
 # ---------- worktree 操作 ----------
-def _worktree_path(project_id: int, mr_iid: int, sha: str, tag: str = "wt") -> Path:
+_STALE_WORKTREE_SECONDS = 6 * 3600
+
+
+def _worktree_path(
+    project_id: int, mr_iid: int, sha: str, tag: str = "wt", suffix: str = ""
+) -> Path:
     short = sha[:7] if len(sha) >= 7 else sha
-    return config.worktrees_dir / f"review-{project_id}-{mr_iid}-{tag}-{short}"
+    name = f"review-{project_id}-{mr_iid}-{tag}-{short}"
+    if suffix:
+        name = f"{name}-{suffix}"
+    return config.worktrees_dir / name
 
 
-def _create_worktree(bare: Path, project_id: int, mr_iid: int, sha: str, tag: str = "wt") -> Path:
-    wt = _worktree_path(project_id, mr_iid, sha, tag)
+def _sweep_stale_worktrees(now: float | None = None) -> None:
+    """清理崩溃 worker 遗留的 workspace 目录（活跃 run 最长 15 分钟）."""
+    root = config.worktrees_dir
+    if not root.exists():
+        return
+    now = time.time() if now is None else now
+    for entry in root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            continue
+        if age <= _STALE_WORKTREE_SECONDS:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        logger.info("git.worktree_stale_rm path={} age_s={:.0f}", entry, age)
+
+
+def _create_worktree(
+    bare: Path, project_id: int, mr_iid: int, sha: str, tag: str = "wt",
+    suffix: str | None = None,
+) -> Path:
+    # Why 唯一后缀: 同 MR/SHA 的并发链共用固定路径会互相 rmtree.
+    wt = _worktree_path(project_id, mr_iid, sha, tag, suffix or uuid.uuid4().hex[:8])
     if wt.exists() or wt.is_symlink():
         shutil.rmtree(wt, ignore_errors=True)
         subprocess.run(["git", "-C", str(bare), "worktree", "prune"], capture_output=True, timeout=30)
@@ -210,6 +243,7 @@ def prepare_workspace(
 ) -> Workspace:
     bare = _ensure_bare(project_id, git_url)
     _fetch_incremental(bare, git_url, target_sha=source_sha)  # 确保 source_sha 在 object db
+    _sweep_stale_worktrees()
     worktree = _create_worktree(bare, project_id, mr_iid, source_sha, tag)
     diff_file = _write_diff(worktree, diff_text)
     return Workspace(bare=bare, worktree=worktree, diff_file=diff_file)

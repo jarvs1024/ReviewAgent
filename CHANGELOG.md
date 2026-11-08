@@ -46,6 +46,12 @@
 - 日志与运维文档的事件名以代码为准：`chain.lock_timeout`、`improve.record_suggestion failed`。
 - 非法配置值改为启动即失败（`config check` / binder 校验），不再静默回退默认值。
 
+### Fixed
+
+- worktree 路径增加每次运行唯一的后缀，并在创建前清理超过 6 小时的孤儿目录；
+  链锁丢失导致同一 MR/SHA 的并发链不再互相删除工作区（表现为 `worktree 不存在`
+  与 `output not JSON` 的 describe 失败）。
+
 ### Known limits
 
 - `verify_job` **不比较** `dynamic_rules_fingerprint`：动态规则热改不会触发 job 校验，
