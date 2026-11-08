@@ -54,8 +54,12 @@ sudo bash deploy.sh
 sudo bash deploy.sh --check     # 只做前置检查
 sudo bash deploy/verify.sh      # 单独复检
 
-# 生效配置（--sources 标注 env|config|profile|preset|default；secret 一律 ***）
+# 生效配置（--sources 标注 env|config|profile|default；secret 一律 ***）
 .venv/bin/python -m reviewagent config show --diff-default --sources
+
+# 场景包查看与切换（switch 自动校验并改写 instance.env，之后需重启）
+.venv/bin/python -m reviewagent profile list
+.venv/bin/python -m reviewagent profile switch <场景名>
 
 # 服务状态（worker 是模板实例，按 RQ_WORKER_COUNT 起 @1..N）
 systemctl status reviewagent-webhook 'reviewagent-worker@*' reviewagent-weekly-worker --no-pager

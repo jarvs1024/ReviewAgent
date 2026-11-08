@@ -4,6 +4,24 @@
 - 分支：new_review_v2（基于 main 新建）
 - 状态：已与需求方分段确认；已完成完整性/矛盾核查、分层评审、规则层评审、静态/动态规则分治、Python/C++ 解耦评审、严格兼容性审计，并补齐信任边界/安全、可复现指纹、启动与回滚、配置三平面收敛、日志治理、运行语义（并发/幂等/增量/cohort 生命周期）、数据与备份、规则包作者链路、实例隔离与质量门禁梳理；首期仅 Python 场景（C/C++ 仅预留接口），待审阅
 
+> **修订（2026-11-08，两层收敛）**：实施后复盘发现 `profiles/_presets/` 的全部取值与
+> `settings/schema.py` 默认值逐项相同，preset/`extends` 继承层是纯重复定义。经需求方确认，
+> 场景配置收敛为两个平面：**schema 默认值 < `config/profiles/<name>/review.yaml` < env**。
+> §5 中涉及 preset/`extends` 的段落按以下口径阅读：
+>
+> - `profile.yaml` 只保留**身份 + 内容**键（name/description/language/test_paths/prompts/
+>   rules/dynamic_rules/rule_keys/rule_key_promotions/rule_overrides/disable/capabilities/
+>   security/reporting.actions_file）；调参组（file_filter/scoring/limits/context/repo_context
+>   及 reporting 展示/扫描键）写入 `profile.yaml` 会在启动时报错并提示迁移。
+> - 原 preset 独有的 `scoring.test_paths` 提升为顶层键 `test_paths`（GenericPolicy 优先读取）；
+>   capabilities/security 逐字迁入 `ssd-python-autotest/profile.yaml`。
+> - `_shared/` prompt 兜底目录一并删除：block/prompt 只在 profile 根内解析。
+> - 场景切换新增 CLI：`reviewagent profile list` / `reviewagent profile switch <name>`
+>   （校验目标场景包 + 原位改写 `instance.env` 的 `REVIEW_PROFILE`/`REVIEWAGENT_DATA_DIR`，
+>   数据目录绑定冲突时拒绝执行）。
+> - `config show --sources` 的来源标签收敛为 `env / config / profile / default`。
+
+
 ## 1. 背景与问题
 
 ReviewAgent 当前是「SSD 自动化测试（Python）MR 检视」专用系统：

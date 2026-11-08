@@ -5,8 +5,23 @@
 
 ## Unreleased
 
+### Changed
+
+- **场景配置两层收敛（删除 preset/extends 层）**：`profiles/_presets/` 与
+  `profile.yaml` 的 `extends` 继承机制移除——其全部取值与 schema 默认值逐项相同，
+  属纯重复定义。生效优先级收敛为 **schema 默认值 <
+  `config/profiles/<name>/review.yaml` < env**；`profile.yaml` 只保留身份 + 内容键
+  （含从 preset 提升的顶层 `test_paths`），调参组写入 `profile.yaml` 会启动报错并
+  提示迁移；`_shared/` prompt 兜底目录一并删除。`config show --sources` 来源标签
+  收敛为 `env / config / profile / default`。
+
 ### Added
 
+- **`profile list` / `profile switch` CLI**：`reviewagent profile list` 列出可用
+  场景包（`*` 标记当前生效）；`reviewagent profile switch <name>` 校验目标场景包
+  后原位改写 `instance.env` 的 `REVIEW_PROFILE` / `REVIEWAGENT_DATA_DIR`（保留注释
+  /顺序/权限，原子替换），目标数据目录已绑定其它场景包时拒绝执行，并按平台打印
+  重启提示——换场景不再需要手改 env 文件。
 - **`config/` 用户配置目录**：用户改配置只需看 `config/`。`config/instance.env`
   （实例平面，含密钥、不入库）承载 GitLab / LLM / Redis / 周报投递；
   `config/profiles/<name>/review.yaml`（场景平面，可入库）覆盖检视范围 / 打分 /

@@ -35,9 +35,12 @@ REVIEWAGENT_DIR = REPO_ROOT / "reviewagent"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "architecture_violations"
 
 #: 允许直接读环境变量的文件（完整相对路径，逐条显式声明）。
+#: `cli.py`：profile list/switch 需读 `REVIEW_PROFILE_ROOT` / env 文件，
+#: 与 `config check` 的"按当前 shell env 校验"语义一致，不走 binder。
 ENV_READER_ALLOWLIST: frozenset[str] = frozenset(
     {
         "reviewagent/config.py",
+        "reviewagent/cli.py",
         "reviewagent/llm/qoder_sdk_provider.py",
         "reviewagent/workers/rq_worker.py",
     }
@@ -266,6 +269,7 @@ def test_env_reader_allowlist_is_exact():
     assert ENV_READER_ALLOWLIST == frozenset(
         {
             "reviewagent/config.py",
+            "reviewagent/cli.py",
             "reviewagent/llm/qoder_sdk_provider.py",
             "reviewagent/workers/rq_worker.py",
         }

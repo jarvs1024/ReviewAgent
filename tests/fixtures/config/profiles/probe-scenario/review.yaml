@@ -1,0 +1,24 @@
+schema_version: 1
+file_filter:
+  skip_paths: []
+  exclude_extensions: [.md]
+scoring:
+  review_mode: business
+  test_paths: []
+  priority_weights: {diff: 20, keyword: 25, density: 20, test_feature: 0}
+context:
+  partial_context_lines: 5
+  patch_context_lines: 2
+limits:
+  max_suggestions: 10
+  max_suggestions_per_file: 3
+  min_suggestions_per_file: 1
+  max_files_to_review: 10
+  full_files: 2
+  parallel_workers: 2
+  clip_diff_lines: 800
+  batch: {enabled: false, max_diff_lines: 60, max_files: 5, max_total_lines: 300}
+repo_context:
+  files: []
+  rules_dir: .agents/rules
+  max_lines: 200

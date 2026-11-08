@@ -129,8 +129,8 @@ def test_config_show_sources(tmp_path, monkeypatch, capsys):
     assert [line.split(":", 1)[0] for line in lines] == sorted(by_key)
     # env 显式设置 → 值取自本次 env 解析，来源标 env
     assert by_key["improve_review_mode"] == "improve_review_mode: test  # source=env"
-    # 只出现在 preset 里的映射字段
-    assert by_key["improve_max_suggestions"] == "improve_max_suggestions: 15  # source=preset"
+    # 未被 review.yaml / env 覆盖的映射字段 → schema 默认值
+    assert by_key["improve_max_suggestions"] == "improve_max_suggestions: 15  # source=default"
     # profile.yaml 自身写的字段
     assert by_key["rule_key_prefix"] == "rule_key_prefix: SSD  # source=profile"
     # 未出现在任何 profile/env 的字段

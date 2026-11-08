@@ -10,7 +10,6 @@ import frontmatter
 
 from reviewagent.scenario.profile import Profile, active_or_load
 
-_SHARED = "_shared"
 # 占位符两侧允许空白：`{{name}}` / `{{ name }}` 均可。
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
@@ -37,13 +36,7 @@ def _prompt_path(name: str, profile: Profile | None = None) -> Path:
     root = prof.root.resolve()
     rel = prof.prompts.get(name)
     if rel is None:
-        shared_root = (root.parent / _SHARED).resolve()
-        path = (shared_root / "prompts" / f"{name}.md").resolve()
-        if not _inside(shared_root, path):
-            raise ValueError(f"prompt escapes shared root: {name}")
-        if not path.is_file():
-            raise FileNotFoundError(f"prompt '{name}' not configured in profile {prof.name}")
-        return path
+        raise FileNotFoundError(f"prompt '{name}' not configured in profile {prof.name}")
     path = (root / rel).resolve()
     if not _inside(root, path):
         raise ValueError(f"prompt escapes profile root: {rel}")
@@ -91,15 +84,9 @@ def load_block(name: str, profile: Profile | None = None) -> str:
     if not _inside(root, path):
         raise ValueError(f"block escapes profile root: {name}")
     if not path.is_file():
-        shared_root = (root.parent / _SHARED).resolve()
-        path = (shared_root / "prompts" / f"{name}.md").resolve()
-        if not _inside(shared_root, path):
-            raise ValueError(f"block escapes shared root: {name}")
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"block '{name}' not found in profile {prof.name} "
-                f"({root / 'prompts'}) or shared ({shared_root / 'prompts'})"
-            )
+        raise FileNotFoundError(
+            f"block '{name}' not found in profile {prof.name} ({root / 'prompts'})"
+        )
     return frontmatter.load(path).content
 
 

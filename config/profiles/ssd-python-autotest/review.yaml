@@ -4,8 +4,8 @@
 # 只写"与场景包默认不同"的值；不写的键沿用 profile.yaml / preset。
 # 本文件会入库，禁止写入 token / webhook 等密钥（密钥只放 config/instance.env）。
 #
-# 改完执行：.venv/bin/reviewagent config check
-#           .venv/bin/reviewagent config show --sources
+# 改完执行：.venv/bin/python -m reviewagent config check
+#           .venv/bin/python -m reviewagent config show --sources
 #           bash scripts/restart_local.sh
 
 schema_version: 1
@@ -44,3 +44,9 @@ limits:
   max_suggestions: 10
   # 最多多少个文件送"完整源码"上下文；其余用 diff ± 上下文
   full_files: 5
+
+reporting:
+  # 周报标题与仓库扫描展示类键（原写在 profile.yaml，现统一在本文件）
+  weekly_title: "SSD自动化代码检视周报"
+  repo_scan_extensions: [.py, .js, .ts, .go, .java, .rs, .rb, .sh]
+  repo_scan_entry_files: [__init__.py, main.py, app.py, config.py, settings.py]

@@ -183,10 +183,8 @@ PROFILE_SECTIONS: dict[str, str] = {
     "rule_key_promotions": "tests/test_rules_resolver.py::test_normalize_keys_promotion_when_any",
     "rule_overrides": "tests/test_rules_resolver.py::test_override_applies_only_severity_and_weight",
     "disable": "tests/test_rules_resolver.py::test_disable_keeps_verbatim_body_but_drops_index",
-    "repo_context": "tests/test_rules_repo.py",
+    "test_paths": "tests/test_policy_python.py",
     "security": "tests/security/test_untrusted_content.py",
-    "file_filter": "tests/test_config_overrides.py",
-    "scoring": "tests/test_policy_python.py",
     "reporting": "tests/test_weekly_config_schema.py",
 }
 

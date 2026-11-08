@@ -45,17 +45,6 @@ def _write_profile(root: Path, name: str, **overrides) -> Path:
     return profile_dir
 
 
-def _write_preset(root: Path, name: str, **overrides) -> None:
-    data = {
-        "schema_version": 1,
-        "name": name,
-        "language": "python",
-        "prompts": {"improve": "prompts/improve.md", "describe": "prompts/describe.md"},
-    }
-    data.update(overrides)
-    _write_yaml(root / "_presets" / f"{name}.yaml", data)
-
-
 @pytest.fixture
 def config_dir(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "config"
@@ -67,9 +56,8 @@ def _write_review(config_dir: Path, profile: str, data: dict) -> None:
     _write_yaml(config_dir / "profiles" / profile / "review.yaml", data)
 
 
-def test_review_config_overrides_preset(tmp_path, config_dir):
-    _write_preset(tmp_path, "base", limits={"max_suggestions": 15}, scoring={"review_mode": "auto"})
-    _write_profile(tmp_path, "alt", extends="base")
+def test_review_config_overrides_schema_default(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
     _write_review(
         config_dir,
         "alt",
@@ -87,29 +75,27 @@ def test_review_config_overrides_preset(tmp_path, config_dir):
     assert profile.resolved["limits"]["max_suggestions"] == 7
     assert profile.sources["improve_max_suggestions"] == "config"
     assert profile.sources["improve_min_severity"] == "config"
-    # 未被 review.yaml 覆盖的字段仍来自 preset
-    assert profile.sources["improve_review_mode"] == "preset"
+    # 未被 review.yaml 覆盖的字段回落 schema 默认值（不再有 preset 层）
+    assert "improve_review_mode" not in profile.sources
     assert current().improve_review_mode == "auto"
 
 
 def test_review_config_overrides_profile_yaml(tmp_path, config_dir):
+    """profile.yaml 携带调参组 → 启动失败并提示迁移到 review.yaml."""
     _write_profile(tmp_path, "alt", limits={"max_suggestions": 9})
-    _write_review(config_dir, "alt", {"schema_version": 1, "limits": {"max_suggestions": 4}})
 
-    profile = load_profile("alt", root=tmp_path)
-
-    assert current().improve_max_suggestions == 4
-    assert profile.sources["improve_max_suggestions"] == "config"
+    with pytest.raises(ValueError, match=r"move them to .*review\.yaml"):
+        load_profile("alt", root=tmp_path)
 
 
 def test_review_config_missing_is_optional(tmp_path, monkeypatch):
     monkeypatch.delenv("REVIEW_CONFIG_DIR", raising=False)
-    _write_profile(tmp_path, "alt", limits={"max_suggestions": 12})
+    _write_profile(tmp_path, "alt")
 
     profile = load_profile("alt", root=tmp_path)
 
-    assert current().improve_max_suggestions == 12
-    assert profile.sources["improve_max_suggestions"] == "profile"
+    assert current().improve_max_suggestions == 15
+    assert "improve_max_suggestions" not in profile.sources
 
 
 def test_review_config_for_other_profile_is_ignored(tmp_path, config_dir):

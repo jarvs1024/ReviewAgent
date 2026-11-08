@@ -5,35 +5,13 @@ description: >-
   不同扩展名（.probe）、不同规则键（PROBE-R-*）、不同源码块格式，
   共享代码零改动。
 language: probe
+test_paths: []
 prompts:
   improve: prompts/improve.md
   describe: prompts/describe.md
 rules: [rules/probe_rules.md]
 rule_keys:
   builtin_pattern: 'PROBE-R-[A-Z0-9-]+'
-file_filter:
-  skip_paths: []
-  exclude_extensions: [.md]
-scoring:
-  review_mode: business
-  test_paths: []
-  priority_weights: {diff: 20, keyword: 25, density: 20, test_feature: 0}
-context:
-  partial_context_lines: 5
-  patch_context_lines: 2
-limits:
-  max_suggestions: 10
-  max_suggestions_per_file: 3
-  min_suggestions_per_file: 1
-  max_files_to_review: 10
-  full_files: 2
-  parallel_workers: 2
-  clip_diff_lines: 800
-  batch: {enabled: false, max_diff_lines: 60, max_files: 5, max_total_lines: 300}
-repo_context:
-  files: []
-  rules_dir: .agents/rules
-  max_lines: 200
 capabilities:
   ast_validation: false
   cross_file_search: false

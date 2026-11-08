@@ -136,12 +136,14 @@ def _make_tmp_profile(tmp_path: Path, name: str = "alt"):
     return load_profile(name, root=root)
 
 
-def test_load_block_falls_back_to_shared(tmp_path):
+def test_load_block_no_shared_fallback(tmp_path):
+    """_shared 目录已随 preset 层删除：block 只在 profile 根内查找."""
     profile = _make_tmp_profile(tmp_path)
     shared = profile.root.parent / "_shared" / "prompts"
     shared.mkdir(parents=True)
     (shared / "_shared_rules.md").write_text("shared block body\n", encoding="utf-8")
-    assert scenario_load_block("_shared_rules", profile) == "shared block body"
+    with pytest.raises(FileNotFoundError, match="not found in profile"):
+        scenario_load_block("_shared_rules", profile)
 
 
 def test_load_block_rejects_path_traversal(tmp_path):

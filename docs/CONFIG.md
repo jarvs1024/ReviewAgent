@@ -31,7 +31,7 @@
 
 | 指纹 | 计算对象 | 用途 |
 |---|---|---|
-| `profile_fingerprint` | `profile.yaml` 合并后的场景值（含用户 `config/profiles/<name>/review.yaml`）+ 其引用文件（prompts / rules / dynamic_rules / actions_file）逐个内容的 SHA-256 | 场景包或用户调参任何改动都会变。`reviewagent config check` 打印它；RQ job manifest 携带它，`verify_job` 用它拒绝「API 与 worker 加载了不同场景」的 job |
+| `profile_fingerprint` | `profile.yaml` 与用户 `config/profiles/<name>/review.yaml` 合并后的场景值 + 其引用文件（prompts / rules / dynamic_rules / actions_file）逐个内容的 SHA-256 | 场景包或用户调参任何改动都会变。`reviewagent config check` 打印它；RQ job manifest 携带它，`verify_job` 用它拒绝「API 与 worker 加载了不同场景」的 job |
 | `config_fingerprint` | `SCHEMA` 全部字段生效值的 SHA-256（secret 以 `***` 参与哈希，Path 转字符串、tuple 转 list） | 实例配置（env / data_dir / redis 等）改动会变。写入 RQ job manifest，worker 接受 job 前比对，防止 API 与 worker 配置漂移 |
 
 两个指纹都由启动路径（`bootstrap.startup`）输出在 `config.resolved` 与

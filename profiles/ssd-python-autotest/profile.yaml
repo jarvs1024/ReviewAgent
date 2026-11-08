@@ -1,8 +1,9 @@
 schema_version: 1
 name: ssd-python-autotest
 description: SSD 自动化测试 Python 代码检视（现网行为）
-extends: python-autotest
 language: python
+# 测试文件判定（GenericPolicy）：命中即按测试代码策略检视
+test_paths: [tests/, test_*.py]
 prompts:
   improve: prompts/improve.md
   describe: prompts/describe.md
@@ -21,8 +22,7 @@ rule_key_promotions:
     to_key: SSD-RULE-FORBIDDEN-WILDCARD-IMPORT
   - when_all: ["from ", "import *"]
     to_key: SSD-RULE-FORBIDDEN-WILDCARD-IMPORT
+capabilities: {ast_validation: true, cross_file_search: true, apply_suggestion: true, full_source_analysis: true}
+security: {worktree_containment: true, normalize_untrusted: true, prompt_hardening: false}
 reporting:
-  weekly_title: "SSD自动化代码检视周报"
   actions_file: reporting/rule_actions.yaml
-  repo_scan_extensions: [.py, .js, .ts, .go, .java, .rs, .rb, .sh]
-  repo_scan_entry_files: [__init__.py, main.py, app.py, config.py, settings.py]

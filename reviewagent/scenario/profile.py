@@ -1,14 +1,16 @@
-"""场景包（Profile）：preset 合并、场景配置应用与 data_dir 绑定.
+"""场景包（Profile）：场景配置应用与 data_dir 绑定.
 
-设计要点（见 docs/superpowers/specs/2026-11-07-multi-language-review-design.md §5）：
+设计要点（见 docs/superpowers/specs/2026-11-07-multi-language-review-design.md §5，
+2026-11-08 修订：删除 preset/extends 层，见 docs/superpowers/specs/ 下修订说明）：
 
-* 一个 profile = `profiles/<name>/profile.yaml`，可 `extends` 一个
-  `profiles/_presets/<name>.yaml`；preset 不得再 `extends`（只允许一级继承）；
-* 用户可改的场景值放在 `<config>/profiles/<name>/review.yaml`，叠加在
-  profile.yaml 之上（config > profile > preset > schema 默认），只允许
+* 一个 profile = `profiles/<name>/profile.yaml`，只承载身份与内容引用
+  （语言 / 提示词 / 规则 / 规则键 / capabilities / security / actions_file）；
+* 场景调参的唯一入口是 `<config>/profiles/<name>/review.yaml`，叠加在
+  schema 默认值之上（review.yaml > schema 默认），只允许
   `file_filter` / `scoring` / `limits` / `context` / `repo_context` / `reporting`
   六组（`reporting` 仅展示/扫描类键）；
-* 未知字段 / 未知 preset / 多级继承 / 非法 `extends` 名称一律启动失败；
+* 未知字段一律启动失败；历史上允许的 preset `extends` 与 profile 内调参组
+  现在同样启动失败，并提示迁移到 review.yaml；
 * profile 中的场景字段通过 `config.apply_scenario()` 应用到运行时配置；
   显式 env 仍然优先（§5.4：env 只覆盖运行配置，不污染 profile 数据）；
 * `{data_dir}/instance.json` 记录首次绑定的 profile，同一 data_dir 换 profile
@@ -34,14 +36,18 @@ from reviewagent.settings.binder import UNSET, explicit_env, spec_env_override
 from reviewagent.settings.schema import SCHEMA_BY_NAME
 
 DEFAULT_PROFILE = "ssd-python-autotest"
-_SHARED = "_shared"
-_PRESETS = "_presets"
 _SUPPORTED_SCHEMA = 1
 _ALLOWED_PROFILE_KEYS = {
-    "schema_version", "name", "description", "extends", "language", "prompts", "rules",
+    "schema_version", "name", "description", "language", "test_paths", "prompts", "rules",
     "dynamic_rules", "rule_keys", "rule_key_promotions", "rule_overrides", "disable",
-    "repo_context", "capabilities", "security", "file_filter", "scoring", "reporting",
-    "limits", "context",
+    "capabilities", "security", "reporting",
+}
+# profile.yaml 内 reporting 只允许包内代码引用的 actions_file；
+# 展示/扫描类键（weekly_title 等）归 review.yaml。
+_PROFILE_REPORTING_KEYS = frozenset({"actions_file"})
+# 曾经允许出现在 profile.yaml / preset 的调参组：报错时给出迁移指引。
+_REMOVED_PROFILE_KEYS = {
+    "extends", "file_filter", "scoring", "limits", "context", "repo_context",
 }
 # 用户配置只开放"按场景调参"的组；身份 / 规则 / 提示词仍由场景包作者维护。
 _ALLOWED_REVIEW_CONFIG_KEYS = {
@@ -153,11 +159,9 @@ class Profile:
     rule_key_promotions: tuple[dict[str, Any], ...]
     rule_overrides: dict[str, dict[str, Any]]
     disable: tuple[str, ...]
-    repo_context: dict[str, Any]
+    test_paths: tuple[str, ...]
     capabilities: dict[str, Any]
     security: dict[str, Any]
-    file_filter: dict[str, Any]
-    scoring: dict[str, Any]
     reporting: dict[str, Any]
     resolved: dict[str, Any]
     sources: dict[str, str]
@@ -207,8 +211,8 @@ def _resolve_config_dir(profile_root: Path) -> Path:
     return (profile_root.parent / "config").resolve()
 
 
-def _available_profiles(root: Path) -> list[str]:
-    """列出可用 profile（附 description），用于"profile 不存在"的错误提示."""
+def available_profiles(root: Path) -> list[str]:
+    """列出可用 profile（附 description），供 `profile list` 与错误提示复用."""
     entries: list[str] = []
     for path in sorted(root.glob("*/profile.yaml")):
         name = path.parent.name
@@ -234,7 +238,7 @@ def _resolve_profile_dir(name: str, root: Path) -> Path:
     if not resolved.is_dir() or resolved.parent != root:
         raise ValueError(
             f"profile '{name}' not found under {root}; "
-            f"available={_available_profiles(root)}"
+            f"available={available_profiles(root)}"
         )
     return resolved
 
@@ -249,7 +253,6 @@ def _has_path(node: Any, path: tuple[str, ...]) -> bool:
 
 def _apply_config(
     merged: dict[str, Any],
-    raw: dict[str, Any],
     sources: dict[str, str],
     config_raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -282,10 +285,8 @@ def _apply_config(
                 _warn_env_shadowed(field_name, spec.env, config_raw, path, env_value)
                 continue
         updates[field_name] = node
-        if config_raw and _has_path(config_raw, path):
-            sources[field_name] = "config"
-        else:
-            sources[field_name] = "profile" if _has_path(raw, path) else "preset"
+        # 来源按真实出处标注：review.yaml → config；profile.yaml（如 rule_keys）→ profile。
+        sources[field_name] = "config" if config_raw and _has_path(config_raw, path) else "profile"
     apply_scenario(updates)
     return updates
 
@@ -447,36 +448,26 @@ def load_profile(
     raw = _read_yaml(profile_dir / "profile.yaml")
     unknown = set(raw) - _ALLOWED_PROFILE_KEYS
     if unknown:
+        removed = sorted(unknown & _REMOVED_PROFILE_KEYS)
+        if removed:
+            raise ValueError(
+                f"profile.yaml no longer hosts tuning groups (found: {removed}); "
+                f"move them to <config>/profiles/{profile_dir.name}/review.yaml "
+                "(preset/extends inheritance was removed)"
+            )
         raise ValueError(f"unknown profile fields: {sorted(unknown)}")
     if raw.get("schema_version") != _SUPPORTED_SCHEMA:
         raise ValueError(f"unsupported profile schema_version: {raw.get('schema_version')!r}")
-    extends = raw.get("extends")
+    reporting_raw = raw.get("reporting")
+    if isinstance(reporting_raw, dict) and set(reporting_raw) - _PROFILE_REPORTING_KEYS:
+        raise ValueError(
+            f"profile reporting only allows {sorted(_PROFILE_REPORTING_KEYS)}; "
+            f"display/scan keys belong in <config>/profiles/{profile_dir.name}/review.yaml"
+        )
     merged: dict[str, Any] = {}
     sources: dict[str, str] = {}
-    if extends:
-        preset_name = str(extends)
-        if "/" in preset_name or "." in preset_name:
-            raise ValueError(f"invalid preset name (must be a single level name): {extends}")
-        preset_path = profile_root / _PRESETS / f"{preset_name}.yaml"
-        if not preset_path.exists():
-            raise ValueError(f"unknown preset '{preset_name}': {preset_path}")
-        preset = _read_yaml(preset_path)
-        if "extends" in preset:
-            raise ValueError(f"preset must not extend another preset: {preset_path}")
-        unknown = set(preset) - _ALLOWED_PROFILE_KEYS
-        if unknown:
-            raise ValueError(f"unknown preset fields: {sorted(unknown)}")
-        if preset.get("schema_version") != _SUPPORTED_SCHEMA:
-            raise ValueError(
-                f"unsupported preset schema_version: {preset.get('schema_version')!r} "
-                f"({preset_path})"
-            )
-        merged = _deep_merge(merged, preset)
-        sources.update({k: "preset" for k in preset})
     for key, value in raw.items():
-        # name/description 属于 profile 自身身份（preset 的同名字段不得覆盖），
-        # schema_version 已在上面校验，extends 只用于定位 preset。
-        if key in {"schema_version", "extends"}:
+        if key == "schema_version":
             continue
         merged[key] = _deep_merge(merged.get(key), value)
         sources[key] = "profile"
@@ -497,7 +488,7 @@ def load_profile(
         prompts,
         allow_missing_rules=allow_missing_rules,
     )
-    _apply_config(merged, raw, sources, config_raw)
+    _apply_config(merged, sources, config_raw)
     referenced = list(prompts.values()) + list(merged.get("rules") or [])
     if merged.get("dynamic_rules"):
         referenced.append(merged["dynamic_rules"])
@@ -515,11 +506,9 @@ def load_profile(
         rule_key_promotions=tuple(merged.get("rule_key_promotions") or ()),
         rule_overrides=dict(merged.get("rule_overrides") or {}),
         disable=tuple(merged.get("disable") or ()),
-        repo_context=dict(merged.get("repo_context") or {}),
+        test_paths=tuple(str(p) for p in (merged.get("test_paths") or ())),
         capabilities=dict(merged.get("capabilities") or {}),
         security=dict(merged.get("security") or {}),
-        file_filter=dict(merged.get("file_filter") or {}),
-        scoring=dict(merged.get("scoring") or {}),
         reporting=dict(merged.get("reporting") or {}),
         resolved=merged,
         sources=sources,

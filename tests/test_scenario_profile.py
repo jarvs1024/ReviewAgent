@@ -58,16 +58,22 @@ def test_missing_profile_lists_available(tmp_path):
         load_profile("does-not-exist", root=tmp_path)
 
 
-def test_profile_merges_preset_and_keeps_env_override(monkeypatch):
+def test_env_override_wins_over_schema_default(monkeypatch):
+    """env 覆盖只改运行配置，不污染 profile 数据（§5.4）."""
     monkeypatch.setenv("IMPROVE_PRIORITY_WEIGHT_DIFF", "33")
+    import reviewagent.config as config_module
+    from reviewagent.settings import binder
+
+    config_module._current = binder.from_env()
     profile = load_profile(None)
     assert profile.name == DEFAULT_PROFILE
     assert profile.language == "python"
-    assert profile.resolved["scoring"]["priority_weights"]["diff"] == 20
     from reviewagent.config import current
 
-    # env 只覆盖运行配置，不污染 profile 数据（§5.4）
+    # 调参组不在 profile.yaml 里：resolved 不携带 scoring，env 值经
+    # 启动期 from_env 直接生效。
     assert current().improve_priority_weight_diff == 33.0
+    assert "scoring" not in profile.resolved
 
 
 def test_default_profile_applies_scenario_config():
@@ -75,43 +81,19 @@ def test_default_profile_applies_scenario_config():
 
     profile = load_profile(None)
     cfg = current()
-    assert profile.reporting["weekly_title"] == "SSD自动化代码检视周报"
+    # 单测环境隔离了 <config>/：调参字段回落 schema 默认值
     assert cfg.improve_max_suggestions == 15
     assert cfg.improve_review_mode == "auto"
     assert cfg.repo_context_files == ("AGENTS.md",)
-    assert cfg.rule_key_prefix == "SSD"
     assert cfg.review_exclude_extensions[0] == ".md"
-    assert profile.sources["scoring"] == "preset"
-    assert profile.sources["context"] == "preset"
-    assert profile.sources["reporting"] == "profile"
-
-
-def test_preset_merge_and_profile_override(tmp_path):
-    _write_yaml(
-        tmp_path / "_presets" / "base.yaml",
-        {
-            "schema_version": 1,
-            "name": "base",
-            "language": "python",
-            "prompts": {"improve": "prompts/improve.md", "describe": "prompts/describe.md"},
-            "capabilities": {"ast_validation": True, "cross_file_search": False},
-            "context": {"partial_context_lines": 20},
-        },
-    )
-    _write_profile(tmp_path, "alt", extends="base", capabilities={"cross_file_search": True})
-    profile = load_profile("alt", root=tmp_path)
-    # 映射深度融合：preset 独有的键保留，profile 覆盖同名字段
-    assert profile.resolved["capabilities"] == {
-        "ast_validation": True,
-        "cross_file_search": True,
-    }
-    # preset 提供、profile 未重写的键仍然生效
-    assert profile.prompts == {
-        "improve": "prompts/improve.md",
-        "describe": "prompts/describe.md",
-    }
-    assert profile.sources["capabilities"] == "profile"
-    assert profile.sources["context"] == "preset"
+    # rule_keys 是 profile.yaml 的身份/内容键：值仍来自场景包
+    assert cfg.rule_key_prefix == "SSD"
+    assert profile.sources["rule_keys"] == "profile"
+    assert profile.sources["rule_key_prefix"] == "profile"
+    # test_paths 从 preset 的 scoring.test_paths 提升为顶层键
+    assert profile.test_paths == ("tests/", "test_*.py")
+    # review.yaml 装载的三组（file_filter/scoring/limits 等）默认缺席
+    assert "scoring" not in profile.sources
 
 
 def test_unknown_profile_field_rejected(tmp_path):
@@ -120,37 +102,25 @@ def test_unknown_profile_field_rejected(tmp_path):
         load_profile("bad", root=tmp_path)
 
 
-def test_unknown_preset_field_rejected(tmp_path):
-    _write_yaml(
-        tmp_path / "_presets" / "base.yaml",
-        {"schema_version": 1, "language": "python", "bogus": 1},
-    )
-    _write_profile(tmp_path, "bad", extends="base")
-    with pytest.raises(ValueError, match="unknown preset fields"):
-        load_profile("bad", root=tmp_path)
+def test_profile_yaml_tuning_groups_rejected_with_migration_hint(tmp_path):
+    """调参组写在 profile.yaml → 启动失败并给出 review.yaml 迁移提示."""
+    _write_profile(tmp_path, "alt", limits={"max_suggestions": 7})
+    with pytest.raises(ValueError, match=r"move them to .*review\.yaml"):
+        load_profile("alt", root=tmp_path)
 
 
-def test_preset_must_not_extend(tmp_path):
-    _write_yaml(
-        tmp_path / "_presets" / "base.yaml",
-        {"schema_version": 1, "language": "python", "extends": "other"},
-    )
-    _write_profile(tmp_path, "bad", extends="base")
-    with pytest.raises(ValueError, match="preset must not extend"):
-        load_profile("bad", root=tmp_path)
+def test_profile_yaml_extends_rejected(tmp_path):
+    """extends 随 preset 层一并移除：出现即报错."""
+    _write_profile(tmp_path, "alt", extends="base")
+    with pytest.raises(ValueError, match=r"move them to .*review\.yaml"):
+        load_profile("alt", root=tmp_path)
 
 
-@pytest.mark.parametrize("bad_name", ["a/b", "a.b", "../base", ".hidden"])
-def test_invalid_preset_name_rejected(tmp_path, bad_name):
-    _write_profile(tmp_path, "bad", extends=bad_name)
-    with pytest.raises(ValueError, match="invalid preset name"):
-        load_profile("bad", root=tmp_path)
-
-
-def test_unknown_preset_rejected(tmp_path):
-    _write_profile(tmp_path, "bad", extends="nope")
-    with pytest.raises(ValueError, match="unknown preset"):
-        load_profile("bad", root=tmp_path)
+def test_profile_yaml_reporting_display_keys_rejected(tmp_path):
+    """reporting 展示/扫描键只允许出现在 review.yaml."""
+    _write_profile(tmp_path, "alt", reporting={"weekly_title": "周报"})
+    with pytest.raises(ValueError, match=r"review\.yaml"):
+        load_profile("alt", root=tmp_path)
 
 
 def test_missing_language_rejected(tmp_path):
@@ -214,42 +184,12 @@ def test_active_or_load_returns_cached(monkeypatch):
     assert sp.active_or_load() is profile
 
 
-# ---------- Fix round 1：{} 语义 / 引用文件 fail-fast / 校验 / instance ----------
+# ---------- Fix round 1：引用文件 fail-fast / 校验 / instance ----------
 
 
-def _write_preset(root: Path, name: str, **overrides) -> None:
-    data = {
-        "schema_version": 1,
-        "name": name,
-        "language": "python",
-        "prompts": {"improve": "prompts/improve.md", "describe": "prompts/describe.md"},
-    }
-    data.update(overrides)
-    _write_yaml(root / "_presets" / f"{name}.yaml", data)
-
-
-def test_empty_mapping_clears_preset_values(tmp_path):
-    """`capabilities: {}` 是显式清空，不能继承 preset 的键."""
-    _write_preset(tmp_path, "base", capabilities={"ast_validation": True}, context={"partial_context_lines": 20})
-    _write_profile(tmp_path, "alt", extends="base", capabilities={})
-    profile = load_profile("alt", root=tmp_path)
-    assert profile.capabilities == {}
-    assert profile.resolved["capabilities"] == {}
-    # 其他键不受影响（仍是 preset 值）
-    assert profile.resolved["context"] == {"partial_context_lines": 20}
-    assert profile.sources["capabilities"] == "profile"
-
-
-def test_preset_schema_version_rejected(tmp_path):
-    _write_preset(tmp_path, "base", schema_version=2)
-    _write_profile(tmp_path, "bad", extends="base")
-    with pytest.raises(ValueError, match="preset schema_version"):
-        load_profile("bad", root=tmp_path)
-
-
-def test_profile_value_type_invalid_rejected(tmp_path):
-    _write_profile(tmp_path, "bad", limits={"max_suggestions": "many"})
-    with pytest.raises(ValueError, match="improve_max_suggestions"):
+def test_profile_schema_version_rejected(tmp_path):
+    _write_profile(tmp_path, "bad", schema_version=2)
+    with pytest.raises(ValueError, match="unsupported profile schema_version"):
         load_profile("bad", root=tmp_path)
 
 
@@ -303,14 +243,13 @@ def test_missing_rules_fail_by_default(tmp_path, monkeypatch):
     assert any("profile_missing_rule" in message for message, _ in warnings)
 
 
-def test_fingerprint_stable_and_sensitive_to_preset(tmp_path):
-    _write_preset(tmp_path, "base", capabilities={"ast_validation": True})
-    _write_profile(tmp_path, "alt", extends="base")
+def test_fingerprint_stable_and_sensitive_to_profile_content(tmp_path):
+    _write_profile(tmp_path, "alt", capabilities={"ast_validation": True})
     first = load_profile("alt", root=tmp_path)
     second = load_profile("alt", root=tmp_path)
     assert first.fingerprint == second.fingerprint
 
-    _write_preset(tmp_path, "base", capabilities={"ast_validation": False})
+    _write_profile(tmp_path, "alt", capabilities={"ast_validation": False})
     changed = load_profile("alt", root=tmp_path)
     assert changed.fingerprint != first.fingerprint
 
