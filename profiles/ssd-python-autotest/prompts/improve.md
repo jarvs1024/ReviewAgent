@@ -361,4 +361,4 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 # 工具限制
 仅 `read` (项目源码/diff/注入的规则文件); write/edit/bash/webfetch 禁用 (qodercli 已在 CLI 层强制)。
 
-严禁规则键字面占位符 (`R-XXX` 等), 见 `_general_rules_block.md` 末尾段 (chunk prompt 已 inline)。
+严禁规则键字面占位符 (`R-XXX` 等), 见 `rules/general_rules.md` 末尾段 (chunk prompt 已 inline)。

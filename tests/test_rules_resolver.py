@@ -5,7 +5,6 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
-import frontmatter
 import pytest
 import yaml
 
@@ -15,12 +14,6 @@ from reviewagent.scenario.rules.resolver import (
     active_rule_set,
     assemble_base,
     set_active_rule_set,
-)
-
-REPO = Path(__file__).resolve().parents[1]
-LEGACY_BLOCKS = (
-    REPO / "reviewagent" / "prompts" / "_general_rules_block.md",
-    REPO / "profiles" / "ssd-python-autotest" / "prompts" / "_general_rules_block.md",
 )
 
 
@@ -92,14 +85,12 @@ def test_base_ruleset_orders_and_indexes():
     assert [ruleset.index_by_key[key] for key in keys] == list(ruleset.rules)
 
 
-def test_verbatim_body_matches_legacy_block_files():
-    """临时双份文件中，RuleSet 正文必须与旧 block 文件逐字节一致（防漂移）."""
+def test_verbatim_body_checksum_is_stable():
+    """规则包正文的漂移护栏：改动 prompts 以外的规则正文须同步更新基线."""
     body = assemble_base(load_profile(None)).verbatim_body.encode()
     assert hashlib.sha256(body).hexdigest() == (
         "84ed4563f513be9589e8ab4aa97c49d2699bc226348377455dd65a8b2fa9712c"
     )
-    for legacy in LEGACY_BLOCKS:
-        assert frontmatter.load(legacy).content.encode() == body, legacy
 
 
 def test_rules_are_deduplicated_in_first_encounter_order():

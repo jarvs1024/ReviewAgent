@@ -2,7 +2,7 @@
 
 GitLab 代码检视（MR review）自动化平台，基于 LLM agent（qodercli / opencode）+ GitLab webhook 集成。
 
-> 设计核心：**薄 Python 壳 + 厚 agent**。Python 端只做接入、调度、落库与代码污染防护；真正的"理解代码"全部交给 LLM agent（通过 `reviewagent/llm/` 适配层调用，默认 qodercli subprocess，可选 opencode HTTP API），`reviewagent/prompts/*.md` 里的 agent prompt 才是核心交付物。
+> 设计核心：**薄 Python 壳 + 厚 agent**。Python 端只做接入、调度、落库与代码污染防护；真正的"理解代码"全部交给 LLM agent（通过 `reviewagent/llm/` 适配层调用，默认 qodercli subprocess，可选 opencode HTTP API），`profiles/<profile>/prompts/` 里的 agent prompt 才是核心交付物。
 
 ---
 
@@ -120,14 +120,11 @@ reviewagent/
 ├── metrics/               # Prometheus-style 计数器（/health 暴露）
 │   ├── __init__.py        #   inc() / get_all() 接口
 │   └── counters.py        #   计数器注册表
-├── prompts/               # agent prompt（Markdown frontmatter；核心交付物）
-│   ├── describe.md        #   pr-describer（MR 标题 + 中文描述）
-│   ├── improve.md         #   code-improver（LLM primary agent，发 inline 建议）+ /improve 命令编排（自包含完整 agent 规范）
-│   ├── weekly_inspection_summary.md  # 周报一：本周检视概况叙事（LLM）
-│   ├── weekly_change_summary.md      # 周报二：main 变更汇总（LLM）
-│   ├── weekly_quality_scan.md        # 周报三：代码质量全量扫描，含固有代码评估（LLM）
-│   ├── _general_rules_block.md        # 可复用规则 block
-│   └── loader.py          # prompt 加载器（frontmatter 解析）
+├── scenario/              # 场景包（profile + prompts + rules 的唯一来源）
+│   ├── profile.py         #   profile.yaml 加载/校验/指纹
+│   ├── prompts.py         #   prompt 加载/模板渲染（按 profile prompts 映射）
+│   ├── dynamic.py         #   仓库规则动态发现（AGENTS.md → 链接规则文件）
+│   └── rules/             #   RuleSet 解析、渲染、键规范化
 ├── commands/
 │   ├── describe.py        # /describe 工作流
 │   ├── improve.py         # /improve 工作流（可 Apply 的 inline 建议）

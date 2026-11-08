@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import frontmatter
 import pytest
 import yaml
 
-from reviewagent.prompts.loader import load, load_block
 from reviewagent.scenario.profile import load_profile
 from reviewagent.scenario.prompts import (
     available,
+    load,
+    load_block,
     load_template,
     render_template,
 )
-from reviewagent.scenario.prompts import load_block as scenario_load_block
-
-REPO = Path(__file__).resolve().parents[1]
-LEGACY_PROMPTS = REPO / "reviewagent" / "prompts"
 
 PUBLIC_PROMPTS = (
     "improve",
@@ -28,7 +24,6 @@ PUBLIC_PROMPTS = (
     "weekly_change_summary",
     "weekly_quality_scan",
 )
-ALL_PROMPTS = PUBLIC_PROMPTS + ("_general_rules_block",)
 
 
 @pytest.fixture(scope="module")
@@ -36,33 +31,18 @@ def profile():
     return load_profile(None)
 
 
-def test_prompt_bytes_match_legacy_source():
-    legacy = (LEGACY_PROMPTS / "improve.md").read_text(encoding="utf-8")
-    assert load("improve")["prompt"] in legacy
-    assert hashlib.sha256(load_block("_general_rules_block").encode()).hexdigest() == (
-        "84ed4563f513be9589e8ab4aa97c49d2699bc226348377455dd65a8b2fa9712c"
-    )
-
-
-def test_profile_prompt_files_are_byte_identical(profile):
-    for name in ALL_PROMPTS:
-        legacy = (LEGACY_PROMPTS / f"{name}.md").read_bytes()
-        migrated = (profile.root / "prompts" / f"{name}.md").read_bytes()
-        assert legacy == migrated, name
-
-
-@pytest.mark.parametrize("name", PUBLIC_PROMPTS)
-def test_load_fields_match_legacy_frontmatter(name):
-    legacy_md = frontmatter.load(LEGACY_PROMPTS / f"{name}.md")
-    meta = load(name)
-    assert meta["name"] == (legacy_md.metadata.get("name") or name)
-    assert meta["description"] == legacy_md.metadata.get("description", "")
-    assert meta["output_schema"] == legacy_md.metadata.get("output_schema")
-    assert meta["tools"] == legacy_md.metadata.get("tools", {})
-    assert meta["tools_disabled"] == [
-        k for k, v in legacy_md.metadata.get("tools", {}).items() if v is False
-    ]
-    assert meta["prompt"] == legacy_md.content
+def test_load_fields_match_profile_frontmatter(profile):
+    for name in PUBLIC_PROMPTS:
+        md = frontmatter.load(profile.root / profile.prompts[name])
+        meta = load(name)
+        assert meta["name"] == (md.metadata.get("name") or name)
+        assert meta["description"] == md.metadata.get("description", "")
+        assert meta["output_schema"] == md.metadata.get("output_schema")
+        assert meta["tools"] == md.metadata.get("tools", {})
+        assert meta["tools_disabled"] == [
+            k for k, v in md.metadata.get("tools", {}).items() if v is False
+        ]
+        assert meta["prompt"] == md.content
 
 
 def test_available_lists_public_prompts_only(profile):
@@ -143,15 +123,15 @@ def test_load_block_no_shared_fallback(tmp_path):
     shared.mkdir(parents=True)
     (shared / "_shared_rules.md").write_text("shared block body\n", encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="not found in profile"):
-        scenario_load_block("_shared_rules", profile)
+        load_block("_shared_rules", profile)
 
 
 def test_load_block_rejects_path_traversal(tmp_path):
     profile = _make_tmp_profile(tmp_path)
     with pytest.raises(ValueError, match="invalid prompt name"):
-        scenario_load_block("_../escape", profile)
+        load_block("_../escape", profile)
     with pytest.raises(ValueError, match="invalid prompt name"):
-        scenario_load_block("_..\\escape", profile)
+        load_block("_..\\escape", profile)
 
 
 def test_load_rejects_path_traversal():

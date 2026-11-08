@@ -374,7 +374,7 @@ bash scripts/services_ops.sh restart
 
 - qodercli `--help` 输出
 - `reviewagent/opencode/client.py` — 当前 opencode 调用实现
-- `reviewagent/prompts/loader.py` — agent prompt 加载逻辑
+- `reviewagent/scenario/prompts.py` — agent prompt 加载逻辑（按当前 profile 解析）
 - `reviewagent/commands/_common.py` — 上层调用入口
 
 ---

@@ -1,4 +1,4 @@
-"""Materialise reviewagent/prompts/*.md as .qoder/agents/*.md for QoderCLI ACP.
+"""Materialise the active profile's prompts as .qoder/agents/*.md for QoderCLI ACP.
 
 The QoderCLI ACP server reads subagent definitions from the project-level
 `.qoder/agents/<name>.md` files at startup. We translate our frontmatter
@@ -110,11 +110,8 @@ def sync_qoder_agents(prompts_dir: Path, agents_dir: Path) -> list[Path]:
 
 
 def main() -> None:  # pragma: no cover - thin CLI wrapper
-    # 兼容导入：外部脚本可能 `from scripts.sync_qoder_agents import PROMPTS_DIR`。
-    from reviewagent.prompts.loader import PROMPTS_DIR  # noqa: F401
     from reviewagent.scenario.profile import active_or_load
 
-    # 渲染源改为当前场景 profile 的 prompts 目录（plan §5.3）。
     prompts_dir = active_or_load().root / "prompts"
     agents_dir = Path.cwd() / ".qoder" / "agents"
     paths = sync_qoder_agents(prompts_dir, agents_dir)

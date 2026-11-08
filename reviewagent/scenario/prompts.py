@@ -44,7 +44,7 @@ def _prompt_path(name: str, profile: Profile | None = None) -> Path:
 
 
 def load(name: str, profile: Profile | None = None) -> dict[str, Any]:
-    """加载 prompt（frontmatter + 正文），字段与旧 `prompts.loader.load` 一致."""
+    """加载 prompt（frontmatter + 正文）."""
     md = frontmatter.load(_prompt_path(name, profile))
     meta = dict(md.metadata)
     tools = meta.get("tools", {})

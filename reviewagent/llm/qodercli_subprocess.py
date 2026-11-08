@@ -47,7 +47,7 @@ from reviewagent.llm.qodercli_errors import (
     QoderCLITimeoutError,
 )
 from reviewagent.logging_setup import logger
-from reviewagent.prompts import loader
+from reviewagent.scenario.prompts import load as load_prompt
 
 
 def _resolve_script_path() -> str:
@@ -358,7 +358,7 @@ def run_subprocess(
     """One-shot `qodercli -p` invocation. See module docstring for the JSON shape.
 
     Args:
-        agent: agent name (matches a key in `reviewagent/prompts/`).
+        agent: agent name (a key in the active scenario profile's ``prompts``).
         prompt: user prompt text; appended as the trailing positional arg.
         workdir: working directory passed via `-w`.
         files: optional list of files to attach as a single `--attachment` blob.
@@ -372,7 +372,7 @@ def run_subprocess(
         QoderCLIOutputError: stdout empty, malformed JSON, or agent JSON missing.
     """
     node_path, script_path, model_name = _resolve_paths(node, script, model)
-    meta = loader.load(agent)
+    meta = load_prompt(agent)
     attachment = _build_attachment(workdir, files)
 
     cmd = _build_cmd(

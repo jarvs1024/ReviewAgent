@@ -84,7 +84,7 @@ class BaseLLMProvider(ABC):
         """调用 agent 执行任务，返回 LLMResult.
 
         Args:
-            agent: agent 名称（与 reviewagent/prompts/<name>.md 对应）.
+            agent: agent 名称（当前场景 profile 的 prompts 键）.
             prompt: user prompt 文本.
             workdir: 工作目录（git worktree 路径或 Path.cwd()）.
             files: 附加文件路径列表（qodercli 走 --attachment；opencode 拼到 prompt）.

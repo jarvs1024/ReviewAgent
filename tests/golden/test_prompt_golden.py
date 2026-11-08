@@ -3,7 +3,6 @@
 回归护栏（Task 0 基线 / Task 9 装配迁移）：
 
 * manifest 哈希 — golden 文件本身不得被改动；
-* profile 的 improve / describe prompt 与旧 `reviewagent/prompts/*.md` 字节相同；
 * 六个捕获场景（chunk_full / chunk_partial_refs / chunk_patch_prior /
   chunk_repo_ctx / batch / user_prompt）用当前门面 + assembly 重新渲染，
   与 golden 字节比对；
@@ -98,16 +97,6 @@ def test_goldens_exist_and_are_stable():
         assert hashlib.sha256(_section(name)).hexdigest() == expected
 
 
-def test_profile_prompts_are_byte_equal_to_legacy():
-    from reviewagent.scenario.profile import load_profile
-
-    profile = load_profile(None)
-    for name in ("improve", "describe"):
-        legacy = (REPO_ROOT / "reviewagent" / "prompts" / f"{name}.md").read_bytes()
-        current = (profile.root / profile.prompts[name]).read_bytes()
-        assert current == legacy
-
-
 def test_render_config_is_schema_defaults():
     """渲染用 Config 值必须与 schema 默认值一致（防环境/预设漂移）."""
     from reviewagent.settings.schema import SCHEMA_BY_NAME
@@ -176,26 +165,16 @@ def test_template_render_smoke(golden_env):
     assert prompt.endswith('只输出本文件的 suggestions。')
 
 
-def test_general_rules_text_falls_back_to_loader(monkeypatch):
-    """resolver 异常时回退旧 loader；两者都失败则照常抛出（不静默空规则块）."""
+def test_general_rules_text_reads_active_rule_set(monkeypatch):
+    """resolver 是唯一来源；异常直接抛出（不静默空规则块）."""
     from reviewagent.commands.improve import ImproveCommand
+    from reviewagent.scenario.rules.resolver import active_rule_set
+
+    assert ImproveCommand._general_rules_text() == active_rule_set().verbatim_body
 
     def _boom():
         raise RuntimeError("resolver down")
 
     monkeypatch.setattr("reviewagent.scenario.rules.resolver.active_rule_set", _boom)
-    monkeypatch.setattr(
-        "reviewagent.prompts.loader.load_block",
-        lambda name: f"fallback:{name}",
-    )
-    assert (
-        ImproveCommand._general_rules_text()
-        == "fallback:_general_rules_block"
-    )
-
-    def _boom2(name):
-        raise RuntimeError("loader down")
-
-    monkeypatch.setattr("reviewagent.prompts.loader.load_block", _boom2)
-    with pytest.raises(RuntimeError, match="loader down"):
+    with pytest.raises(RuntimeError, match="resolver down"):
         ImproveCommand._general_rules_text()

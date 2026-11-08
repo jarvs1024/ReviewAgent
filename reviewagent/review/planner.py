@@ -186,7 +186,7 @@ def full_source_budget_bytes(
     Args:
         diff_lines: 本文件 diff 行数（用于估算 diff 在 prompt 中的字节开销）.
         cfg: 生效配置（``improve_full_source_max_bytes`` / ``improve_clip_diff_lines``）.
-        rule_bytes: 规则块正文字节数（旧 ``load_block("_general_rules_block")``，
+        rule_bytes: 规则块正文字节数（RuleSet ``verbatim_body``，
             取不到时按 0 计）.
         repo_context: 仓库自定义规则文本（旧 ``self.repo_context``）.
 

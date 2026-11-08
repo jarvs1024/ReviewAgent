@@ -12,8 +12,8 @@
   规则集随仓库变化自动发现, 新增自定义规则不会再露出原始机器 key。
 
 - **R-* / R-OTHER-IMPACT:* / R-OTHER:* (通用 / 跨文件规则)**: 这些规则定义在
-  提示词模板里 (``_general_rules_block.md`` / ``improve.md``), 这里直接解析对应
-  模板的表格/列表得到中文名, 不在代码里重复维护一份字典。
+  规则包 (``rules/general_rules.md``) 与提示词模板 (``improve.md``) 里, 这里直接
+  解析对应的表格/列表得到中文名, 不在代码里重复维护一份字典。
 """
 from __future__ import annotations
 

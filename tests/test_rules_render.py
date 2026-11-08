@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import frontmatter
 import pytest
 import yaml
 
@@ -11,8 +10,6 @@ from reviewagent.scenario.profile import load_profile
 from reviewagent.scenario.prompts import load_block
 from reviewagent.scenario.rules.render import render_rule_block
 from reviewagent.scenario.rules.resolver import assemble_base, set_active_rule_set
-
-REPO = Path(__file__).resolve().parents[1]
 
 
 def _write_pack(root: Path, body: str) -> None:
@@ -65,8 +62,6 @@ def test_verbatim_returns_exact_body():
     ruleset = assemble_base(profile)
     rendered = render_rule_block(ruleset, profile=profile)
     assert rendered == ruleset.verbatim_body
-    legacy = frontmatter.load(REPO / "reviewagent/prompts/_general_rules_block.md").content
-    assert rendered == legacy
 
 
 def test_verbatim_over_budget_raises_with_profile_and_sizes():

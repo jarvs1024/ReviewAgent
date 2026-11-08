@@ -756,8 +756,7 @@ class ImproveCommand(BaseCommand):
     def _rule_block_text() -> str:
         """当前激活规则块正文（full 源码预算的固定开销估算用）.
 
-        由 T5 resolver 的 `verbatim_body` 提供（与旧的
-        `load_block("_general_rules_block")` 逐字节一致）；取不到时返回 ``""``，
+        由 T5 resolver 的 `verbatim_body` 提供；取不到时返回 ``""``，
         按 0 计 — 预算是安全网, 不是硬依赖（与旧实现 ``except: pass`` 等价）.
         """
         try:
@@ -771,19 +770,12 @@ class ImproveCommand(BaseCommand):
     def _general_rules_text() -> str:
         """chunk / batch prompt 内联的通用规则正文（不做静默降级）.
 
-        优先取 T5 resolver 的 `verbatim_body`（与旧
-        `load_block("_general_rules_block")` 逐字节一致）；resolver 异常时回退
-        旧 loader — 旧 loader 再失败就照常抛错（与重构前一致，不能静默输出
-        空规则块）. 与 `_rule_block_text()` 的区别：后者为预算估算吞掉异常.
+        取 T5 resolver 的 `verbatim_body`；resolver 异常时照常抛错，不能静默
+        输出空规则块. 与 `_rule_block_text()` 的区别：后者为预算估算吞掉异常.
         """
-        try:
-            from reviewagent.scenario.rules.resolver import active_rule_set
+        from reviewagent.scenario.rules.resolver import active_rule_set
 
-            return active_rule_set().verbatim_body
-        except Exception:  # noqa: BLE001
-            from reviewagent.prompts.loader import load_block as _load_block
-
-            return _load_block("_general_rules_block")
+        return active_rule_set().verbatim_body
 
     def _prompt_policy(self):
         """当前 profile 的语言策略（prompt/source 装配用；调用时解析，不缓存）."""

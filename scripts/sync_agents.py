@@ -1,8 +1,8 @@
-"""Sync reviewagent/prompts/*.md → ~/.config/opencode/agent/*.md.
+"""Sync the active profile's prompts → ~/.config/opencode/agent/*.md.
 
 Why:
-    opencode agent config is keyed by file basename. Our reviewagent prompts
-    live in repo (`reviewagent/prompts/<name>.md`) AND must also exist in
+    opencode agent config is keyed by file basename. The scenario library
+    prompts (`profiles/<profile>/prompts/<name>.md`) must also exist in
     `~/.config/opencode/agent/<name>.md` to be registered with the opencode
     serve that ReviewAgent calls.
 

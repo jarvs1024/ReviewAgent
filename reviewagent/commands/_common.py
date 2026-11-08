@@ -14,7 +14,7 @@
     - _build_user_prompt   (返回发给 agent 的 user content)
     - _publish             (把 agent dict 应用到 GitLab + emit telemetry)
 
-agent prompt 模板在 reviewagent/prompts/<name>.md（仓库内）+ 同步到
+agent prompt 模板在场景库 prompts/ 下（当前 profile 决定），+ 同步到
 ~/.config/opencode/agent/<name>.md（用 scripts/sync_agents.py 同步）。
 """
 from __future__ import annotations

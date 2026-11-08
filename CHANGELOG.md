@@ -7,6 +7,11 @@
 
 ### Changed
 
+- **prompt 只保留场景库一份**：删除 `reviewagent/prompts/` 兼容门面（`loader.py`
+  与 6 个与场景库逐字节重复的 prompt）及场景库中已失效的
+  `prompts/_general_rules_block.md`。prompt 统一由 `reviewagent/scenario/prompts.py`
+  按 `profile.prompts` 解析；通用规则正文的唯一来源是 RuleSet 的 `verbatim_body`
+  （`_general_rules_text` 不再回退旧 loader，resolver 异常直接抛出）。
 - **仓库规则改为运行时动态发现**：不再写死 `.agents/rules` 目录与 `SSD` 前缀。
   从入口文件（默认 `AGENTS.md`）跟随 Markdown 链接发现规则索引与规则文件，
   `index.md` 自动展开同目录兄弟文件，目录链接展开一层（深度 ≤2、≤60 个文件、

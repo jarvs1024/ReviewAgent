@@ -44,7 +44,7 @@ from reviewagent.llm.qodercli_errors import (
     QoderCLITimeoutError,
 )
 from reviewagent.logging_setup import logger
-from reviewagent.prompts import loader
+from reviewagent.scenario.prompts import load as load_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +139,10 @@ def _build_options(
 ) -> QoderAgentOptions:
     """根据 agent prompt + config 构造 ``QoderAgentOptions``.
 
-    system_prompt 直接传 Markdown 文本（SDK 不解析 frontmatter，由 ``loader.load``
-    过滤后的 ``prompt`` 字段喂入）；上层维持 ``loader.load(agent)['prompt']`` 单源.
+    system_prompt 直接传 Markdown 文本（SDK 不解析 frontmatter，由 ``load_prompt``
+    过滤后的 ``prompt`` 字段喂入）；上层维持 ``load_prompt(agent)['prompt']`` 单源.
     """
-    meta = loader.load(agent)
+    meta = load_prompt(agent)
     system_prompt = meta["prompt"]
 
     add_dirs_resolved = list(add_dirs) if add_dirs else []
