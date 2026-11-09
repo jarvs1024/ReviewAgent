@@ -1,8 +1,8 @@
 # ReviewAgent
 
-GitLab 代码检视（MR review）自动化平台，基于 LLM agent（qodercli / opencode）+ GitLab webhook 集成。
+GitLab 代码检视（MR review）自动化平台，基于 LLM agent（qoder-sdk / qodercli / opencode）+ GitLab webhook 集成。
 
-> 设计核心：**薄 Python 壳 + 厚 agent**。Python 端只做接入、调度、落库与代码污染防护；真正的"理解代码"全部交给 LLM agent（通过 `reviewagent/llm/` 适配层调用，默认 qodercli subprocess，可选 opencode HTTP API），`profiles/<profile>/prompts/` 里的 agent prompt 才是核心交付物。
+> 设计核心：**薄 Python 壳 + 厚 agent**。Python 端只做接入、调度、落库与代码污染防护；真正的"理解代码"全部交给 LLM agent（通过 `reviewagent/llm/` 适配层调用；schema 默认 `qodercli`，部署模板推荐 `qoder-sdk`，`opencode` 为 HTTP API 兜底），`profiles/<profile>/prompts/` 里的 agent prompt 才是核心交付物。
 
 ---
 
@@ -15,12 +15,12 @@ GitLab 代码检视（MR review）自动化平台，基于 LLM agent（qodercli 
 | 任务队列（RQ / Redis） | Python |
 | SQLite 落库（telemetry） | Python（薄 emitter） |
 | git 污染防护（bare repo + tmpfs worktree） | Python |
-| **diff 切片 / severity 分类 / 行号抽取 / JSON 输出** | **LLM agent（厚，via qodercli / opencode）** |
+| **diff 切片 / severity 分类 / 行号抽取 / JSON 输出** | **LLM agent（厚，via qoder-sdk / qodercli / opencode）** |
 | **中文 MR 描述生成** | **LLM agent** |
 | **可 Apply 的 inline 改进建议** | **LLM agent** |
 | **周报聚合与生成** | **LLM agent + 薄 Python** |
 
-Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/client.py:get_client()` 统一入口，根据 `LLM_PROVIDER` 配置分发到 qodercli（subprocess）或 opencode（HTTP API）。
+Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/client.py:get_client()` 统一入口，根据 `LLM_PROVIDER` 分发到 `qoder-sdk`（qoder-agent-sdk）、`qodercli`（subprocess）或 `opencode`（HTTP API）。
 
 ---
 
@@ -37,7 +37,7 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 | 周报（JSON + Markdown，可推钉钉，含固有代码全量扫描） | 脚本 / 定时 | ✅ |
 | `/review`（深度代码检视） | — | ❌ 未实现 |
 
-> 注：`/review`（深度代码检视）尚未实现——`commands/review.py` 未编写，webhook 不识别 `/review`，`prompts/` 下亦无对应规划。
+> 注：`/review`（深度代码检视）尚未实现——`commands/review.py` 未编写，webhook 不识别 `/review`，`profiles/<profile>/prompts/` 下亦无对应规划。
 
 ---
 
@@ -80,8 +80,9 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
        │         │
        ▼         ▼
   GitLab API   git worktree      LLM 适配层 (llm/)
-  (拉 diff /   (bare repo +      ├── qodercli (subprocess)
-   发评论)      tmpfs 隔离)      └── opencode (HTTP API)
+  (拉 diff /   (bare repo +      ├── qoder-sdk (推荐)
+   发评论)      tmpfs 隔离)      ├── qodercli (subprocess 兜底)
+                         │       └── opencode (HTTP API 兜底)
                          │
                          ▼
               SQLite telemetry.db
@@ -91,7 +92,7 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 **关键设计**:
 - **两条触发链**: webhook 链 (MR review) 与定时链 (周报) 独立触发、独立队列、独立 worker，互不阻塞
 - **Worker 并发**: review 队列 N 个 worker (默认 3)，多 MR 可同时处理
-- **improve 并行**: 按文件切片 → ThreadPoolExecutor 并行调 LLM（qodercli subprocess 或 opencode HTTP）
+- **improve 并行**: 按文件切片 → ThreadPoolExecutor 并行调 LLM（qoder-sdk / qodercli / opencode）
 - **代码防护**: bare repo + tmpfs worktree，agent 只读临时目录
 - **死循环防护**: bot 自评论忽略 + cooldown + MAX_REVIEW_CALLS_PER_MR 上限
 
@@ -101,30 +102,48 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 
 ```
 reviewagent/
-├── config.py              # 业务配置（frozen dataclass + 环境变量，单例 config）
-├── repo_context.py        # 仓库规则动态解析（RuleNameResolver.from_repo）
+├── __main__.py            # python -m reviewagent 入口
+├── cli.py                 # config check/show · rules check · profile list/switch
+├── bootstrap.py           # 启动装配（激活 profile / 绑定 data_dir / RuleSet / 指纹 / readiness）
+├── config.py              # 运行配置（frozen dataclass + "活代理" config；默认值来自 settings/schema.py）
+├── settings/              # 配置单一默认值来源（schema.py）+ 唯一 env 解析器（binder.py）
+├── security.py            # 信任边界工具（不可信内容规范化 / 围栏自适应）
 ├── logging_setup.py       # loguru
-├── main.py                # FastAPI app（/webhook、/health、/docs、/api/v1/telemetry/*）
+├── main.py                # FastAPI app（/webhook、/health、/readyz、/metrics、/docs、/api/v1/telemetry/*）
+├── repo_context.py        # 兼容门面 → scenario/rules/repo.py（仓库规则动态解析）
 ├── git/
 │   ├── workspace.py       # bare repo + worktree + 代码污染防护
 │   └── diff_lines.py      # diff 行号映射（suggestion 行号校正）
 ├── gitlab/client.py       # python-gitlab 薄封装
 ├── llm/                   # LLM 适配层（统一接口，多 provider）
 │   ├── base.py            #   BaseLLMProvider + LLMResult
-│   ├── client.py          #   get_client() 工厂（按 config.llm_provider 分发）
-│   ├── opencode_provider.py  # opencode HTTP API provider
-│   ├── qodercli_provider.py  # qodercli subprocess provider
+│   ├── client.py          #   get_client() 工厂（opencode | qodercli | qoder-sdk）
+│   ├── opencode_provider.py   # opencode HTTP API provider
+│   ├── qodercli_provider.py   # qodercli subprocess provider（旧路径兜底）
 │   ├── qodercli_subprocess.py # qodercli 进程管理 + JSON 解析
-│   └── qodercli_errors.py    # 异常类定义
+│   ├── qodercli_errors.py     # 异常类定义
+│   └── qoder_sdk_provider.py  # qoder-agent-sdk provider（推荐）
 ├── opencode/client.py     # opencode HTTP 客户端（llm/opencode_provider 底层）
-├── metrics/               # Prometheus-style 计数器（/health 暴露）
-│   ├── __init__.py        #   inc() / get_all() 接口
-│   └── counters.py        #   计数器注册表
+├── metrics/               # Prometheus-style 计数器（/metrics 暴露）
 ├── scenario/              # 场景包（profile + prompts + rules 的唯一来源）
 │   ├── profile.py         #   profile.yaml 加载/校验/指纹
 │   ├── prompts.py         #   prompt 加载/模板渲染（按 profile prompts 映射）
-│   ├── dynamic.py         #   仓库规则动态发现（AGENTS.md → 链接规则文件）
-│   └── rules/             #   RuleSet 解析、渲染、键规范化
+│   ├── dynamic.py         #   动态规则装配与注册
+│   └── rules/             #   RuleSet 解析、渲染、键规范化、仓库规则发现
+├── review/                # 语言无关检视内核
+│   ├── planner.py         #   文件规划（过滤/分桶/优先级/预算）
+│   ├── runner.py          #   单次 improve 编排（plan → 复用 → 并行 LLM → 合并）
+│   ├── policy.py          #   LanguagePolicy 协议 + 共享评分表
+│   ├── policies/          #   python / generic 策略实现 + 注册表
+│   ├── assembly.py        #   prompt 装配（模板加载 + 变量替换）
+│   ├── context.py         #   源码块 / 跨文件 section 装配
+│   ├── dynamic/           #   动态规则 provider（cross_file_refs）+ 执行骨架
+│   ├── publishing.py      #   发布与 cohort 归并
+│   ├── validation.py      #   建议校验 / 合并 / 指纹
+│   ├── manifest.py        #   运行时 manifest 与 RQ job 一致性校验
+│   ├── paths.py           #   worktree 路径约束
+│   ├── untrusted.py       #   不可信内容兼容门面 → security.py
+│   └── types.py           #   Suggestion / FileContext 等共享类型
 ├── commands/
 │   ├── describe.py        # /describe 工作流
 │   ├── improve.py         # /improve 工作流（可 Apply 的 inline 建议）
@@ -138,6 +157,7 @@ reviewagent/
 ├── workers/
 │   ├── tasks.py           # RQ 任务（enqueue_* / run_*）
 │   └── rq_worker.py       # ReviewAgentSpawnWorker（macOS-safe）
+├── reconciler/loop.py     # 定期扫描 open MR，同步 GitLab "click ✓" 状态 + 清扫孤儿 running
 ├── telemetry/
 │   ├── models.py          # 数据模型
 │   ├── store.py           # SQLite 落库（WAL）
@@ -157,7 +177,7 @@ reviewagent/
 
 ## LLM Provider 迁移 (qodercli → qoder-sdk)
 
-> **2026-09 起, 默认 LLM Provider 从 `qodercli`（subprocess）切到 `qoder-sdk`（qoder-agent-sdk）**.
+> **2026-09 起，部署模板（`config/examples/instance.env.example`）默认使用 `qoder-sdk`（qoder-agent-sdk）**；`reviewagent/settings/schema.py` 的默认值仍保留 `qodercli`（旧实例无需改 env 即可升级）。新实例按本节配置 `qoder-sdk`。
 
 ### 背景
 
@@ -195,7 +215,7 @@ JSON 解析补丁（`_strip_line_number_prefix` / `_extract_inner_json` / `_stri
 | subprocess 模式 (`qodercli -p ...`) | SDK 模式 (`QoderAgentOptions`) |
 |---|---|
 | `--model Lite` | `options.model = "Lite"` |
-| `--append-system-prompt {agent.md 内容}` | `options.system_prompt = loader.load(agent)["prompt"]` |
+| `--append-system-prompt {agent.md 内容}` | `options.system_prompt = load_prompt(agent)["prompt"]`（`reviewagent.scenario.prompts`） |
 | `--disallowed-tools write,edit,bash,webfetch,websearch` | `options.disallowed_tools = [...]` |
 | `-w {workdir}` | `options.cwd = str(workdir)` |
 | `--attachment {tmp_diff}` | `options.add_dirs = [workdir]` (diff.patch 已在 workdir) |
@@ -231,18 +251,16 @@ JSON 解析补丁（`_strip_line_number_prefix` / `_extract_inner_json` / `_stri
 
 SDK 路径出问题时, **不需要改代码**, env 切回旧路径即可:
 ```bash
-LLM_PROVIDER=qoder-cli  # 旧 subprocess 路径, 完整保留未动
+LLM_PROVIDER=qodercli  # 旧 subprocess 路径, 完整保留未动
 ```
 两条路径共享同一个 `BaseLLMProvider` 接口 + `LLMResult` 数据结构, 业务代码零感知.
 
-### 验证状态
+### 验证状态（2026-11）
 
-- **399 单元测试通过** (含 22 个新加的 SDK 错误传播测试, `tests/test_qoder_sdk_provider_errors.py`)
-- **E2E 验证**: 真实 GitLab MR 318/319 (`http://127.0.0.1:8929/root/auto-review-test`) 全跑通:
-  - `/describe` 21s 改标题 + 描述, credits 0.0352
-  - `/improve` 103s 发 2 条 inline DiffNote + 顶部总览 + 检视汇总表, credits 0.1263
-- **3 个 pre-existing 失败** (`test_telemetry_section_render.py` 3 个) 在 main 上也失败, 与本次迁移无关
-- **6 个集成测试超时** (`test_auto_detect_*` / `test_dedup_*` / `test_last_activity_at` / `test_webhook_diff_head_lock`) 需真实 GitLab/Redis 服务, 本机跑不完
+- **单元测试**：1418 passed / 2 skipped（`python -m pytest`；需真实 GitLab/Redis 的集成用例不在本机跑）
+- **快速档 E2E**：`scripts/e2e/run_e2e.py --tier fast` 21/21 检查通过（覆盖 34 条 behavior witness）
+- **全量档 E2E**：`scripts/e2e/run_e2e.py --tier full` 24/24 检查通过（8 个功能 + 字段级 telemetry 审计）
+- **历史真实 MR（2026-09）**：MR 318/319 的 `/describe`（21s）与 `/improve`（103s，2 条 inline + 总览 + 汇总表）结果见 [`docs/LLM_PROVIDER_ADAPTER.md`](docs/LLM_PROVIDER_ADAPTER.md) 附录 A（当时快照，非当前测试计数）
 
 
 ## 快速开始
@@ -293,13 +311,14 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 
 | 分组 | 变量 | 说明 |
 |---|---|---|
-| GitLab | `GITLAB_URL` `GITLAB_PERSONAL_ACCESS_TOKEN` `GITLAB_WEBHOOK_SECRET` `GITLAB_BOT_USERNAME` | 必填；PAT 最低 `api` scope |
+| GitLab | `GITLAB_URL` `GITLAB_PERSONAL_ACCESS_TOKEN` `GITLAB_WEBHOOK_SECRET` `GITLAB_BOT_USERNAME` | 前三项必填（PAT 最低 `api` scope）；`GITLAB_BOT_USERNAME` 默认 `review-agent`，用于机器人自评论回环判断 |
 | LLM | `LLM_PROVIDER` `OPENCODE_URL` `OPENCODE_MODEL` `OPENCODE_USERNAME` `OPENCODE_PASSWORD` `OPENCODE_TIMEOUT` | **`qoder-sdk`（推荐）** / `qodercli`（旧 subprocess 兜底） / `opencode`（HTTP API 兜底）；详见 [LLM Provider 迁移](#llm-provider-迁移-qodercli--qoder-sdk) |
-| QoderSDK | `QODER_SDK_PAT` `QODER_SDK_CLI_PATH` `QODER_SDK_MODEL` `QODER_SDK_FALLBACK_MODEL` `QODER_SDK_TIMEOUT` `QODER_SDK_MAX_TURNS` `QODER_SDK_PERMISSION_MODE` `QODER_SDK_DISALLOWED_TOOLS` | **LLM_PROVIDER=qoder-sdk 时必填**；`QODER_SDK_PAT` 替换 `qodercli login` 状态；`QODER_SDK_CLI_PATH` 留空走 PATH，配置非空则严格校验；`QODER_SDK_MODEL` 默认 `Lite`（调试）/ `QODERCLI_MODEL`（生产） |
+| QoderSDK | `QODER_SDK_PAT` `QODER_SDK_CLI_PATH` `QODER_SDK_MODEL` `QODER_SDK_FALLBACK_MODEL` `QODER_SDK_TIMEOUT` `QODER_SDK_MAX_TURNS` `QODER_SDK_PERMISSION_MODE` `QODER_SDK_DISALLOWED_TOOLS` | `LLM_PROVIDER=qoder-sdk` 时仅 `QODER_SDK_PAT` 必填，其余留空走默认；`QODER_SDK_PAT` 替换 `qodercli login` 状态；`QODER_SDK_CLI_PATH` 留空走 PATH，配置非空则严格校验；`QODER_SDK_MODEL` 默认 `Lite`（调试）/ `QODERCLI_MODEL`（生产） |
 | QoderCLI（旧） | `QODERCLI_NODE_PATH` `QODERCLI_JS_PATH` `QODERCLI_MODEL` `QODERCLI_TIMEOUT` `QODERCLI_MAX_TURNS` `QODERCLI_PERMISSION_MODE` `QODERCLI_FALLBACK_MODEL` | 仅 `LLM_PROVIDER=qodercli` 旧 subprocess 路径用，留作兜底；切到 qoder-sdk 后此组可忽略 |
 | Redis/RQ | `REDIS_URL` `RQ_QUEUE_NAME` `RQ_WEEKLY_QUEUE_NAME` `RQ_WORKER_TIMEOUT` `RQ_WORKER_COUNT` | 队列名默认 `review`（周报队列 `review-weekly`）；`RQ_WEEKLY_QUEUE_NAME` 默认 `{RQ_QUEUE_NAME}-weekly`；`RQ_WORKER_COUNT` 控制本地并发 worker 数。`RQ_WORKER_CLASS` 是 `rq` CLI 运维键（不在 schema），写进 systemd unit，见 `docs/DEPLOYMENT.md` |
 | 实例 | `REVIEW_PROFILE` `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` `LOG_FORMAT` `LOG_ROTATION` | profile 名 / 数据目录 / 日志级别 / 日志格式（`text`/`json`）/ 轮转（`single`/`none`）；data_dir ↔ profile 绑定（`instance.json`） |
-| 限制 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 防循环 / 超大 diff 跳过（场景平面，profile 可覆盖） |
+| 防循环 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` | 同 MR 冷却（默认 60s）/ 单 MR 检视调用上限（默认 30）；**实例平面**，写 `instance.env` |
+| 检视限制 | `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 送 LLM 的 diff 上限（默认 50000 / 20000）；**场景平面**，在 `review.yaml` 覆盖 |
 | 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库默认分支读入口文件（默认 `AGENTS.md`）并跟随其中 Markdown 链接发现规则文件；`REPO_CONTEXT_RULES_DIR` 为空=自动发现、非空=显式目录覆盖；`RULE_KEY_PREFIX=auto` 识别任意 `<大写前缀>-RULE-<键>`；`REPO_CONTEXT_MAX_LINES` 渲染行数预算（默认 2000） |
 | improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MIN_SCORE` `IMPROVE_MIN_SEVERITY` `IMPROVE_REVIEW_MODE` `IMPROVE_KEYWORD_PATHS` `IMPROVE_SKIP_TEST_PATHS` `IMPROVE_PARTIAL_CONTEXT_LINES` `IMPROVE_PATCH_CONTEXT_LINES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_PRIORITY_WEIGHT_DIFF` `IMPROVE_PRIORITY_WEIGHT_KEYWORD` `IMPROVE_PRIORITY_WEIGHT_DENSITY` `IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE` `IMPROVE_MAX_FILES_TO_REVIEW` `IMPROVE_NEW_FILE_FULL` `IMPROVE_TEST_SAMPLE_PATHS` `IMPROVE_TEST_SAMPLE_MAX` | 并行度 / 限流 / 模式 / priority 权重（场景平面，profile 提供默认）；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先；文件筛选护栏：`MAX_FILES_TO_REVIEW` 送 LLM 文件数硬上限(必保新增+关键路径)、`NEW_FILE_FULL` 新增文件优先(加分+豁免截断)、`TEST_SAMPLE_PATHS`/`TEST_SAMPLE_MAX` 自动 case 抽样 |
 | 检视过滤 | `REVIEW_EXCLUDE_EXTENSIONS` | 不送审的文件扩展名（默认含 `.md`/`.txt`/图片等） |
@@ -309,14 +328,14 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 | 周报-钉钉 | `REVIEWAGENT_WEEKLY_DASHBOARD_URL` `REVIEWAGENT_WEEKLY_DINGTALK_WEBHOOK_URL` `REVIEWAGENT_WEEKLY_DINGTALK_SECRET` `REVIEWAGENT_WEEKLY_DINGTALK_DRY_RUN` `REVIEWAGENT_WEEKLY_DINGTALK_RETRY` `REVIEWAGENT_WEEKLY_MD_CHUNK_LIMIT` `DINGTALK_WEBHOOK` | 看板地址（渲染到「本周检视概况」末尾，空=不显示）；webhook URL（命名前缀版为准，`DINGTALK_WEBHOOK` 为 schema 别名）；加签 secret；`DRY_RUN` 默认 true（只 log 不推送）；重试次数（默认 3）；Markdown 分块上限（默认 18000） |
 | 周报-标题 | `REVIEWAGENT_WEEKLY_REPORT_TITLE` `REVIEWAGENT_WEEKLY_REPORT_EMOJI` | 标题（空 = 用 `profile.reporting.weekly_title`，内置场景为 `SSD自动化代码检视周报`）/ emoji（默认 📊） |
 
-> 场景平面字段（限制 / 仓库规则 / improve / 检视过滤）优先在
+> 场景平面字段（检视限制 / 仓库规则 / improve / 检视过滤）优先在
 > `config/profiles/<name>/review.yaml` 里调整，环境变量只作临时调试；
 > 实例平面字段放 `config/instance.env`。完整说明见 [`config/README.md`](config/README.md)。
 
 ## 端到端验证
 
 ```bash
-# 快速档：进程内跑完整配置生效性审计（92 字段 witness + 21 组行为 delta），无需外部服务
+# 快速档：进程内跑配置生效性审计（catalog 92 字段：34 behavior / 56 live / 2 script；快速档执行 21 组行为检查），无需外部服务
 .venv/bin/python scripts/e2e/run_e2e.py --tier fast
 
 # 全量档：临时 GitLab 项目/分支/MR + 真实 LLM/队列，跑 8 个功能并按真实产物校验配置
@@ -340,7 +359,7 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 - Phase 1 全套：骨架、污染防护、LLM 客户端、webhook 接入、RQ 任务、GitLab 客户端、`/describe` 端到端。
 - `/improve` + 可 Apply 的 inline suggestion（`/adopt` `/dismiss` + GitLab UI Apply 自动识别）。
 - LLM Provider 适配层（`reviewagent/llm/`）：**qoder-sdk（qoder-agent-sdk，默认推荐）** + qodercli subprocess（旧路径兜底） + opencode HTTP API, 配置一键切换; SDK 异常完整映射到 3 个 ReviewAgent 异常类, 上层业务代码零改动.
-- Telemetry API（`/api/v1/telemetry/*`：health / runs / mr / suggestions / stats / timeline / metrics / dismissals / weekly-reports）。
+- Telemetry API（`/api/v1/telemetry/*`：health / runs / mr / mrs / summary / suggestions / stats / timeline / metrics/{overview,severity,rules,authors} / dismissals / weekly-reports）。
 - 周报生成（JSON + MD，钉钉推送支持，默认 dry_run）。三段 LLM 调用。
 - 跨次建议去重（fingerprint）+ 跨文件引用分析 + 评分过滤。
 
@@ -353,7 +372,7 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 - LLM 调用为同步阻塞，单任务耗时 = 模型推理时间（实测 `/describe` ~25s，`/improve` 可达数分钟）。
 - diff 过大（> `MAX_DIFF_CHARS`）会跳过检视；prompt 内联 diff 截断到 `OPENCODE_MAX_DIFF_CHARS`，超出触发一次减半重试。
 - ~~qodercli subprocess 模式每次调用启动新进程，有约 1-2s 启动开销（可接受）。~~
-- **已迁移到 qoder-sdk**：每次 `query()` 走 SDK 协议，免去 subprocess 启动开销；JSON 解析补丁全部干掉（19k → 1k 行）；真 token / 真 credits / 真实 context 占比可用。
+- **已迁移到 qoder-sdk**：每次 `query()` 走 SDK 协议，免去 subprocess 启动开销；JSON 解析补丁全部删除（`qoder_sdk_provider.py` 约 860 行，旧 subprocess 模块保留为兜底）。
 
 ---
 

@@ -37,8 +37,9 @@
 两个指纹都由启动路径（`bootstrap.startup`）输出在 `config.resolved` 与
 `bootstrap.ready` 日志行里，可用
 `journalctl -u reviewagent-webhook -u 'reviewagent-worker@*'` 核对；`GET /readyz`
-只返回 `ok` / `unready` + 原因列表（profile / RuleSet / instance / SQLite / Redis），
-切换场景或升级后先看它再放流量。
+就绪时返回 `{"status": "ok", "profile": ..., "profile_fingerprint": ...}`，未就绪时
+返回 503 + `{"status": "unready", "reasons": [...]}`（profile / RuleSet / instance /
+SQLite / Redis）。切换场景或升级后先看它再放流量。
 
 ## 生成输出
 

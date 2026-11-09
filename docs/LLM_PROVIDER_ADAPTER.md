@@ -1,6 +1,11 @@
 # LLM Provider 适配层 — 可行性与实施方案
 
 > 将 ReviewAgent 的 LLM 推理引擎从 opencode 扩展为同时支持 opencode + qodercli，通过配置自动切换。
+>
+> **当前状态（2026-11）**：`LLM_PROVIDER` 支持 `qoder-sdk`（部署模板默认、推荐）、`qodercli`
+> （schema 默认，旧 subprocess 路径）与 `opencode`（HTTP API 兜底）。本文正文是当初
+> opencode → qodercli 的设计记录；qodercli → qoder-sdk 的切换见附录 A。正文中的
+> “当前实现”“验证结果”均指写作时（2026-07 前后）的代码与测试计数，不是当前快照。
 
 ## 1. 背景
 
@@ -23,7 +28,7 @@ opencode serve (daemon, port 4096)
 
 ```python
 OpencodeClient.run(
-    agent: str,              # agent 名称 (对应 prompts/*.md)
+    agent: str,              # agent 名称 (对应 profiles/<profile>/prompts/*.md)
     prompt: str,             # user prompt
     workdir: Path,           # git worktree 路径
     files: list[Path],       # diff 文件列表
@@ -182,10 +187,10 @@ cmd = [..., "--agents", agents_json, "--agent", "code-reviewer", prompt]
 
 ### 3.3 Agent 定义转换
 
-当前 prompts/*.md 的 frontmatter 如何转成 qodercli `--agents` JSON：
+当前 `profiles/<profile>/prompts/*.md` 的 frontmatter 如何转成 qodercli `--agents` JSON：
 
 ```
-prompts/improve.md                    →   --agents JSON
+profiles/<profile>/prompts/improve.md →   --agents JSON
 ─────────────────────                     ──────────────
 frontmatter:
   name: code-improver                 →   {"code-improver": {
@@ -208,7 +213,7 @@ class LLMResult:
     completion_tokens: int = 0
     model: str = ""
     duration_ms: int = 0       # 调用耗时
-    provider: str = ""         # "opencode" | "qodercli"
+    provider: str = ""         # "opencode" | "qodercli" | "qoder-sdk"
     raw_output: str = ""       # 原始输出（调试用）
 
 class BaseLLMProvider:
@@ -450,7 +455,7 @@ v2 阶段把 v1 的一次性 subprocess 替换为长连接 `qodercli --acp`。�
 - 6 个 `_drive()` 路径覆盖: `error_during_execution` raise / `error_max_turns` 返回部分 / `success` 正常 / SDK 异常映射 / tolerant_markdown 兜底 / 非 JSON 严格模式 raise
 - 3 个 `_resolve_cli_path` 严格性测试: 显式路径不存在必须报错 (不静默 fallback PATH)
 
-### A.5 验证结果
+### A.5 验证结果（2026-09-06 快照）
 
 | 项 | 状态 |
 |---|---|
@@ -545,7 +550,7 @@ except QoderCLIError as e:
 - **TestClassifyResultRetryable (13 个)** — `_classify_result_retryable` 参数化覆盖 8 个 permanent + 3 个 retryable + max_turns + unknown
 - **TestDriveResultMessageErrorFields (7 个)** — `_drive` 收到 `is_error=True` 时 raise 异常带 `error_code=105` / `retryable=True` (500) / `retryable=None` (无前缀) / `subtype` / `session_id`；`error_max_turns` 不 raise；SDK 异常映射字段；asyncio 超时 `timeout_ms=timeout*1000`；非 JSON 输出带 `subtype + session_id`
 
-### A.7 验证结果 (after 错误处理完善)
+### A.7 验证结果（2026-09-07 快照，after 错误处理完善）
 
 | 项 | 状态 |
 |---|---|

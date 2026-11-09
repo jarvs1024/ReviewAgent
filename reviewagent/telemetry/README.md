@@ -57,9 +57,9 @@
 | `status` | str | `running` / `success` / `failed` / `timeout` / `skipped` |
 | `error` | str \| None | 失败时错误摘要 |
 | `model` | str \| None | LLM 模型名 |
-| `llm_provider` | str \| None | LLM provider 标识 (`opencode` / `qodercli`), `finish_run` 时由 worker 写入, 给 MR detail API 返回 `current_llm_provider` 用 |
+| `llm_provider` | str \| None | LLM provider 标识 (`opencode` / `qodercli` / `qoder-sdk`), `finish_run` 时由 worker 写入, 给 MR detail API 返回 `current_llm_provider` 用 |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | int | LLM token 统计; `total_tokens` 在 finish_run 中由 `prompt + completion` 计算 |
-| `cost_credits` | float | 真实成本信号 (qodercli `total_credits`); token 不可得时 (qodercli CLI 路径不返回 token) 的可信计量, 默认 `0.0` |
+| `cost_credits` | float | 真实成本信号 (`total_credits`, qodercli / qoder-sdk 路径); token 不可得时的可信计量, 默认 `0.0` |
 | `duration_ms` | int | 实际执行时长 |
 
 ## Emit API (`events.py`)
@@ -70,7 +70,7 @@
 |---|---|
 | `emit_mr_activity(mr: MRRecord)` | 写入或更新 `mr_activity` 行 (保留已有 `author_sticky`) |
 | `emit_run_started(run: ReviewRun) -> int` | 插入 `review_runs` 行, 返回 `run_id` (失败返回 `-1`) |
-| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0, llm_provider=None)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli 路径专用); `llm_provider` 透传给 store (记录当前 run 用的 opencode/qodercli) |
+| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0, llm_provider=None)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli / qoder-sdk 路径有值); `llm_provider` 透传给 store (记录当前 run 用的 opencode/qodercli/qoder-sdk) |
 | `emit_description_generated(project_id, mr_iid)` | 标记 `description_generated=1` + 同步 touch `last_activity_at` |
 
 调用点 (`reviewagent/commands/_common.py`):
@@ -149,7 +149,7 @@
 | 方法 | 用途 |
 |---|---|
 | `save_agent_output_fail(text, agent)` | 写 `agent_failures` 表前 500 字符 (调试用, 无 API 端点) |
-| `summary(*, since, until) -> dict` | 周报 / 仪表盘聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens,cost_credits}}` / `by_status` / `by_day` / `top_mrs` (前 10) — `cost_credits` 由 `SUM(cost_credits) as credits` 给出, 仅 qodercli 路径非零 |
+| `summary(*, since, until) -> dict` | 周报 / 仪表盘聚合: `total_runs` / `by_command{cmd:{count,success,failed,timeout,running,avg_duration_ms,total_tokens,cost_credits}}` / `by_status` / `by_day` / `top_mrs` (前 10) — `cost_credits` 由 `SUM(cost_credits) as credits` 给出, qodercli / qoder-sdk 路径非零 |
 
 ## 状态 / 来源标签映射 (`router.py`)
 
@@ -197,14 +197,14 @@
 | `id` | int | PK, autoincrement |
 | `project_id` / `mr_iid` | int | 归属 MR |
 | `command` | text | describe / review / improve |
-| `triggered_by` | text | webhook / note / scheduled |
+| `triggered_by` | text | webhook / push / note / adopt |
 | `actor_username` | text | 触发者 username |
 | `started_at` / `finished_at` | timestamp | 起止时间 (UTC) |
 | `status` | text | running / success / failed / timeout / skipped |
 | `error` | text | 失败摘要 |
 | `model` | text | LLM 模型名 |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | int | token 统计; total_tokens 在 `finish_run` 中由 `prompt + completion` 计算 |
-| `cost_credits` | real | qodercli 路径真实成本 (`total_credits`); default 0, 仅 qodercli CLI 调用写非零 |
+| `cost_credits` | real | 真实成本 (`total_credits`, qodercli / qoder-sdk 路径); default 0 |
 | `duration_ms` | int | 实际执行时长 |
 | `rule_keys_cited` | text | comma-joined rule_keys (improve 后回填) |
 | `suggestion_count` | int | improve 命中 suggestion 数 |
@@ -432,7 +432,7 @@ WHERE state = 'applied' AND adoption_source IS NULL;
 
 ## 端到端验证
 
-完整测试 (`pytest tests/`，当前 452 passed / 0 failed — 不含与 telemetry 无关的预存在 fakeredis lock 测试 `test_lock_ttl_and_fence.py`):
+完整测试 (`pytest`，当前 1418 passed / 2 skipped — 跳过项是 CN 版 SDK 未安装时的 `test_qoder_sdk_edition.py` 两条):
 
 **核心 telemetry / dedup / 状态机**
 
@@ -602,7 +602,7 @@ launchctl load ~/Library/LaunchAgents/com.jarvs.reviewagent.reconciler.plist
 | 端点 `/weekly-reports` | ✅ | ✅ | 列表 + 单条读取 |
 | 字段 `cohort_key` | ✅ | ✅ | 内部去重 |
 | 字段 `severity_source` | ✅ | ✅ | `rule` / `llm`，发布时写入 |
-| Severity 规则文件 (.agents/rules) | ✅ | ✅ | 走 `repo_context` 自动加载 |
+| Severity 规则文件（运行时发现） | ✅ | ✅ | 从默认分支入口文件（默认 `AGENTS.md`）跟随 Markdown 链接发现规则文件；`REPO_CONTEXT_RULES_DIR` 可显式覆盖 |
 
 ## 周报 (`reviewagent/reporting/`)
 

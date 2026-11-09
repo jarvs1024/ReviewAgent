@@ -10,7 +10,7 @@
 | `$DATA_DIR/telemetry.db` | **必须** | 检视历史 / 建议 / 采纳记录 / 周报索引（SQLite） |
 | `$DATA_DIR/instance.json` | **必须** | profile ↔ data_dir 绑定（含 schema_version）；丢了会重建绑定，跨场景恢复时是门禁 |
 | `$DATA_DIR/repos/` | **必须** | bare git 仓库（多 MR 共用对象库；丢了可重建，但重 clone 很慢） |
-| `$DATA_DIR/weekly_reports/` | 建议 | 周报产物（JSON / Markdown / xlsx），API 直接读取 |
+| `$DATA_DIR/weekly_reports/` | 建议 | 周报产物（JSON / Markdown），API 直接读取 |
 | `config/instance.env` | **必须（高敏）** | 凭证（GitLab PAT / webhook secret / Qoder PAT / 钉钉 webhook 与 secret）；按密钥管理流程保存，不要进 git |
 | `config/profiles/*/review.yaml` | 建议 | 用户场景调参；无密钥，可随代码库版本化 |
 | `/tmp/reviewagent-worktrees/` | 不备份 | 每次任务临时目录，可重建 |
@@ -89,7 +89,10 @@ tar -C "$NEW_DATA_DIR" -xzf "$BACKUP_DIR/repos.tar.gz"
 tar -C "$NEW_DATA_DIR" -xzf "$BACKUP_DIR/weekly_reports.tar.gz" 2>/dev/null || true
 ```
 
-准备好后把 webhook / worker / weekly 三个 unit 的 `Environment=REVIEWAGENT_DATA_DIR=...`
+准备好后把 webhook / worker / weekly-worker / weekly-enqueue / reconciler 五个 unit
+（`deploy/reviewagent-webhook.service`、`reviewagent-worker@.service`、
+`reviewagent-weekly-worker.service`、`reviewagent-weekly-enqueue.service`、
+`reviewagent-reconciler.service`）的 `Environment=REVIEWAGENT_DATA_DIR=...`
 指向新目录（`systemctl edit --full`），`systemctl daemon-reload`。
 
 ## 五、恢复后校验

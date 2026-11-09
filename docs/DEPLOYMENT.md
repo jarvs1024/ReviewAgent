@@ -48,15 +48,20 @@ sudo bash deploy.sh --no-verify            # 部署但跳过 verify.sh
 （`600`、属主为服务账号）后退出——填入 `GITLAB_URL` / PAT / `GITLAB_WEBHOOK_SECRET`
 （`qoder-sdk` 还需 `QODER_SDK_PAT`）再执行一次即完成部署。脚本依次完成：
 
-1. 校验代码目录、服务账号（缺失时 `useradd --system` 创建）；
-2. 以服务账号创建 venv 并 `pip install -e ".[dev]"`；
-3. 建好 `/var/lib/reviewagent/{repos,weekly_reports}` 与 `/tmp/reviewagent-worktrees`（属主 `workflow`）；
-4. 按 `REDIS_URL` 解析 host/port，优先 `systemctl enable --now redis-server`（没有 distro unit 时手动拉起并告警）；
-5. `LLM_PROVIDER=qodercli` 时同步 `.qoder/agents`；
-6. 跑 `deploy/preflight.sh`（任何 FAIL 都中止，不带着坏配置改 systemd）；
-7. 安装 `deploy/*.service|*.timer`（自动把默认路径替换成 `PROJECT_DIR` / `REVIEWAGENT_DATA_DIR`），
-   `daemon-reload` 后 `enable --now` 全部 unit，并按 `RQ_WORKER_COUNT` 启 `reviewagent-worker@1..N`；
-8. 跑 `deploy/verify.sh` 校验开机自启、`/health`、`/readyz`、Redis 与 API/worker 的配置指纹一致性。
+1. `[1/10]` 校验代码目录存在（`reviewagent/main.py`）；
+2. `[2/10]` 确认服务账号（缺失且当前为 root 时 `useradd --system` 创建）；
+3. `[3/10]` 实例配置：首次执行从模板生成 `config/instance.env`（`600`、属主服务账号）后退出；
+   `--check` 在此处只跑 `deploy/preflight.sh` 并以其结果退出（不改系统）；
+4. `[4/10]` 以服务账号创建 venv 并 `pip install -e ".[dev]"`；
+5. `[5/10]` 建好 `/var/lib/reviewagent/{repos,weekly_reports}` 与 `/tmp/reviewagent-worktrees`（属主 `workflow`）；
+6. `[6/10]` 按 `REDIS_URL` 解析 host/port，优先 `systemctl enable --now redis-server`（没有 distro unit 时手动拉起并 `ping` 校验）；
+7. `[7/10]` 跑 `deploy/preflight.sh`（任何 FAIL 都中止，不带着坏配置改 systemd）；
+8. `[8/10]` 场景包附属文件：`LLM_PROVIDER` 为 `qodercli`（含未设置）时同步 `.qoder/agents`（显式 `qoder-sdk` 时跳过）；
+9. `[9/10]` 安装 `deploy/*.service|*.timer`（自动把默认路径替换成 `PROJECT_DIR` / `REVIEWAGENT_DATA_DIR`），
+   下线旧 `reviewagent-worker.service`，`daemon-reload` 后 `enable --now` 全部 unit，
+   按 `RQ_WORKER_COUNT` 启 `reviewagent-worker@1..N` 并关掉多余实例；
+10. `[10/10]` 跑 `deploy/verify.sh` 校验开机自启、`/health`、`/readyz`、Redis 与 API/worker 的配置指纹一致性
+    （`--no-verify` 跳过）。
 
 两个检查脚本也可单独执行：
 
@@ -83,8 +88,9 @@ python3.12 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -e ".[dev]"
 
-# Node.js（LLM_PROVIDER=qodercli 时需要）
-# 确保 node 在 PATH 中，qodercli 通过 npm 全局安装
+# Node.js（qodercli / qoder-sdk 两种模式都需要）
+# 确保 node 在 PATH 中，qodercli 通过 npm 全局安装；qoder-sdk 只是不直接 spawn
+# `qodercli -p`，底层仍依赖 qodercli binary（或用 QODER_SDK_CLI_PATH 指定）
 ```
 
 > 以上步骤（venv、依赖、Redis、目录、unit 安装与开机自启）已由 `deploy.sh` 自动完成，
@@ -160,6 +166,12 @@ Environment=RQ_WORKER_CLASS=reviewagent.workers.rq_worker.ReviewAgentSpawnWorker
 | `reviewagent-weekly.timer` | 每周一 10:30 触发周报（与 `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 默认一致） | `timers.target` |
 | `reviewagent-reconciler.service` | 扫描 open MR 同步 ✓ 状态 + 清扫孤儿 running | — |
 | `reviewagent-reconciler.timer` | 开机 2min 后开始，每 60s 触发一次 reconciler | `timers.target` |
+
+> `reviewagent-weekly.timer` 模板固定为 `OnCalendar=Mon 10:30`；`deploy.sh` 直接安装模板，
+> **不会**按 `REVIEWAGENT_WEEKLY_CRON_SCHEDULE` 改写它。需要自定义时间时，改
+> `config/instance.env` 后执行 `sudo bash scripts/services_ops.sh start`（或 `restart`）：
+> 脚本会写入 `/etc/systemd/system/reviewagent-weekly.timer.d/schedule.conf` drop-in 并
+> `daemon-reload`；只改 env 不重启不会生效。
 
 所有 service 都带启动护栏：
 

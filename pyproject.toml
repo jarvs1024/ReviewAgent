@@ -1,7 +1,7 @@
 [project]
 name = "reviewagent"
 version = "0.1.0"
-description = "GitLab 代码检视平台，基于 opencode + webhook"
+description = "GitLab 代码检视平台：webhook + RQ 队列，通过可插拔 LLM Provider（qoder-sdk / qodercli / opencode）按场景包规则检视 MR"
 requires-python = ">=3.12"
 authors = [{ name = "ReviewAgent Team" }]
 license = { text = "MIT" }

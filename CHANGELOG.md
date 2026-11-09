@@ -7,6 +7,11 @@
 
 ### Changed
 
+- **文档与代码对齐**：README / QUICKSTART / DEPLOYMENT / LLM_PROVIDER_ADAPTER 补充
+  `qoder-sdk`、场景包 prompt 路径（`profiles/<profile>/prompts/`）、`deploy.sh`
+  十阶段与各配置键的平面归属/必填范围；`telemetry` README 修正 `triggered_by` 取值、
+  credits 来源与测试计数；`instance.env.example` 的 `LOG_ROTATION` 可选值改为
+  `single|none`。
 - **prompt 只保留场景库一份**：删除 `reviewagent/prompts/` 兼容门面（`loader.py`
   与 6 个与场景库逐字节重复的 prompt）及场景库中已失效的
   `prompts/_general_rules_block.md`。prompt 统一由 `reviewagent/scenario/prompts.py`

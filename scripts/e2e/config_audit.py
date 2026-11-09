@@ -75,7 +75,7 @@ def static_rows() -> list[ConfigRow]:
 
 
 def run_fast(cfg: Any = None) -> FastAudit:
-    """快速档：静态目录校验 + 18 个行为 witness（进程内 delta）."""
+    """快速档：静态目录校验 + 21 组行为检查（覆盖 34 条 behavior witness，进程内 delta）."""
     if cfg is None:
         from reviewagent.config import current
 

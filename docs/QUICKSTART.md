@@ -22,13 +22,14 @@ python3.12 -m venv .venv
 # 2. 配置
 cp config/examples/instance.env.example config/instance.env
 chmod 600 config/instance.env
-# 编辑 config/instance.env，填入 GITLAB_URL / PAT / WEBHOOK_SECRET（必填）
-# REVIEW_PROFILE 默认 ssd-python-autotest；场景调参见 config/profiles/<name>/review.yaml
+# 编辑 config/instance.env，填入 GITLAB_URL / GITLAB_PERSONAL_ACCESS_TOKEN / GITLAB_WEBHOOK_SECRET（必填）
+# REVIEW_PROFILE 建议显式写；留空时回退 ssd-python-autotest 并打 WARNING；场景调参见 config/profiles/<name>/review.yaml
 
 # 3. 载入配置到当前 shell（config check 读进程环境）
 set -a; source config/instance.env; set +a
 
-# 4. 起 Redis（本地进程；默认 127.0.0.1:6380，避免与其它实例共用）
+# 4. 起 Redis（端口以 REDIS_URL 为准：schema 默认 localhost:6379；
+#    模板与本机脚本用 127.0.0.1:6380，避免与其它实例共用）
 # brew install redis
 # redis-server --port 6380 --bind 127.0.0.1 --dir data/redis --appendonly yes
 
@@ -158,6 +159,7 @@ Worker 报 "git not found"？
   └─ systemd unit PATH 不全 → 加 /usr/bin
 
 LLM 调用失败？
+  ├─ qoder-sdk 模式 → 检查 node + qodercli 在 PATH（或 QODER_SDK_CLI_PATH）、QODER_SDK_PAT 已配置
   ├─ qodercli 模式 → 检查 node 在 PATH 中、qodercli 已安装
   └─ opencode 模式 → 检查 opencode serve :4096 是否运行
 

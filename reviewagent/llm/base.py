@@ -38,7 +38,7 @@ class LLMResult:
             可用于估算 input token 占用，不报 token 数时作为上下文压力信号.
         model: 实际调用的模型名（空字符串表示 provider 未填充）.
         duration_ms: 端到端耗时（毫秒）.
-        provider: provider 名 "opencode" | "qodercli"；用于 telemetry / 日志.
+        provider: provider 名 "opencode" | "qodercli" | "qoder-sdk"；用于 telemetry / 日志.
         raw_output: 原始输出文本（调试 / tolerant_markdown 兜底用）.
     """
 

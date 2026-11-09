@@ -16,15 +16,17 @@ config/
     └── instance.env.example           # instance.env 模板（不含真实密钥）
 ```
 
-## 两个配置平面
+## 三个配置平面
 
 | 平面 | 文件 | 管什么 | 是否入库 |
 | --- | --- | --- | --- |
 | 实例 | `config/instance.env` | GitLab 连接、LLM、Redis、数据目录、场景选择 | 否（含密钥） |
 | 场景 | `config/profiles/<name>/review.yaml` | 检视范围 / 打分 / 限额 / 上下文 / 周报展示 | 是（纯调参） |
+| 规则 | `profiles/<name>/rules/*.md`（随场景包发布） | 规则条文、规则键索引、verbatim/structured 渲染 | 是（随代码库） |
 
 场景包本体（`profiles/<name>/`：prompt 模板、规则条文、能力开关）随代码发布，
-不在本目录维护。生效优先级（后者覆盖前者）：
+不在本目录维护；规则平面是其中的内容，用户不需要也不应该在 `config/` 下覆写它。
+生效优先级（后者覆盖前者）：
 
 ```
 schema 默认值（reviewagent/settings/schema.py）
