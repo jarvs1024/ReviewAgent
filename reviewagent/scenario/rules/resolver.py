@@ -110,9 +110,23 @@ class RuleSet:
         )
 
 
+def _effective_rule_keys(profile: Profile) -> dict[str, Any]:
+    """仓库键前缀以运行配置为唯一来源（`review.yaml` / env → `rule_key_prefix`）.
+
+    `load_profile()` 已把 profile.yaml / review.yaml 的 `rule_keys.repo_prefix`
+    映射进配置；手工构造 Profile 时配置值仍是 schema 默认 `auto`，而 auto 是
+    任意前缀的超集，不会误拒规则包.
+    """
+    from reviewagent.config import current
+
+    rule_keys = dict(profile.rule_keys)
+    rule_keys["repo_prefix"] = current().rule_key_prefix
+    return rule_keys
+
+
 def assemble_base(profile: Profile) -> RuleSet:
     """装配基础 `RuleSet`（profile 规则包 -> 去重规则 + 正文 + 键模式）."""
-    key_patterns = build_key_patterns(profile.rule_keys)
+    key_patterns = build_key_patterns(_effective_rule_keys(profile))
     pairs = [
         (order, parse_pack(profile.root / rel, language=profile.language, root=profile.root))
         for order, rel in enumerate(profile.rules)

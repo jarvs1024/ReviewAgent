@@ -23,12 +23,23 @@ AUTO_REPO_KEY_SOURCE = r"[A-Z][A-Z0-9]*-RULE-[A-Z0-9-]+"
 _AUTO_PREFIXES = frozenset({"", "auto", "*"})
 
 
+def normalize_repo_prefix(prefix: str | None) -> str:
+    """归一化仓库规则键前缀：`auto`/空 → `""`；`ssd`/`SSD-RULE` → `SSD`."""
+    value = (prefix or "").strip()
+    if not value or value.lower() in _AUTO_PREFIXES:
+        return ""
+    value = value.upper().rstrip("-")
+    if value.endswith("-RULE"):
+        value = value[: -len("-RULE")].rstrip("-")
+    return value
+
+
 def repo_key_source(prefix: str | None) -> str:
     """返回仓库键正则源码；`auto`/空 表示不绑定具体前缀."""
-    value = (prefix or "").strip()
-    if value.lower() in _AUTO_PREFIXES:
+    normalized = normalize_repo_prefix(prefix)
+    if not normalized:
         return AUTO_REPO_KEY_SOURCE
-    return rf"{re.escape(value)}-RULE-[A-Z0-9-]+"
+    return rf"{re.escape(normalized)}-RULE-[A-Z0-9-]+"
 
 
 @dataclass(frozen=True)

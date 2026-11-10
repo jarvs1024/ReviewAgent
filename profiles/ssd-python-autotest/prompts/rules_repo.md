@@ -1,6 +1,6 @@
 ## 🔴 优先 2 — 仓库自定义规则（运行时从被检仓库获取）
 
-规则来源是本次注入的 `<rule_index>`（键清单）与 `<instruction_files>`（AGENTS.md 及其链接到的规则文件原文）。
+规则来源是本次注入的 `<rule_index>`（键清单）与 `<instruction_files>`（被检仓库配置的规则目录下规则文件原文）。
 先逐条扫描，命中即产 suggestion，`rationale` 引用规则键。
 
 **获取协议（强制）**：

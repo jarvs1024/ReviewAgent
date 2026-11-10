@@ -325,15 +325,16 @@ _BASE_FILES: dict[str, str] = {
         "def test_load():\n"
         '    assert load([" a "]) == ["a"]\n'
     ),
-    # 仓库规则上下文（入口文件 + 链接发现的规则文件）
-    "AGENTS.md": (
-        "# E2E fixture project\n\n"
-        "E2E repo context marker: prefer explicit imports over wildcard imports.\n\n"
-        "规则入口：[`.agents/rules/team.md`](.agents/rules/team.md)\n"
-    ),
+    # 仓库规则目录：运行时按配置递归扫描（默认 .agents/rules），无需入口文件
     ".agents/rules/team.md": (
         "# Team rules\n\n"
-        "Prefer explicit imports. E2E repo rule marker.\n"
+        "Prefer explicit imports. E2E repo rule marker.\n\n"
+        "| 规则键 | 严重度 | 摘要 |\n|---|---|---|\n"
+        "| `SSD-RULE-E2E-IMPORT` | high | 禁止通配 import |\n"
+    ),
+    ".agents/rules/team/nested.md": (
+        "# Nested rules\n\n"
+        "E2E repo context marker: recursive scan reaches nested files.\n"
     ),
 }
 

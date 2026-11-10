@@ -50,9 +50,10 @@ _REMOVED_PROFILE_KEYS = {
     "extends", "file_filter", "scoring", "limits", "context", "repo_context",
 }
 # 用户配置只开放"按场景调参"的组；身份 / 规则 / 提示词仍由场景包作者维护。
+# `rule_keys` 只开放 `repo_prefix`（见 _SCENARIO_MAPPING），规则内容本身仍归场景包。
 _ALLOWED_REVIEW_CONFIG_KEYS = {
     "schema_version", "file_filter", "scoring", "limits", "context",
-    "repo_context", "reporting",
+    "repo_context", "rule_keys", "reporting",
 }
 # `reporting.actions_file` 是场景包内的代码路径引用，开放给用户会造成越界读取，
 # 因此只开放展示/扫描类键。
@@ -85,7 +86,6 @@ _SCENARIO_MAPPING: dict[tuple[str, ...], str] = {
     ("limits", "batch", "max_diff_lines"): "improve_batch_max_diff_lines",
     ("limits", "batch", "max_files"): "improve_batch_max_files",
     ("limits", "batch", "max_total_lines"): "improve_batch_max_total_lines",
-    ("repo_context", "files"): "repo_context_files",
     ("repo_context", "rules_dir"): "repo_context_rules_dir",
     ("repo_context", "max_lines"): "repo_context_max_lines",
     ("rule_keys", "repo_prefix"): "rule_key_prefix",

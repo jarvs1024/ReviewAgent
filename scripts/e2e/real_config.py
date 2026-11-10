@@ -7,7 +7,7 @@
 * ``limits.full_files`` —— 真实文件集合上 full 策略配额被遵守；
 * ``scoring.test_sample_paths / test_sample_max`` —— 真实 51 文件分支抽样。
 
-另含 ``repo_context`` 的真实仓库拉取断言（AGENTS.md + rules_dir）。
+另含 ``repo_context`` 的真实仓库拉取断言（按配置规则目录递归扫描）。
 所有断言都基于 GitLab API 返回的真实 diff/文件内容；纯计算部分可单测。
 """
 from __future__ import annotations
@@ -243,14 +243,18 @@ class _StackGitlabClient:
         except RuntimeError:
             return None
 
-    def list_repository_tree(self, project_id: int, path: str, ref: str) -> list[dict]:
-        query = urllib.parse.urlencode({"path": path, "ref": ref, "per_page": 100})
+    def list_repository_tree(
+        self, project_id: int, path: str, ref: str, *, recursive: bool = True
+    ) -> list[dict]:
+        query = urllib.parse.urlencode(
+            {"path": path, "ref": ref, "per_page": 100, "recursive": str(recursive).lower()}
+        )
         data = stack.gitlab_get(f"/projects/{project_id}/repository/tree?{query}")
         return list(data) if isinstance(data, list) else []
 
 
 def audit_repo_context(project_id: int, cfg: Any, log: list[str]) -> list[tuple[str, bool, str]]:
-    """从真实仓库默认分支拉取入口文件 + 链接发现的规则文件并渲染."""
+    """按配置的规则目录递归拉取 `.md` 并渲染（默认 `.agents/rules`）."""
     from reviewagent.scenario.rules import repo
 
     client = _StackGitlabClient()
@@ -260,28 +264,28 @@ def audit_repo_context(project_id: int, cfg: Any, log: list[str]) -> list[tuple[
         files = repo.fetch_rule_files(client, project_id)
         block = repo.build_repo_context(client, project_id)
 
-    expected = [p for p in cfg.repo_context_files if p.strip()]
-    rules_dir = (cfg.repo_context_rules_dir or "").rstrip("/")
+    rules_dir = repo._normalize_rules_dir(cfg.repo_context_rules_dir)
     dir_files = [p for p in files if rules_dir and p.startswith(f"{rules_dir}/")]
-    linked = [p for p in files if p not in expected]
+    nested = [p for p in dir_files if "/" in p[len(rules_dir) + 1:]]
     ok = (
-        bool(expected)
-        and all(p in files for p in expected)
-        and (not rules_dir or bool(dir_files))
-        and bool(linked)
+        bool(rules_dir)
+        and bool(files)
+        and len(dir_files) == len(files)
+        and bool(nested)
         and "<instruction_files>" in block
-        and "E2E repo context marker" in block
         and "E2E repo rule marker" in block
+        and "E2E repo context marker" in block
+        and "SSD-RULE-E2E-IMPORT" in block
     )
     log.append(
-        f"[{stack.now_iso()}] repo_context pid={project_id} expected={expected} "
-        f"dir={rules_dir} files={sorted(files)}"
+        f"[{stack.now_iso()}] repo_context pid={project_id} dir={rules_dir} "
+        f"files={sorted(files)}"
     )
     return [
         (
             "repo_context",
             ok,
-            f"expected={expected} dir={rules_dir} linked={linked} -> files={sorted(files)} "
+            f"dir={rules_dir} nested={nested} -> files={sorted(files)} "
             f"rendered={len(block)}B",
         )
     ]

@@ -332,3 +332,21 @@ def test_normalize_keys_promotion_skips_existing_key(tmp_path):
     )
     ruleset = assemble_base(promoted)
     assert ruleset.normalize_keys("R-LOG for logging") == ["R-LOG"]
+
+
+def test_assemble_base_takes_repo_prefix_from_runtime_config(monkeypatch):
+    """仓库键前缀以运行配置为唯一来源（review.yaml / env → rule_key_prefix）."""
+    from reviewagent import config as config_module
+    from reviewagent.config import current
+
+    profile = load_profile(None)
+    monkeypatch.setattr(
+        config_module, "_current", replace(current(), rule_key_prefix="SSD-RULE")
+    )
+    ruleset = assemble_base(profile)
+    assert ruleset.key_patterns.is_repo("SSD-RULE-NO-BARE-PRINT") is True
+    assert ruleset.key_patterns.is_repo("ZZZ-RULE-OTHER") is False
+
+    monkeypatch.setattr(config_module, "_current", replace(current(), rule_key_prefix="auto"))
+    auto_ruleset = assemble_base(profile)
+    assert auto_ruleset.key_patterns.is_repo("ZZZ-RULE-OTHER") is True

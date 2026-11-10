@@ -216,18 +216,43 @@ def test_review_config_repo_context_and_reporting_groups(tmp_path, config_dir):
         config_dir, "alt",
         {
             "schema_version": 1,
-            "repo_context": {"files": ["AGENTS.md", "CONTRIBUTING.md"], "max_lines": 300},
+            "repo_context": {"rules_dir": ".qoder/rules/", "max_lines": 300},
+            "rule_keys": {"repo_prefix": "SSD-RULE"},
             "reporting": {"weekly_title": "自定标题", "repo_scan_extensions": [".py"]},
         },
     )
 
     profile = load_profile("alt", root=tmp_path)
 
-    assert current().repo_context_files == ("AGENTS.md", "CONTRIBUTING.md")
+    assert current().repo_context_rules_dir == ".qoder/rules/"
     assert current().repo_context_max_lines == 300
+    assert current().rule_key_prefix == "SSD-RULE"
     assert profile.reporting["weekly_title"] == "自定标题"
     assert profile.reporting["repo_scan_extensions"] == [".py"]
-    assert profile.sources["repo_context_files"] == "config"
+    assert profile.sources["repo_context_rules_dir"] == "config"
+    assert profile.sources["rule_key_prefix"] == "config"
+
+
+def test_review_config_rule_keys_only_allows_repo_prefix(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(
+        config_dir, "alt",
+        {"schema_version": 1, "rule_keys": {"builtin_pattern": "R-.*"}},
+    )
+
+    with pytest.raises(ValueError, match=r"rule_keys\.builtin_pattern"):
+        load_profile("alt", root=tmp_path)
+
+
+def test_review_config_repo_context_files_no_longer_allowed(tmp_path, config_dir):
+    _write_profile(tmp_path, "alt")
+    _write_review(
+        config_dir, "alt",
+        {"schema_version": 1, "repo_context": {"files": ["AGENTS.md"]}},
+    )
+
+    with pytest.raises(ValueError, match=r"repo_context\.files"):
+        load_profile("alt", root=tmp_path)
 
 
 def test_review_config_reporting_actions_file_not_user_overridable(tmp_path, config_dir):

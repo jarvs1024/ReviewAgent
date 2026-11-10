@@ -511,11 +511,18 @@ def check_repo_context_max_lines(cfg: Any) -> str:
         def get_file_at_sha(self, _pid: int, path: str, _ref: str):
             return self.files.get(path)
 
-        def list_repository_tree(self, _pid: int, _path: str, _ref: str):
-            return []
+        def list_repository_tree(
+            self, _pid: int, path: str, _ref: str, *, recursive: bool = True
+        ):
+            prefix = f"{path.rstrip('/')}/" if path else ""
+            return [
+                {"type": "blob", "path": p}
+                for p in self.files
+                if p.startswith(prefix)
+            ]
 
     content = "\n".join(f"line-{i}" for i in range(40))
-    client = _FakeGitlab({"AGENTS.md": content})
+    client = _FakeGitlab({".agents/rules/big.md": content})
 
     def render(max_lines: int) -> str:
         repo._files_cache.clear()

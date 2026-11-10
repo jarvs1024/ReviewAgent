@@ -1,6 +1,7 @@
 # 场景调参：ssd-python-autotest（叠加在 profiles/ssd-python-autotest 之上）
 #
-# 只允许六组：file_filter / scoring / limits / context / repo_context / reporting。
+# 只允许七组：file_filter / scoring / limits / context / repo_context /
+# rule_keys / reporting。
 # 只写"与场景包默认不同"的值；不写的键沿用 profile.yaml 默认。
 # 本文件会入库，禁止写入 token / webhook 等密钥（密钥只放 config/instance.env）。
 #
@@ -9,6 +10,14 @@
 #           bash scripts/restart_local.sh
 
 schema_version: 1
+
+# 仓库规则（默认值，按需放开）：
+# repo_context:
+#   # 被检仓库根目录下的规则目录，递归扫描其中所有 .md；空=关闭
+#   rules_dir: .agents/rules
+# rule_keys:
+#   # auto=任意 <大写前缀>-RULE-<键>；SSD / SSD-RULE 可收紧命名空间
+#   repo_prefix: auto
 
 file_filter:
   # 不进入检视的路径（规则文件/框架自测/临时脚本/文档/工具目录）。

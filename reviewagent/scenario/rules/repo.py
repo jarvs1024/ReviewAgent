@@ -11,11 +11,11 @@
     - 提取规则键 (如 ZLG-RULE-NO-LOG-EXC)
     - TTL 缓存避免重复 API 调用
 
-规则文件**不假设固定目录/前缀/条数**：从 `repo_context_files` 入口文件
-（默认 `AGENTS.md`）出发，跟随其中的 Markdown 链接发现规则索引与规则文件；
-`index.md` 自动展开同目录，目录链接展开其一层的 `.md`；`repo_context_rules_dir`
-保留为显式覆盖（默认空=自动）。发现结果同时生成运行时 `<rule_index>`，
-保证截断时模型仍能拿到完整键清单。
+规则文件**不假设目录/前缀/条数**：只扫描 `repo_context_rules_dir` 配置的
+仓库根目录相对路径（默认 `.agents/rules`），递归收集其中的 `.md`；目录与
+规则键前缀都由配置决定（`review.yaml` / 环境变量），工具里不写死。目录为空
+表示关闭仓库规则。扫描结果同时生成运行时 `<rule_index>`，保证截断时模型
+仍能拿到完整键清单。
 
 `parse_repo_overlay` 把仓库规则表（Markdown 表格行）转成请求级 `Rule` 覆盖：
 * 仓库新规则：键命中 `base.key_patterns.is_repo(key)`，任意键均可新增；
@@ -29,11 +29,10 @@ from __future__ import annotations
 import posixpath
 import re
 import time
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import replace
 from html import escape
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
 
 from reviewagent.logging_setup import logger
 from reviewagent.scenario.rules.model import Rule
@@ -52,17 +51,10 @@ MARKDOWN_FENCE = "`````"
 _SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 _REPO_RULE_PRIORITY = 1000
 
-# 动态发现护栏：入口→index→规则文件 至多两跳；文件数与单文件体积设上限，
-# 避免 AGENTS.md 链接到整个文档树时把默认分支全部拉下来。
-_MAX_LINK_DEPTH = 2
+# 目录扫描护栏：文件数与单文件体积设上限，避免规则目录链到整个文档树时
+# 把默认分支全部拉下来。
 _MAX_DISCOVERED_FILES = 60
 _MAX_RULE_FILE_BYTES = 512 * 1024
-_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)")
-_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-
-# 运行时规则索引使用通用仓库键形状（任意大写前缀），与具体仓库无关。
-_REPO_KEY_SOURCE = r"[A-Z][A-Z0-9]*-RULE-[A-Z0-9-]+"
-_REPO_KEY_RE = re.compile(_REPO_KEY_SOURCE)
 _HEADING_RE = re.compile(r"^###\s+(\S+)(?:\s+(.*))?$")
 
 # ---------- 缓存 ----------
@@ -222,55 +214,38 @@ _files_cache: dict[str, dict[str, str]] = {}
 _files_cache_ts: dict[str, float] = {}
 
 
-def _parse_markdown_links(text: str) -> list[str]:
-    """提取 Markdown 内联链接目标（`[text](target)`），保持出现顺序."""
-    return [m.group(1).strip() for m in _MD_LINK_RE.finditer(text or "")]
-
-
-def _resolve_repo_link(target: str, base_dir: str) -> tuple[str, bool] | None:
-    """把 Markdown 链接解析为仓库相对路径.
-
-    只接受仓库内相对链接：拒绝外链 / 绝对路径 / 反斜杠 / `..` 段；
-    返回 `(path, is_dir)`，无法安全解析时返回 None。
-    """
-    raw = target.strip().strip("<>").strip()
-    if not raw or raw.startswith("#"):
-        return None
-    if _SCHEME_RE.match(raw):
-        return None
-    raw = unquote(raw.split("#", 1)[0].split("?", 1)[0]).strip()
-    if not raw or raw.startswith("/") or "\\" in raw:
-        return None
-    is_dir = raw.endswith("/")
+def _normalize_rules_dir(value: str) -> str:
+    """把配置的规则目录归一化为仓库根相对路径；空/非法返回 ""（关闭扫描）."""
+    raw = (value or "").strip()
+    while raw.startswith("./"):
+        raw = raw[2:]
     raw = raw.rstrip("/")
-    if not raw:
-        return None
-    if any(seg == ".." for seg in raw.split("/")):
-        return None
-    resolved = posixpath.normpath(posixpath.join(base_dir, raw))
-    if resolved in ("", ".", "..") or resolved.startswith(("../", "/")):
-        return None
-    return resolved, is_dir
+    if not raw or raw.startswith("/") or "\\" in raw:
+        return ""
+    resolved = posixpath.normpath(raw)
+    if resolved in (".", "..") or resolved.startswith(("../", "/")):
+        return ""
+    return resolved
 
 
 def _list_md_files(
     gitlab_client: Any, project_id: int, directory: str, ref: str, *, recursive: bool
 ) -> list[str]:
-    """列出目录下的 `.md` blob 路径（不抛错，失败返回空）."""
+    """列出目录下的 `.md` blob 路径（不抛错，失败返回空；排序去重）."""
     try:
         tree = gitlab_client.list_repository_tree(
             project_id, directory, ref, recursive=recursive
         )
-    except Exception as e:
-        logger.warning(
+    except Exception as e:  # noqa: BLE001 - 目录不存在是常态（默认规则目录可缺席）
+        logger.debug(
             "repo_context.list_dir failed project={} dir={}: {}", project_id, directory, e
         )
         return []
-    return [
+    return sorted({
         str(item.get("path") or "")
         for item in tree or []
         if item.get("type") == "blob" and str(item.get("path") or "").endswith(".md")
-    ]
+    })
 
 
 def _read_rule_file(
@@ -297,86 +272,38 @@ def _discover_rule_files(
     gitlab_client: Any,
     project_id: int,
     default_branch: str,
-    entry_files: tuple[str, ...],
-    explicit_dir: str,
+    rules_dir: str,
 ) -> dict[str, str]:
-    """从入口文件跟随 Markdown 链接发现规则文件（不假设目录/前缀/条数）."""
+    """递归扫描配置的规则目录（仓库根相对路径），收集其中所有 `.md`."""
+    directory = _normalize_rules_dir(rules_dir)
+    if not directory:
+        return {}
     files: dict[str, str] = {}
-    queue: deque[tuple[str, int]] = deque()
-    queued: set[str] = set()
-    for entry in entry_files:
-        path = entry.strip()
-        while path.startswith("./"):
-            path = path[2:]
-        path = path.lstrip("/")
-        if path and path not in queued:
-            queued.add(path)
-            queue.append((path, 0))
-
-    while queue and len(files) < _MAX_DISCOVERED_FILES:
-        path, depth = queue.popleft()
+    for path in _list_md_files(
+        gitlab_client, project_id, directory, default_branch, recursive=True
+    ):
+        if len(files) >= _MAX_DISCOVERED_FILES:
+            logger.warning(
+                "repo_context.file_cap_reached project={} dir={} cap={}",
+                project_id, directory, _MAX_DISCOVERED_FILES,
+            )
+            break
         content = _read_rule_file(gitlab_client, project_id, path, default_branch)
-        if content is None:
-            continue
-        files[path] = content
-        if depth >= _MAX_LINK_DEPTH or not path.lower().endswith(".md"):
-            continue
-
-        base_dir = posixpath.dirname(path)
-        targets: list[tuple[str, bool]] = []
-        for target in _parse_markdown_links(content):
-            resolved = _resolve_repo_link(target, base_dir)
-            if resolved is not None:
-                targets.append(resolved)
-
-        # index.md 的兄弟文件即规则文件（未必逐个被链接），自动展开一层。
-        if posixpath.basename(path).lower() == "index.md":
-            for sibling in _list_md_files(
-                gitlab_client, project_id, base_dir, default_branch, recursive=False
-            ):
-                targets.append((sibling, False))
-
-        for target, is_dir in targets:
-            if depth + 1 > _MAX_LINK_DEPTH:
-                continue
-            if is_dir:
-                discovered = _list_md_files(
-                    gitlab_client, project_id, target, default_branch, recursive=False
-                )
-            elif target.lower().endswith(".md"):
-                discovered = [target]
-            else:
-                continue
-            for item in discovered:
-                if item not in queued:
-                    queued.add(item)
-                    queue.append((item, depth + 1))
-
-    # 显式目录覆盖（兼容旧配置）：自动发现之后补充，保持“入口文件在前”。
-    if explicit_dir:
-        for path in _list_md_files(
-            gitlab_client, project_id, explicit_dir.strip("/"), default_branch, recursive=True
-        ):
-            if path in files or len(files) >= _MAX_DISCOVERED_FILES:
-                continue
-            content = _read_rule_file(gitlab_client, project_id, path, default_branch)
-            if content is not None:
-                files[path] = content
+        if content is not None:
+            files[path] = content
     return files
 
 
 def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]:
-    """从仓库默认分支读取规则文件（入口链接发现 + 可选目录覆盖）. 带 TTL 缓存."""
+    """递归读取配置的规则目录（默认 `.agents/rules`）下所有 `.md`. 带 TTL 缓存."""
     from reviewagent.config import current
 
     cfg = current()
-    context_files = cfg.repo_context_files
-    rules_dir = cfg.repo_context_rules_dir
-
-    if not context_files and not rules_dir:
+    rules_dir = (cfg.repo_context_rules_dir or "").strip()
+    if not _normalize_rules_dir(rules_dir):
         return {}
 
-    cache_key = f"{project_id}:{','.join(context_files)}:{rules_dir}"
+    cache_key = f"{project_id}:{rules_dir}"
 
     # TTL 缓存检查
     ts = _files_cache_ts.get(cache_key, 0)
@@ -391,9 +318,7 @@ def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]
         logger.warning("repo_context.get_default_branch failed project={}: {}", project_id, e)
         return {}
 
-    files = _discover_rule_files(
-        gitlab_client, project_id, default_branch, tuple(context_files), rules_dir
-    )
+    files = _discover_rule_files(gitlab_client, project_id, default_branch, rules_dir)
 
     # 更新缓存（空结果也缓存，避免故障期反复打 API）
     _files_cache[cache_key] = files
@@ -402,8 +327,8 @@ def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]
     if files:
         rule_keys = extract_rule_keys("\n".join(files.values()))
         logger.info(
-            "repo_context.loaded project={} files={} rules={}",
-            project_id, list(files.keys()), rule_keys[:20],
+            "repo_context.loaded project={} dir={} files={} rules={}",
+            project_id, rules_dir, list(files.keys()), rule_keys[:20],
         )
 
     return files
@@ -412,6 +337,7 @@ def _fetch_all_rule_files(gitlab_client: Any, project_id: int) -> dict[str, str]
 def _repo_rule_entries(files: dict[str, str]) -> dict[str, dict[str, str]]:
     """从已抓取文本抽取仓库规则键 → {severity,title}（表格行 + `### KEY 标题`）."""
     entries: dict[str, dict[str, str]] = {}
+    key_pattern = _rule_key_pattern()
     for content in files.values():
         in_fence = False
         for line in content.splitlines():
@@ -424,7 +350,7 @@ def _repo_rule_entries(files: dict[str, str]) -> dict[str, dict[str, str]]:
             heading = _HEADING_RE.match(stripped)
             if heading:
                 key = heading.group(1).strip("`")
-                if _REPO_KEY_RE.fullmatch(key):
+                if key_pattern.fullmatch(key):
                     entry = entries.setdefault(key, {"severity": "", "title": ""})
                     if heading.group(2) and not entry["title"]:
                         entry["title"] = heading.group(2).strip()
@@ -433,7 +359,7 @@ def _repo_rule_entries(files: dict[str, str]) -> dict[str, dict[str, str]]:
                 continue
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
             key = cells[0].strip("`").strip() if cells else ""
-            if not _REPO_KEY_RE.fullmatch(key):
+            if not key_pattern.fullmatch(key):
                 continue
             entry = entries.setdefault(key, {"severity": "", "title": ""})
             severity = cells[1].lower() if len(cells) > 1 else ""

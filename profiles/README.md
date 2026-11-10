@@ -36,9 +36,11 @@ profiles/
 | `capabilities` / `security` | 能力与安全开关 |
 | `reporting` | 仅 `actions_file`（包内代码路径引用，不开放用户覆写） |
 
-**调参组（`file_filter` / `scoring` / `limits` / `context` / `repo_context`，以及 `reporting`
-的展示/扫描类键 `weekly_title` / `repo_scan_extensions` / `repo_scan_entry_files`）不允许出现在
-这里** —— 它们属于 `config/profiles/<name>/review.yaml`。写错位置会在启动时报错并提示迁移。
+**调参组（`file_filter` / `scoring` / `limits` / `context` / `repo_context`，以及
+`rule_keys.repo_prefix` 和 `reporting` 的展示/扫描类键 `weekly_title` /
+`repo_scan_extensions` / `repo_scan_entry_files`）不允许出现在
+这里** —— 它们属于 `config/profiles/<name>/review.yaml`。`rule_keys` 的其余键
+（`builtin_pattern` / `free_prefixes`）仍是场景包内容。写错位置会在启动时报错并提示迁移。
 `preset`/`extends` 继承层已删除：场景包之间不共享基类，公共默认值统一在
 `reviewagent/settings/schema.py`。
 

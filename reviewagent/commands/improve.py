@@ -1001,11 +1001,11 @@ class ImproveCommand(BaseCommand):
         normalize = security_flag(profile, "normalize_untrusted", default=True)
         line_map = self._diff_line_map()
 
-        # 仓库规则上下文 (AGENTS.md) — 优先遵循
+        # 仓库规则上下文（配置规则目录扫描结果）— 优先遵循
         repo_ctx_block = ""
         if self.repo_context:
             repo_ctx_block = (
-                "## 仓库规则 (AGENTS.md) — 优先遵循\n\n"
+                "## 仓库规则 — 优先遵循\n\n"
                 "以下是本仓库的编码规范 / 检视规则。"
                 "**你的建议必须优先覆盖这些规则**：如果 diff 中存在违反下列规则的地方，"
                 "必须给出对应的 inline suggestion。\n\n"

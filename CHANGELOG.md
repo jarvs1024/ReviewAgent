@@ -17,13 +17,16 @@
   `prompts/_general_rules_block.md`。prompt 统一由 `reviewagent/scenario/prompts.py`
   按 `profile.prompts` 解析；通用规则正文的唯一来源是 RuleSet 的 `verbatim_body`
   （`_general_rules_text` 不再回退旧 loader，resolver 异常直接抛出）。
-- **仓库规则改为运行时动态发现**：不再写死 `.agents/rules` 目录与 `SSD` 前缀。
-  从入口文件（默认 `AGENTS.md`）跟随 Markdown 链接发现规则索引与规则文件，
-  `index.md` 自动展开同目录兄弟文件，目录链接展开一层（深度 ≤2、≤60 个文件、
-  单文件 ≤512KB）；运行时生成 `<rule_index>`（键/级别/标题），截断时模型仍能拿到
-  完整键清单。`REPO_CONTEXT_RULES_DIR` 改为可选显式覆盖（默认空=自动发现），
-  `RULE_KEY_PREFIX=auto` 识别任意 `<大写前缀>-RULE-<键>`。仓库规则新增/删除/改写
-  无需改工具代码；规则来源随被检仓库默认分支实时生效。
+- **仓库规则目录与前缀全部配置化**：规则只来自被检仓库根目录下 `repo_context_rules_dir`
+  配置的目录（默认 `.agents/rules`，`REPO_CONTEXT_RULES_DIR` 可改，空=关闭），
+  运行时**递归扫描**其中所有 `.md`（≤60 个文件、单文件 ≤512KB），不再读取
+  `AGENTS.md` 或跟随 Markdown 链接。运行时生成 `<rule_index>`（键/级别/标题），
+  截断时模型仍能拿到完整键清单。规则键前缀以 `rule_keys.repo_prefix`
+  （`RULE_KEY_PREFIX` / `review.yaml`）为唯一来源：默认 `auto` 识别任意
+  `<大写前缀>-RULE-<键>`，也可配 `SSD` / `SSD-RULE`（归一化等价），并同步约束
+  装配校验、严重度豁免、评分与规则索引抽取。`review.yaml` 新增开放
+  `rule_keys.repo_prefix`；`repo_context.files` 与 `REPO_CONTEXT_FILES` 移除。
+  仓库规则新增/删除/改写无需改工具代码；规则来源随被检仓库默认分支实时生效。
 - **场景配置两层收敛（删除 preset/extends 层）**：`profiles/_presets/` 与
   `profile.yaml` 的 `extends` 继承机制移除——其全部取值与 schema 默认值逐项相同，
   属纯重复定义。生效优先级收敛为 **schema 默认值 <

@@ -863,8 +863,8 @@ class PythonPolicy:
         )
 
     def score_suggestion(self, sug: Suggestion) -> int:
-        # profile 的 repo_prefix 优先；profile 未声明时回退运行配置（默认 "SSD"）。
-        prefix = self._profile.rule_keys.get("repo_prefix") or self._cfg.rule_key_prefix
+        # 仓库键前缀以运行配置为唯一来源（review.yaml rule_keys.repo_prefix / env）。
+        prefix = self._cfg.rule_key_prefix
         return score_suggestion(sug, rule_prefix=prefix)
 
     def keywords(self) -> set[str]:

@@ -15,10 +15,10 @@ dynamic_rules: dynamic_rules.yaml
 rule_keys:
   builtin_pattern: '(?:R-OTHER-IMPACT:[a-z0-9_]+|R-OTHER:[a-z0-9_]+|R-[A-Z]+(?:-[A-Z0-9_]+)*)'
   free_prefixes: [R-OTHER-IMPACT, R-OTHER]
-  # 仓库规则键随被检仓库变化：auto=按通用 <大写前缀>-RULE-<键> 识别，
-  # 不在场景包里登记具体键/前缀；规则文件由 AGENTS.md 链接在运行时发现。
+  # 仓库规则键随被检仓库变化：auto=任意 <大写前缀>-RULE-<键>。
+  # 这里是配置默认值；<config>/profiles/<name>/review.yaml 的
+  # rule_keys.repo_prefix 可覆盖（如 SSD / SSD-RULE），二者归一化等价。
   repo_prefix: auto
-  display_prefix: SSD
 capabilities: {ast_validation: true, cross_file_search: true, apply_suggestion: true, full_source_analysis: true}
 security: {worktree_containment: true, normalize_untrusted: true, prompt_hardening: false}
 reporting:

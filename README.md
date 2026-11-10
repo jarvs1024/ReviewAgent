@@ -319,7 +319,7 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 | 实例 | `REVIEW_PROFILE` `REVIEWAGENT_DATA_DIR` `REVIEWAGENT_LOG_LEVEL` `LOG_FORMAT` `LOG_ROTATION` | profile 名 / 数据目录 / 日志级别 / 日志格式（`text`/`json`）/ 轮转（`single`/`none`）；data_dir ↔ profile 绑定（`instance.json`） |
 | 防循环 | `MR_COOLDOWN_SECONDS` `MAX_REVIEW_CALLS_PER_MR` | 同 MR 冷却（默认 60s）/ 单 MR 检视调用上限（默认 30）；**实例平面**，写 `instance.env` |
 | 检视限制 | `MAX_DIFF_CHARS` `OPENCODE_MAX_DIFF_CHARS` | 送 LLM 的 diff 上限（默认 50000 / 20000）；**场景平面**，在 `review.yaml` 覆盖 |
-| 仓库规则 | `REPO_CONTEXT_FILES` `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库默认分支读入口文件（默认 `AGENTS.md`）并跟随其中 Markdown 链接发现规则文件；`REPO_CONTEXT_RULES_DIR` 为空=自动发现、非空=显式目录覆盖；`RULE_KEY_PREFIX=auto` 识别任意 `<大写前缀>-RULE-<键>`；`REPO_CONTEXT_MAX_LINES` 渲染行数预算（默认 2000）。规则文件中的结构化表格（`\| 键 \| 严重度 \| 摘要 \|`）在检视时解析为请求级规则：同键覆盖场景规则的 severity/title、新键按 priority 1000 追加，`ruleset_fingerprint` 追加 `:repo:<摘要>`（仓库规则改动会使增量复用失效）；自由文本仍只作为 prompt 上下文，不改写场景规则正文 |
+| 仓库规则 | `REPO_CONTEXT_RULES_DIR` `RULE_KEY_PREFIX` `REPO_CONTEXT_MAX_LINES` | 从目标仓库默认分支递归扫描配置的规则目录（默认 `.agents/rules`，空=关闭），收集其中所有 `.md`；`RULE_KEY_PREFIX=auto` 识别任意 `<大写前缀>-RULE-<键>`，也可配 `SSD` / `SSD-RULE`（归一化等价）；`REPO_CONTEXT_MAX_LINES` 渲染行数预算（默认 2000）。规则文件中的结构化表格（`\| 键 \| 严重度 \| 摘要 \|`）在检视时解析为请求级规则：同键覆盖场景规则的 severity/title、新键按 priority 1000 追加，`ruleset_fingerprint` 追加 `:repo:<摘要>`（仓库规则改动会使增量复用失效）；自由文本仍只作为 prompt 上下文，不改写场景规则正文 |
 | improve | `IMPROVE_PARALLEL_WORKERS` `IMPROVE_FULL_FILES` `IMPROVE_MIN_SCORE` `IMPROVE_MIN_SEVERITY` `IMPROVE_REVIEW_MODE` `IMPROVE_KEYWORD_PATHS` `IMPROVE_SKIP_TEST_PATHS` `IMPROVE_PARTIAL_CONTEXT_LINES` `IMPROVE_PATCH_CONTEXT_LINES` `IMPROVE_MAX_SUGGESTIONS` `IMPROVE_MAX_SUGGESTIONS_PER_FILE` `IMPROVE_MIN_SUGGESTIONS_PER_FILE` `IMPROVE_PRIORITY_WEIGHT_DIFF` `IMPROVE_PRIORITY_WEIGHT_KEYWORD` `IMPROVE_PRIORITY_WEIGHT_DENSITY` `IMPROVE_PRIORITY_WEIGHT_TEST_FEATURE` `IMPROVE_MAX_FILES_TO_REVIEW` `IMPROVE_NEW_FILE_FULL` `IMPROVE_TEST_SAMPLE_PATHS` `IMPROVE_TEST_SAMPLE_MAX` | 并行度 / 限流 / 模式 / priority 权重（场景平面，profile 提供默认）；V9 增量复用按文件内容指纹(blob sha)，选优按 (severity,score) 复合键 + priority 加权预算 + 覆盖优先；文件筛选护栏：`MAX_FILES_TO_REVIEW` 送 LLM 文件数硬上限(必保新增+关键路径)、`NEW_FILE_FULL` 新增文件优先(加分+豁免截断)、`TEST_SAMPLE_PATHS`/`TEST_SAMPLE_MAX` 自动 case 抽样 |
 | 检视过滤 | `REVIEW_EXCLUDE_EXTENSIONS` | 不送审的文件扩展名（默认含 `.md`/`.txt`/图片等） |
 | 周报-总开关 | `REVIEWAGENT_WEEKLY_ENABLED` `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` `REVIEWAGENT_WEEKLY_TARGET_BRANCH` `REVIEWAGENT_WEEKLY_TIMEZONE` | 总开关（默认 true）；目标项目 id（0=跳过 merged_mrs/repo_scan 段）/ 分支（默认 `main`）/ 时区（默认 `Asia/Shanghai`） |
@@ -335,7 +335,7 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 ## 端到端验证
 
 ```bash
-# 快速档：进程内跑配置生效性审计（catalog 92 字段：34 behavior / 56 live / 2 script；快速档执行 21 组行为检查），无需外部服务
+# 快速档：进程内跑配置生效性审计（catalog 91 字段：34 behavior / 55 live / 2 script；快速档执行 21 组行为检查），无需外部服务
 .venv/bin/python scripts/e2e/run_e2e.py --tier fast
 
 # 全量档：临时 GitLab 项目/分支/MR + 真实 LLM/队列，跑 8 个功能并按真实产物校验配置
@@ -344,8 +344,8 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 
 全量档除真实 suggestions 外，还会用 MR `/changes` 与 51 文件抽样分支的 compare
 结果直接跑 `planner.plan()`，逐条验证 `review_mode` / `priority_paths` /
-`full_files` / `test_sample_*`，并从仓库默认分支真实拉取 `AGENTS.md` 与 rules_dir
-（`scripts/e2e/real_config.py`）。
+`full_files` / `test_sample_*`，并从仓库默认分支按配置的规则目录递归拉取规则文件
+（默认 `.agents/rules`，`scripts/e2e/real_config.py`）。
 
 两档共用同一份 witness 目录（`scripts/e2e/catalog.py`），报告写到
 `logs/e2e/report-<时间戳>.json`；`--only describe,improve` 可只跑部分功能，

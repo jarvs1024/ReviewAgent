@@ -108,10 +108,9 @@ class Config:
     max_diff_chars: int = 50000              # 超过则跳过检视并评论告知
     opencode_max_diff_chars: int = 20000     # opencode prompt 内联 diff 截断阈值
 
-    # ---- AGENTS.md 仓库规则 ----
-    repo_context_files: tuple[str, ...] = ("AGENTS.md",)  # 规则入口文件（跟随其中 Markdown 链接发现规则）
-    repo_context_rules_dir: str = ""          # 显式规则目录覆盖；空=从入口文件链接自动发现
-    rule_key_prefix: str = "auto"             # 规则键前缀；auto=任意 <前缀>-RULE-<键>
+    # ---- 仓库规则 ----
+    repo_context_rules_dir: str = ".agents/rules"  # 仓库根目录下的规则目录（递归扫描 .md）；空=关闭
+    rule_key_prefix: str = "auto"             # 规则键前缀；auto=任意 <前缀>-RULE-<键>，可配 SSD/SSD-RULE
     repo_context_max_lines: int = 2000       # 规则文件最大行数 (超出截断)
 
     # ---- improve 并行 + 限流 ----

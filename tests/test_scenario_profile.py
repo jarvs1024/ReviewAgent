@@ -84,7 +84,7 @@ def test_default_profile_applies_scenario_config():
     # 单测环境隔离了 <config>/：调参字段回落 schema 默认值
     assert cfg.improve_max_suggestions == 15
     assert cfg.improve_review_mode == "auto"
-    assert cfg.repo_context_files == ("AGENTS.md",)
+    assert cfg.repo_context_rules_dir == ".agents/rules"
     assert cfg.review_exclude_extensions[0] == ".md"
     # rule_keys 是 profile.yaml 的身份/内容键：auto=不绑定具体仓库前缀
     assert cfg.rule_key_prefix == "auto"

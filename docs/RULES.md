@@ -121,11 +121,12 @@ with open(path) as fh:
 `ValueError("rule key '...' is outside profile namespace")`，服务启动失败：
 
 - **内置通用键**：`R-*`（如 `R-ERR` / `R-LOOP`），匹配 profile `rule_keys.builtin_pattern`；
-- **仓库 / 场景键**：`<任意大写前缀>-RULE-*`（默认 `rule_keys.repo_prefix: auto`）。
-  被检仓库的规则文件由入口文件（默认 `AGENTS.md`）的 Markdown 链接在运行时发现，
-  目录、前缀、条数都不在工具里写死；`RULE_KEY_PREFIX` 设为具体前缀（如 `SSD`）
-  时只接受该前缀，用于收紧命名空间。内置键之外、不符合 `*-RULE-*` 形状的键
-  （例如 `CPP-R-*`）会被拒绝。
+- **仓库 / 场景键**：`<前缀>-RULE-*`（默认 `rule_keys.repo_prefix: auto`，即任意
+  大写前缀）。被检仓库的规则文件在运行时从默认分支**递归扫描配置的规则目录**
+  （`repo_context_rules_dir`，默认 `.agents/rules`）下的所有 `.md`；目录、前缀、
+  条数都不在工具里写死。`rule_keys.repo_prefix` 可在 `review.yaml` 收紧为
+  `SSD`（或 `SSD-RULE`，两者归一化等价），此时只接受该前缀。内置键之外、
+  不符合 `*-RULE-*` 形状的键（例如 `CPP-R-*`）会被拒绝。
 
 共享包（`profiles/_shared/**/*.md`，被多个 profile 引用）**必须**声明
 `applies_to.languages`，否则装配报 `shared rule pack ... must declare applies_to.languages`：

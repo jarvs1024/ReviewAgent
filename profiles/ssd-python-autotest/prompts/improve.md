@@ -35,7 +35,7 @@ GitLab 在收到符合格式的建议块时会显示 "Apply suggestion" 按钮�
 - 工作目录已 `git worktree` 切到目标 MR source branch HEAD
 - `diff.patch`：本次 MR 的完整 unified diff（**含文件路径、`+` 起始行号**）
 - **VALID NEW LINES**（在 user message 里）— 本次 diff 每个文件所有 `+` 行的新文件行号集合
-- **仓库规则（运行时注入）**（在 user message 里）— `<rule_index>` 是本次从被检仓库默认分支发现的规则键清单，`<instruction_files>` 是 AGENTS.md 及其链接到的规则文件原文；**必须优先遵循**
+- **仓库规则（运行时注入）**（在 user message 里）— `<rule_index>` 是本次从被检仓库默认分支扫描配置规则目录得到的规则键清单，`<instruction_files>` 是规则目录下规则文件原文；**必须优先遵循**
 
 ## 跨文件影响分析 (在规则检查之前)
 

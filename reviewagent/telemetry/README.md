@@ -602,7 +602,7 @@ launchctl load ~/Library/LaunchAgents/com.jarvs.reviewagent.reconciler.plist
 | 端点 `/weekly-reports` | ✅ | ✅ | 列表 + 单条读取 |
 | 字段 `cohort_key` | ✅ | ✅ | 内部去重 |
 | 字段 `severity_source` | ✅ | ✅ | `rule` / `llm`，发布时写入 |
-| Severity 规则文件（运行时发现） | ✅ | ✅ | 从默认分支入口文件（默认 `AGENTS.md`）跟随 Markdown 链接发现规则文件；`REPO_CONTEXT_RULES_DIR` 可显式覆盖 |
+| Severity 规则文件（运行时发现） | ✅ | ✅ | 从默认分支递归扫描配置的规则目录（默认 `.agents/rules`）下的所有 `.md`；`REPO_CONTEXT_RULES_DIR` 可改目录，空=关闭 |
 
 ## 周报 (`reviewagent/reporting/`)
 
