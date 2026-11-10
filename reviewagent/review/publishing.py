@@ -342,22 +342,31 @@ def build_summary_v2(
     return summary
 
 
+# 这些段落无法变成 inline suggestion (被截断 / 不在 diff 内), 但必须让 reviewer 看到.
+_MARKER_PREFIXES = ("> ⏭️", "> ✂️", "> 跨文件影响", "> 无法自动应用")
+# validation 的截断提示用 ℹ️; 只保留真正报告"没展示"的行, 否则会把
+# build_summary_v2 自己重算的 "已发过" 重复行也带进来.
+_TRUNCATION_HINTS = ("未展示", "降为总览文字")
+
+
 def extract_guardrail_markers(summary_md: str) -> list[str]:
-    """从 _merge_chunks 生成的 summary_md 中抽取文件筛选护栏的提示行.
+    """从 _merge_chunks 生成的 summary_md 中抽取需要原样保留的提示行.
 
     V1.1 配套: _publish 重建 summary 时, 把这些行追加到尾部,
-    让 GitLab note 显示 C 抽样跳过 / D 文件数截断的提示.
-    匹配行首 `> ⏭️ ... 跳过检视` 与 `> ✂️ ... 因超出文件数上限` 开头的一段 (含 IMPROVE_MAX_FILES_TO_REVIEW 配置名).
+    让 GitLab note 显示 C 抽样跳过 / D 文件数截断 / 无法 inline 的跨文件影响.
+    匹配行首 `> ⏭️` / `> ✂️` / `> 跨文件影响:` / `> 无法自动应用:`,
+    以及 validation 生成的 `> ℹ️ ... 未展示 / 降为总览文字` 截断提示.
     """
     if not summary_md:
         return []
     markers: list[str] = []
-    # 按 \n\n 切块, 每块开头是 `> ⏭️` 或 `> ✂️` 才保留
     for chunk in re.split(r"\n\n+", summary_md):
         stripped = chunk.strip()
         if not stripped:
             continue
-        if stripped.startswith("> ⏭️") or stripped.startswith("> ✂️"):
+        if stripped.startswith(_MARKER_PREFIXES):
+            markers.append(stripped)
+        elif stripped.startswith("> ℹ️") and any(h in stripped for h in _TRUNCATION_HINTS):
             markers.append(stripped)
     return markers
 
@@ -784,9 +793,10 @@ def publish(
     # 4. edit placeholder 为完整 summary (含实际 inline_posted 列表).
     #    placeholder 已在循环前创建 (见顶部 step 0), 此处只更新正文.
     summary_md = callbacks.build_summary_v2(inline_posted, inline_skipped, len(suggestions))
-    # V1.1: 把 _merge_chunks 生成的 guardrail_markers (⏭️ C 跳过 / ✂️ D 截断)
-    #      追加到重建的 summary 后. build_summary_v2 只看 inline_posted/inline_skipped,
-    #      不会知道文件筛选护栏丢掉了哪些文件, 需从 merged["summary_md"] 抽 marker 行.
+    # V1.1: 把 _merge_chunks 生成的 guardrail_markers (⏭️ C 跳过 / ✂️ D 截断 /
+    #      ℹ️ 数量截断 / > 跨文件影响 / > 无法自动应用) 追加到重建的 summary 后.
+    #      build_summary_v2 只看 inline_posted/inline_skipped, 不知道文件筛选护栏
+    #      和无法 inline 的发现, 需从 merged["summary_md"] 抽 marker 行.
     if summary_md:
         _guardrail_markers = callbacks.extract_guardrail_markers(
             merged.get("summary_md") or ""

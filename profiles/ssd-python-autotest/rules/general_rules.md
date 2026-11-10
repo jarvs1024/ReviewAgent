@@ -39,14 +39,15 @@ applies_to:
 **通用规则使用方式**：
 - 每命中一条 → 产一条 suggestion，`rationale` 字段以对应表内 **规则键**（如 `R-ERR` / `R-LOOP`）开头
 - 同一行可能命中多条 → 选最严重 / 最直接的一条，避免重复
-- 命中不要求必给 suggestion，**只在能直接 Apply 时才给**（无法 Apply → summary_md 文字描述）
+- **命中即产 suggestion**（只要改动落在 diff 的 `+` 行）；数量上限由程序统一截断
+- 只有关联代码不在 diff 内（GitLab 无法 Apply）时才写 summary 文字
 
 ### 兜底：未命中表内 R-* 规则 但确有价值的野生问题
 
 表内 R-*（非穷举）之外，diff 中可能命中"不在表内、但确有价值"的问题。
 
 **兜底规则**：
-- 仅当判断为 **high severity**（潜在 bug / 安全隐患）时才强制产 suggestion；`medium` / `low` 仅写进 `summary_md`
+- 所有 severity 都产 suggestion；severity 如实标注（`high` / `medium` / `low`），由程序排序与截断
 - `rationale` 字段以 `R-OTHER:<简短描述>` 开头，常用前缀：
   - `R-OTHER:magic_number` — 硬编码魔法数（端口 / 超时 / 重试等）
   - `R-OTHER:typo` — 标识符 / 注释拼写错误
@@ -71,6 +72,6 @@ applies_to:
 |---|---|---|
 | 兜底违规（不在 20 类 R-* 表内）| `R-OTHER:<具体短描述>` | `R-OTHER:magic_number` / `R-OTHER:typo` |
 | 跨文件影响类违规 | `R-OTHER-IMPACT:<具体短描述>` | `R-OTHER-IMPACT:caller_param` / `R-OTHER-IMPACT:import_path` |
-| 不写 rule_key 但要保留 | 写 `summary_md` 文字段，不强行命名新键 | — |
+| 不写 rule_key 但要保留 | 写单行 `> 无法自动应用: ...` 段，不强行命名新键 | `> 无法自动应用: a.py L20 需人工评估` |
 
 历史 telemetry.db 里发现过 `R-XXX` 字面作为 `rule_key` 落到 suggestions 表里 (LLM 幻觉)，这会让周报"问题类型"段出现 `XXX ×N` 的诡异条目。**因此从本次起 `R-XXX` / 类似占位词严禁写出**。

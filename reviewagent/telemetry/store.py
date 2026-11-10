@@ -17,6 +17,29 @@ from reviewagent.logging_setup import logger
 from reviewagent.telemetry.models import MRRecord, ReviewRun
 
 
+# /adopt 校验失败仍写一行 action='adopted' 作为审计 (validation_status 区分),
+# 但它不是一次真实采纳 — action_counts 统计必须排除, 否则 adopted 计数虚高.
+_ADOPT_VALIDATION_FAILURES = frozenset({
+    "same-head", "content-unavailable", "target-unchanged",
+})
+
+
+def _is_effective_action(action: str, validation_status: str | None) -> bool:
+    """判断一条 suggestion_action 是否代表一次真实生效的操作.
+
+    action='adopted' 但校验失败 / 目标已是 dismissed|resolved|superseded 时不算采纳;
+    重复 /adopt 一个已 applied 的建议 (already-applied) 仍计入 adopted.
+    """
+    if action != "adopted":
+        return True
+    status = (validation_status or "").strip()
+    if status in _ADOPT_VALIDATION_FAILURES:
+        return False
+    if status.startswith("already-") and status != "already-applied":
+        return False
+    return True
+
+
 def _enrich_web_url(row: dict) -> dict:
     """给 MR dict 加 web_url 字段 (调 GitLab API 拿 path_with_namespace).
 
@@ -1425,7 +1448,9 @@ class Store:
                 (project_id, mr_iid),
             ).fetchall()
             actions = conn.execute(
-                "SELECT action, COUNT(*) AS n FROM suggestion_actions WHERE project_id=? AND mr_iid=? GROUP BY action",
+                "SELECT action, validation_status, COUNT(*) AS n "
+                "FROM suggestion_actions WHERE project_id=? AND mr_iid=? "
+                "GROUP BY action, validation_status",
                 (project_id, mr_iid),
             ).fetchall()
             severities = conn.execute(
@@ -1434,7 +1459,12 @@ class Store:
                 (project_id, mr_iid),
             ).fetchall()
         states = {row["state"]: row["n"] for row in rows}
-        action_counts = {row["action"]: row["n"] for row in actions}
+        action_counts: dict[str, int] = {}
+        for row in actions:
+            if _is_effective_action(row["action"], row["validation_status"]):
+                action_counts[row["action"]] = (
+                    action_counts.get(row["action"], 0) + row["n"]
+                )
         total = sum(states.values())
         adopted = states.get("applied", 0)
         dismissed = states.get("dismissed", 0)
@@ -1625,9 +1655,10 @@ class Store:
             severity = row.get("severity") or "unspecified"
             by_severity[severity] = by_severity.get(severity, 0) + 1
         actions = self.list_suggestion_actions(project_id=project_id, since=since, until=until, limit=100000)
-        by_action = {}
+        by_action: dict[str, int] = {}
         for row in actions:
-            by_action[row["action"]] = by_action.get(row["action"], 0) + 1
+            if _is_effective_action(row["action"], row.get("validation_status")):
+                by_action[row["action"]] = by_action.get(row["action"], 0) + 1
         adopted = by_state.get("applied", 0)
         dismissed = by_state.get("dismissed", 0)
         resolved = by_state.get("resolved", 0)

@@ -5,6 +5,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`/adopt` 统计口径**：校验失败（`same-head` / `content-unavailable` /
+  `target-unchanged`）或目标已 dismissed/resolved 的 `/adopt` 仍保留审计行，
+  但不再计入 `suggestion_stats` / `suggestion_metrics` 的 `action_counts.adopted`，
+  避免采纳数虚高（原始行仍可用 `list_suggestion_actions` 追溯）。
+- **检视发现不再"降级为摘要文字"**：通用规则 prompt 要求 diff 内每个发现都产出
+  suggestion（数量 / 单文件上限由程序截断，模型不再自行把 medium/low 降级）；
+  validation 的 `ℹ️ 另有 N 条…` 截断提示、`> 跨文件影响:` / `> 无法自动应用:`
+  行现在会保留在「改进总览 V{N}」里，不再静默丢失。
+- **显式 `/describe` 可刷新**：评论触发的 `/describe`（`triggered_by=note`）不再被
+  "已生成过描述"的一次性守卫拦截；自动链（open/push）仍然只改一次标题 / 描述。
+
 ### Changed
 
 - **文档与代码对齐**：README / QUICKSTART / DEPLOYMENT / LLM_PROVIDER_ADAPTER 补充

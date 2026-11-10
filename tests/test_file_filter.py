@@ -163,6 +163,23 @@ def test_extract_guardrail_markers_empty_input():
     assert ImproveCommand._extract_guardrail_markers("## 改进总览\n\nno markers here") == []
 
 
+def test_extract_guardrail_markers_keeps_truncation_and_unappliable():
+    """数量截断 ℹ️ / 跨文件影响 / 无法自动应用 都必须进入最终总览."""
+    sm = (
+        "## 改进总览\n\n- file1 L1 — x\n\n"
+        "> ℹ️ 另有 2 条建议因单文件上限（5 条/文件）降为总览文字\n\n"
+        "> ℹ️ 另有 3 条低优先级建议未展示（上限 20 条）\n\n"
+        "> 跨文件影响: services/caller.py L20 调用了已删除参数\n\n"
+        "> 无法自动应用: a.py L9 需要人工评估"
+    )
+    markers = ImproveCommand._extract_guardrail_markers(sm)
+    assert len(markers) == 4
+    assert markers[0].startswith("> ℹ️ 另有 2 条建议因单文件上限")
+    assert markers[1].startswith("> ℹ️ 另有 3 条低优先级建议未展示")
+    assert markers[2].startswith("> 跨文件影响:")
+    assert markers[3].startswith("> 无法自动应用:")
+
+
 def test_extract_guardrail_markers_ignores_unrelated_quotes():
     sm = "## 改进总览\n\n- foo\n\n> ℹ️ 另有 1 条已发过 (重复 issue 跳过)"
     assert ImproveCommand._extract_guardrail_markers(sm) == []

@@ -145,10 +145,12 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 **通用规则使用方式**：
 - 每命中一条 → 产一条 suggestion，`rationale` 字段以 `R-*` 开头引用规则键
 - 同一行可能命中多条规则 → 选最严重 / 最直接的一条给 suggestion，避免重复
-- 命中不要求必给 suggestion，**只在能直接 Apply 时才给**（无法 Apply → summary_md 文字描述）
+- **命中即产 suggestion**（只要改动落在 diff 的 `+` 行）。数量与单文件上限由程序统一截断，
+  不要提前把 medium / low 降级成 summary 文字 — 那样 reviewer 在 MR 里看不到这条发现
+- 只有关联代码不在 diff 内（GitLab 无法 Apply）时才写 summary 文字，格式见「跨文件影响」段
 
 **兜底规则** (`R-OTHER:*`)：未命中 R-* 20 类但确有价值的野生问题（硬编码魔法数 / 拼写错误 / 命名不一致 / 死代码 / 注释不一致等）。
-- 仅 high severity 才强制产 suggestion；medium / low 写进 summary_md
+- 所有 severity 都产 suggestion；severity 如实标注（high / medium / low），由程序排序与截断
 - `rationale` 以 `R-OTHER:<简短描述>` 开头（例 `R-OTHER:magic_number` / `R-OTHER:typo` / `R-OTHER:dead_code`）
 - **不要为了凑数硬编** — 真的没找到就空着
 
@@ -257,7 +259,8 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 - ❌ "pickle 必须保留" → 给出 `with` 关闭 + 提示 JSON 替代
 - ❌ "MD5 在内网用没问题" → 一律建议 pbkdf2_hmac / sha256
 
-如果实在无法构造合法 suggestion（极少见），在 summary_md 里明确列出该 bug 并解释为什么未给 suggestion。
+如果实在无法构造合法 suggestion（极少见），在 summary_md 写单行 `> 无法自动应用: <文件> L<行号> <问题与原因>`，
+该行会被保留在总览里；不要只写普通段落（普通段落不会进入最终总览）。
 
 ### `improved_code` 第一行匹配
 
@@ -307,7 +310,9 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 
 ### `summary_md`
 
-- 简短总评，3-5 条 bullet，描述本次 MR 的整体改进方向
+- 只写整体总评：3-5 条 bullet，描述本次 MR 的整体改进方向
+- **不得把具体问题/建议只写在这里** — diff 内每个发现都必须进 `suggestions[]`
+- 例外：确实无法 Apply 的发现，用单行 `> 跨文件影响: ...` 或 `> 无法自动应用: ...` 记录（这两类行会被保留）
 - 中文，Markdown；首行 `## 改进总览` (h2)
 
 ### `suggestions[]` 每条

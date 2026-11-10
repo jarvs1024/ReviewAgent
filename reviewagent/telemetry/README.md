@@ -39,7 +39,7 @@
 | `source_branch` / `target_branch` | str | 源/目标分支 |
 | `state` | str | GitLab MR state (`opened` / `closed` / `merged`) |
 | `created_at` / `updated_at` / `merged_at` | datetime \| None | ISO 时间, `_parse_dt` 兼容 GitLab `2024-01-15 10:30:00 UTC` 与 `2024-01-15T10:30:00.000Z` 两种格式 |
-| `description_generated` | bool | describe 命令是否已落库 (一次性标题守卫) |
+| `description_generated` | bool | describe 命令是否已落库 (自动链一次性标题守卫；显式 `/describe` 不拦截) |
 | `last_review_at` | datetime \| None | 最近一次检视时间 (dataclass 字段, 由 `store.mark_description_generated` 回填, `from_gitlab` 不设) |
 
 `from_gitlab(mr: dict)` 工厂方法从 GitLab API 返回的 MR dict 构造; `author` 字段为空 username 回退为 `unknown`。
@@ -125,7 +125,7 @@
 | `get_reviewed_file_shas(project_id, mr_iid) -> dict[str, str]` | V8 增量检视: 返回 `{file_path: head_sha}` ——每个文件最近一次被检视时的 head_sha (不区分 state, dismissed/applied 的文件复用)。无 suggestion 的文件不在结果中 → 调用方视为首次检视 (commit 7708877) |
 | `upsert_file_review_state(*, project_id, mr_iid, file_path, blob_sha, head_sha, suggestion_count=0, profile_fingerprint=None, ruleset_fingerprint=None) -> None` | V9 UPSERT 单文件检视状态 (主键 `(project_id, mr_iid, file_path)` 冲突则覆盖)。即使本轮 0 建议也写, 避免下一轮对"上次 0 产出"文件空跑 LLM; `profile_fingerprint` / `ruleset_fingerprint` 记录本轮生效的场景包与规则集, 供审计判断该行是"谁在哪里"产出的 |
 | `get_file_review_states(project_id, mr_iid) -> dict[str, dict]` | V9 拉取该 MR 所有文件检视状态 `{file_path: {blob_sha, head_sha, suggestion_count}}`, 给 improve 顶部做"内容未变 → 复用上次"决策 |
-| `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比) |
+| `suggestion_stats(project_id, mr_iid) -> dict` | `{total, state_counts, action_counts, severity_counts, adopted, dismissed, resolved, processed, open, adoption_rate}` (`adoption_rate = applied / processed`, 百分比; `action_counts` 只统计生效操作 — 校验失败的 `/adopt` 行保留在 `suggestion_actions` 审计里但不计数) |
 | `suggestion_metrics(*, project_id, since, until) -> dict` | 周报 / 仪表盘维度: `state_counts` / `severity_counts` / `action_counts` / `adoption_rate` (0~1 小数) / `adoption_pct` |
 | `supersede_stale_in_cohort(*, project_id, mr_iid, cohort_key, keep_note_id) -> list[str]` | 同 cohort 内除 keep_note_id 外所有 open/resolved/dismissed 标 superseded（cohort 归并兜底；process_adopt / mark_suggestion_applied_by_diff 末尾调一次） |
 | `supersede_suggestion(old_note_id, new_note_id, generation) -> None` | 单条 supersede（被新 suggestion 取代；Batch3 写 `supersedes_note_id` + `superseded_at` + 新 suggestion 的 `cohort_generation`）|
@@ -530,7 +530,10 @@ HTTP 读接口。快照先于 HTTP，审计期间后台新增数据不会造成�
 纯断言函数 `audit_*` 不触网，单测在 `tests/test_e2e_telemetry_audit.py`（31 例）。
 
 注意：真实 `/adopt` 在目标行未修改时会校验失败（`validation_status=target-unchanged`），
-此时 action 仍记为 `adopted`，但 suggestion 保持 `open` —— 审计按校验结果区分这两种状态。
+此时 action 行仍记为 `adopted` 以保留用户意图，但 suggestion 保持 `open` —— 审计按校验结果区分这两种状态。
+`suggestion_stats` / `suggestion_metrics` 的 `action_counts` 会排除这类校验失败行
+（`same-head` / `content-unavailable` / `target-unchanged` / 非 `already-applied` 的 `already-*`），
+避免 `adopted` 计数虚高；原始行仍可通过 `list_suggestion_actions` 查到。
 
 ## Reconciler（周期性安全网）
 GitLab 17.5 偶尔不发 "marked this discussion as resolved" webhook 给 note_events hook。`publish_overview` 顶部 pre-reconcile 已覆盖 "click 后还有 push /adopt /dismiss 等其他事件" 的场景；但 "纯 click-only 无任何后续事件" 的极端场景下没有事件触发 publish_overview，DB 会永远停在 `state='open'`。

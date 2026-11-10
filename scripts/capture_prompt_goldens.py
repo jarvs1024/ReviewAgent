@@ -15,7 +15,23 @@ os.environ.setdefault("GITLAB_URL", "http://localhost")
 os.environ.setdefault("GITLAB_PERSONAL_ACCESS_TOKEN", "x")
 os.environ.setdefault("GITLAB_WEBHOOK_SECRET", "x")
 
+import dataclasses  # noqa: E402
+
+from reviewagent.commands import improve as improve_module  # noqa: E402
 from reviewagent.commands.improve import ImproveCommand  # noqa: E402
+
+# 与 tests/golden/test_prompt_golden.py 的 _RENDER_CONFIG 保持一致:
+# 基线必须由 schema 默认值渲染, 不受本地 config/profiles/*/review.yaml 影响.
+_RENDER_CONFIG = {
+    "improve_partial_context_lines": 20,
+    "improve_patch_context_lines": 3,
+    "improve_full_files": 20,
+    "improve_clip_diff_lines": 800,
+    "improve_full_source_max_bytes": 0,
+}
+from reviewagent.config import current  # noqa: E402
+
+improve_module.config = dataclasses.replace(current(), **_RENDER_CONFIG)
 
 DIFF = (
     "diff --git a/core.py b/core.py\n"

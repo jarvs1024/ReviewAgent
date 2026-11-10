@@ -27,11 +27,14 @@ class DescribeCommand(BaseCommand):
     DEFAULT_AGENT = "describe"
 
     def _should_skip(self, mr_dict: dict) -> dict[str, Any] | None:
-        """一次性守卫: 该 MR 已经生成过 title+description 后不再覆盖.
+        """一次性守卫: 自动触发的 describe 只改一次 title+description.
 
         用户需求: 仅在第一次 MR 提交时改一次标题/描述，后续 push / MR update 都不再改,
         避免 GitLab 上产生多个 system note ('changed title from X to Y').
+        显式 /describe (triggered_by='note') 是用户主动要求刷新, 允许覆盖.
         """
+        if self.triggered_by == "note":
+            return None
         from reviewagent.telemetry.store import get_store
         mr_row = get_store().get_mr(self.project_id, self.mr_iid)
         if mr_row and mr_row.get("description_generated"):
