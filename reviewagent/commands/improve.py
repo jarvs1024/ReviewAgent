@@ -95,12 +95,41 @@ class ImproveCommand(BaseCommand):
         profile = getattr(self, "_profile", None) or active_or_load()
         # 动态规则加载即校验模板；配置错误在命令启动期 fail-fast（预期行为）。
         self._dynamic_rules = getattr(self, "_dynamic_rules", None) or load_dynamic_rules(profile)
-        rule_set = getattr(self, "_rule_set", None) or assemble_base(profile)
+        rule_set = getattr(self, "_rule_set", None)
+        if rule_set is None:
+            base = assemble_base(profile)
+            # 请求级仓库规则叠加：只换索引/指纹，不碰 verbatim_body。
+            rule_set = base.with_repo(self._repo_overlay(profile, base))
         policy = getattr(self, "_policy", None) or get_policy(
             profile.language, profile=profile, cfg=globals()["config"], read_lines=self._read_file_lines,
         )
         self._profile, self._rule_set, self._policy = profile, rule_set, policy
         return profile, rule_set, policy
+
+    def _repo_overlay(self, profile, base):
+        """仓库规则表 → 请求级 `Rule` 覆盖（priority 1000，同键覆盖场景规则）.
+
+        `run()` 已通过 `build_repo_context` 抓取过规则文件，这里命中同一 TTL
+        缓存。读取/解析失败降级为空覆盖（不阻塞检视）。
+        """
+        gitlab = getattr(self, "gitlab", None)
+        if gitlab is None:
+            return ()
+        from reviewagent.scenario.rules.repo import fetch_rule_files, parse_repo_overlay
+
+        try:
+            overlay = parse_repo_overlay(
+                fetch_rule_files(gitlab, self.project_id), profile=profile, base=base,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("improve.repo_overlay_failed (non-fatal): {}", e)
+            return ()
+        if overlay:
+            logger.info(
+                "improve.repo_overlay project={} rules={}",
+                self.project_id, [rule.key for rule in overlay],
+            )
+        return overlay
 
     def _call_agent(self, ws, *, overflow_files: list[str] | None = None) -> dict[str, Any]:
         """覆盖基类: 按文件分块 + 并行调 opencode + 合并结果（编排在 review/runner.py）."""

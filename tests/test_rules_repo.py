@@ -256,6 +256,67 @@ def test_repo_overlay_does_not_change_scenario_verbatim_checksum():
     assert hashlib.sha256(merged.verbatim_body.encode()).hexdigest() == VERBATIM_SHA256
 
 
+# ---------------- 运行期接入：repo overlay → 请求级 RuleSet ----------------
+
+
+def _improve_cmd(monkeypatch, files):
+    from reviewagent.commands.improve import ImproveCommand
+
+    cmd = ImproveCommand.__new__(ImproveCommand)
+    cmd.project_id = 34
+    cmd.gitlab = object()
+    monkeypatch.setattr(
+        "reviewagent.scenario.rules.repo.fetch_rule_files",
+        lambda *_a, **_k: files,
+    )
+    return cmd
+
+
+def test_improve_runtime_ruleset_merges_repo_rules(monkeypatch):
+    """仓库规则表在运行期进入 RuleSet：同键覆盖 + 新增键 + 请求级指纹."""
+    profile = load_profile(None)
+    cmd = _improve_cmd(
+        monkeypatch,
+        {
+            "AGENTS.md": (
+                "| 键 | 严重度 | 摘要 |\n"
+                "|---|---|---|\n"
+                "| `R-LOG` | high | 仓库要求 |\n"
+                "| `SSD-RULE-NO-DEBUG-PRINT` | critical | 禁止调试打印 |\n"
+            )
+        },
+    )
+    _profile, rule_set, _policy = cmd._lazy_deps()
+    base = assemble_base(profile)
+    assert rule_set.index_by_key["R-LOG"].severity == "high"
+    assert rule_set.index_by_key["R-LOG"].title == "仓库要求"
+    assert rule_set.index_by_key["SSD-RULE-NO-DEBUG-PRINT"].priority == 1000
+    assert rule_set.fingerprint.startswith(base.fingerprint + ":repo:")
+    # 规则正文仍只有场景包一份（仓库原文经 {{repo_rules}} 注入）
+    assert rule_set.verbatim_body == base.verbatim_body
+
+
+def test_improve_runtime_ruleset_without_repo_rules_is_base(monkeypatch):
+    """仓库没有结构化规则表 → 沿用基础 RuleSet（指纹不变，不击穿增量复用）."""
+    profile = load_profile(None)
+    cmd = _improve_cmd(monkeypatch, {})
+    _profile, rule_set, _policy = cmd._lazy_deps()
+    assert rule_set.fingerprint == assemble_base(profile).fingerprint
+
+
+def test_improve_runtime_ruleset_degrades_when_repo_fetch_fails(monkeypatch):
+    """仓库规则读取失败不得阻塞检视：降级为基础 RuleSet."""
+    profile = load_profile(None)
+    cmd = _improve_cmd(monkeypatch, {})
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("gitlab down")
+
+    monkeypatch.setattr("reviewagent.scenario.rules.repo.fetch_rule_files", _boom)
+    _profile, rule_set, _policy = cmd._lazy_deps()
+    assert rule_set.fingerprint == assemble_base(profile).fingerprint
+
+
 # ---------------- rules check CLI ----------------
 
 

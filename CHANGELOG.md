@@ -118,6 +118,13 @@
 
 ### Fixed
 
+- **仓库规则表接入运行期 RuleSet**：此前仓库规则只作为 prompt 文本注入，
+  `parse_repo_overlay` / `RuleSet.with_repo` 仅测试覆盖。现在检视时把规则文件
+  中的结构化表格解析为请求级规则（同键覆盖场景规则的 severity/title，新键按
+  priority 1000 追加），`ruleset_fingerprint` 追加 `:repo:<摘要>`——仓库规则
+  改写会使增量复用失效并触发整文件重检；自由文本仍只作为 prompt 上下文，
+  场景规则正文（`verbatim_body`）与渲染字节不变。规则读取失败降级为基础
+  规则集（`improve.repo_overlay_failed` WARNING），不阻塞检视。
 - **数据采集补漏**：`review_runs.rule_keys_cited` / `suggestion_count`、
   `suggestions.score` / `severity_source`、`suggestion_actions.head_sha_posted`
   现在由真实 improve / adopt / dismiss 链路写入；webhook upsert 不再把事件操作者
