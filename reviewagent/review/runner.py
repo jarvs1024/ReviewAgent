@@ -359,6 +359,9 @@ def run(ctx: RunContext) -> dict[str, Any]:
     )
 
     chunk_results: list[dict[str, Any]] = []
+    # 失败的 chunk 不能写 reviewed_file_state：否则下一轮增量会按"已检视 0 条"
+    # 复用，一次 LLM 抖动就会让该文件永久跳过检视.
+    reviewed_ok: set[str] = set(files_reuse)
     total_prompt_tokens = 0
     total_completion_tokens = 0
     total_cost_credits = 0.0
@@ -403,6 +406,7 @@ def run(ctx: RunContext) -> dict[str, Any]:
                         )
                     data["suggestions"] = valid
                 chunk_results.append(data)
+                reviewed_ok.update(group)
                 total_prompt_tokens += oc_result.prompt_tokens
                 total_completion_tokens += oc_result.completion_tokens
                 total_cost_credits += oc_result.cost_credits
@@ -432,7 +436,12 @@ def run(ctx: RunContext) -> dict[str, Any]:
             fp = s.get("file", "")
             if fp:
                 counts[fp] = counts.get(fp, 0) + 1
-    _upsert_file_review_states(ctx, planned.files, publish_head_sha, counts)
+    _upsert_file_review_states(
+        ctx,
+        tuple(fp for fp in planned.files if fp in reviewed_ok),
+        publish_head_sha,
+        counts,
+    )
 
     # skipped_files 已含 test_skipped (上文 planned.test_skipped)
     # V6 软阈值化后不再有"限额 overflow 丢弃"——overflow 文件降级为 patch 仍进 LLM

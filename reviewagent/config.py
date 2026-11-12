@@ -96,7 +96,7 @@ class Config:
     log_rotation: str = "single"    # single=loguru 进程内轮转 / none=外部 logrotate 或 journald 接管 (LOG_ROTATION)
 
     # ---- 场景包 (Profile) ----
-    review_profile: str = ""                  # 空=内置默认场景（当前 Python/SSD 行为）
+    review_profile: str = ""                  # 空=自动选中唯一场景包（多个场景则启动失败）
     review_profile_root: str = field(default_factory=profiles_root)  # profiles/ 根目录
     review_config_dir: str = ""               # 用户配置目录；空=与 profiles/ 同级
 

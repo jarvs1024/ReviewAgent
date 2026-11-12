@@ -678,7 +678,7 @@ class RepoScanCollector:
             lines.append("- 本周代码变动量较大，建议对核心模块做专项 review，避免跨文件破坏。")
         if core_changed:
             lines.append("- 关注核心模块的接口签名与依赖变化，补充集成测试与回归用例。")
-        lines.append("- 下周期统计新增坏味道的趋势，必要时沉淀到 AGENTS.md 规范。")
+        lines.append("- 下周期统计新增坏味道的趋势，必要时沉淀到仓库规则目录（`.agents/rules`）规范。")
         lines.append("")
 
         return "\n".join(lines).rstrip() + "\n"

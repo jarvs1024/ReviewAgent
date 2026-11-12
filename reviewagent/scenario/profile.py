@@ -4,7 +4,7 @@
 2026-11-08 修订：删除 preset/extends 层，见 docs/superpowers/specs/ 下修订说明）：
 
 * 一个 profile = `profiles/<name>/profile.yaml`，只承载身份与内容引用
-  （语言 / 提示词 / 规则 / 规则键 / capabilities / security / actions_file）；
+  （语言 / 提示词 / 规则 / 规则键 / capabilities / security）；
 * 场景调参的唯一入口是 `<config>/profiles/<name>/review.yaml`，叠加在
   schema 默认值之上（review.yaml > schema 默认），只允许
   `file_filter` / `scoring` / `limits` / `context` / `repo_context` / `reporting`
@@ -35,16 +35,15 @@ from reviewagent.logging_setup import logger
 from reviewagent.settings.binder import UNSET, explicit_env, spec_env_override
 from reviewagent.settings.schema import SCHEMA_BY_NAME
 
-DEFAULT_PROFILE = "ssd-python-autotest"
 _SUPPORTED_SCHEMA = 1
+# 规则键 → 周报跟进动作的默认路径（相对 profile 根目录）；profile 可用
+# `rule_actions` 字段改到任意文件，未显式配置且默认文件缺失时视为空表。
+RULE_ACTIONS_FILE = "rules/rule_actions.yaml"
 _ALLOWED_PROFILE_KEYS = {
     "schema_version", "name", "description", "language", "test_paths", "prompts", "rules",
     "dynamic_rules", "rule_keys", "rule_key_promotions", "rule_overrides", "disable",
-    "capabilities", "security", "reporting",
+    "rule_actions", "capabilities", "security",
 }
-# profile.yaml 内 reporting 只允许包内代码引用的 actions_file；
-# 展示/扫描类键（weekly_title 等）归 review.yaml。
-_PROFILE_REPORTING_KEYS = frozenset({"actions_file"})
 # 曾经允许出现在 profile.yaml / preset 的调参组：报错时给出迁移指引。
 _REMOVED_PROFILE_KEYS = {
     "extends", "file_filter", "scoring", "limits", "context", "repo_context",
@@ -55,8 +54,8 @@ _ALLOWED_REVIEW_CONFIG_KEYS = {
     "schema_version", "file_filter", "scoring", "limits", "context",
     "repo_context", "rule_keys", "reporting",
 }
-# `reporting.actions_file` 是场景包内的代码路径引用，开放给用户会造成越界读取，
-# 因此只开放展示/扫描类键。
+# 规则动作表路径由 profile 的 `rule_actions` 声明（缺省 rules/rule_actions.yaml），
+# 属场景包作者域，不开放给用户 review.yaml 覆写；reporting 只开放展示/扫描类键。
 _REPORTING_USER_KEYS = frozenset({"weekly_title", "repo_scan_extensions", "repo_scan_entry_files"})
 
 _SCENARIO_MAPPING: dict[tuple[str, ...], str] = {
@@ -159,6 +158,7 @@ class Profile:
     rule_key_promotions: tuple[dict[str, Any], ...]
     rule_overrides: dict[str, dict[str, Any]]
     disable: tuple[str, ...]
+    rule_actions: str
     test_paths: tuple[str, ...]
     capabilities: dict[str, Any]
     security: dict[str, Any]
@@ -226,10 +226,25 @@ def available_profiles(root: Path) -> list[str]:
     return entries
 
 
+def default_profile_name(root: Path) -> str:
+    """REVIEW_PROFILE 未设置时的隐式场景：根目录下唯一 profile，否则空串."""
+    entries = sorted(path.parent.name for path in root.glob("*/profile.yaml"))
+    return entries[0] if len(entries) == 1 else ""
+
+
 def _resolve_profile_dir(name: str, root: Path) -> Path:
     if not name:
-        name = DEFAULT_PROFILE
-        logger.warning("scenario.profile_default name={} (REVIEW_PROFILE unset)", name)
+        candidates = sorted(path.parent.name for path in root.glob("*/profile.yaml"))
+        if len(candidates) == 1:
+            name = candidates[0]
+            logger.info("scenario.profile_auto name={} (REVIEW_PROFILE unset)", name)
+        elif not candidates:
+            raise ValueError(f"no profiles found under {root}")
+        else:
+            raise ValueError(
+                f"REVIEW_PROFILE is unset and profile root has multiple scenarios: "
+                f"{candidates}; set REVIEW_PROFILE or pass --profile"
+            )
     candidate = Path(name)
     if candidate.is_absolute():
         resolved = candidate.resolve()
@@ -354,7 +369,7 @@ def _check_referenced_files(
     *,
     allow_missing_rules: bool,
 ) -> None:
-    """引用文件存在性 fail-fast（prompts / dynamic_rules / reporting.actions_file）.
+    """引用文件存在性 fail-fast（prompts / dynamic_rules / rules）.
 
     `rules` 默认同样要求存在（启动即失败）；`allow_missing_rules=True` 仅供
     迁移 / 测试临时放行，此时记录 WARNING，并且仍计入 fingerprint。
@@ -376,13 +391,6 @@ def _check_referenced_files(
             f"profile field dynamic_rules references missing file: {dynamic_rules!r} "
             f"(profile root: {profile_dir})"
         )
-    reporting = merged.get("reporting")
-    actions_file = reporting.get("actions_file") if isinstance(reporting, dict) else None
-    if actions_file and not _reference_path(profile_dir, actions_file).is_file():
-        raise ValueError(
-            f"profile field reporting.actions_file references missing file: {actions_file!r} "
-            f"(profile root: {profile_dir})"
-        )
     missing_rules = [
         str(rel) for rel in merged.get("rules") or () if not _reference_path(profile_dir, rel).is_file()
     ]
@@ -398,6 +406,12 @@ def _check_referenced_files(
                 rel,
                 profile_dir,
             )
+    rule_actions = merged.get("rule_actions")
+    if rule_actions and not _reference_path(profile_dir, rule_actions).is_file():
+        raise ValueError(
+            f"profile field rule_actions references missing file: {rule_actions!r} "
+            f"(profile root: {profile_dir})"
+        )
 
 
 def _load_review_config(
@@ -434,7 +448,8 @@ def load_profile(
     """加载（并应用场景配置）一个 profile.
 
     `name=None` 时读 `config.current().review_profile`（实例平面字段，不走
-    `apply_scenario`）；为空则回退 `DEFAULT_PROFILE` 并 WARNING。
+    `apply_scenario`）；为空则要求 profile 根目录下恰好一个场景包（自动选中），
+    多个场景包必须显式配置 `REVIEW_PROFILE`。
 
     `allow_missing_rules` 默认 False：`rules` 引用的规则包缺失即启动失败
     （fail-fast）。显式传 True 只用于迁移 / 测试，缺失时降级为 WARNING。
@@ -447,6 +462,12 @@ def load_profile(
     profile_dir = _resolve_profile_dir(name or "", profile_root)
     raw = _read_yaml(profile_dir / "profile.yaml")
     unknown = set(raw) - _ALLOWED_PROFILE_KEYS
+    if "reporting" in unknown:
+        raise ValueError(
+            "profile.yaml no longer hosts 'reporting'; rule actions belong in "
+            f"{RULE_ACTIONS_FILE}, display/scan keys belong in "
+            f"<config>/profiles/{profile_dir.name}/review.yaml"
+        )
     if unknown:
         removed = sorted(unknown & _REMOVED_PROFILE_KEYS)
         if removed:
@@ -458,12 +479,6 @@ def load_profile(
         raise ValueError(f"unknown profile fields: {sorted(unknown)}")
     if raw.get("schema_version") != _SUPPORTED_SCHEMA:
         raise ValueError(f"unsupported profile schema_version: {raw.get('schema_version')!r}")
-    reporting_raw = raw.get("reporting")
-    if isinstance(reporting_raw, dict) and set(reporting_raw) - _PROFILE_REPORTING_KEYS:
-        raise ValueError(
-            f"profile reporting only allows {sorted(_PROFILE_REPORTING_KEYS)}; "
-            f"display/scan keys belong in <config>/profiles/{profile_dir.name}/review.yaml"
-        )
     merged: dict[str, Any] = {}
     sources: dict[str, str] = {}
     for key, value in raw.items():
@@ -492,9 +507,15 @@ def load_profile(
     referenced = list(prompts.values()) + list(merged.get("rules") or [])
     if merged.get("dynamic_rules"):
         referenced.append(merged["dynamic_rules"])
-    reporting = merged.get("reporting")
-    if isinstance(reporting, dict) and reporting.get("actions_file"):
-        referenced.append(reporting["actions_file"])
+    actions_rel = str(merged.get("rule_actions") or RULE_ACTIONS_FILE)
+    if (profile_dir / actions_rel).is_file():
+        referenced.append(actions_rel)
+    blocks_dir = profile_dir / "prompts" / "blocks"
+    if blocks_dir.is_dir():
+        referenced.extend(
+            path.relative_to(profile_dir).as_posix()
+            for path in sorted(blocks_dir.glob("*.md"))
+        )
     return Profile(
         name=str(merged.get("name") or profile_dir.name),
         language=str(language),
@@ -506,6 +527,7 @@ def load_profile(
         rule_key_promotions=tuple(merged.get("rule_key_promotions") or ()),
         rule_overrides=dict(merged.get("rule_overrides") or {}),
         disable=tuple(merged.get("disable") or ()),
+        rule_actions=str(merged.get("rule_actions") or RULE_ACTIONS_FILE),
         test_paths=tuple(str(p) for p in (merged.get("test_paths") or ())),
         capabilities=dict(merged.get("capabilities") or {}),
         security=dict(merged.get("security") or {}),

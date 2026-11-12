@@ -194,11 +194,10 @@ def test_collect_refs_profile_excludes_drive_rg(monkeypatch):
 
     params = dict(load_dynamic_rules(load_profile(None)).rules[0].params)
     assert params["excludes"] == [
-        "!reviewagent/**",
         "!tests/**",
-        "!docs/**",
         "!tmp_scripts/**",
-        "!settings/**",
+        "!docs/**",
+        "!tools/**",
         "!.venv/**",
         "!**/__pycache__/**",
         "!.git/**",

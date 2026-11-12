@@ -13,8 +13,10 @@ from reviewagent.scenario.prompts import (
     available,
     load,
     load_block,
+    load_section,
     load_template,
     render_template,
+    split_sections,
 )
 
 PUBLIC_PROMPTS = (
@@ -145,3 +147,82 @@ def test_available_uses_profile_keys_not_disk(tmp_path):
     profile = _make_tmp_profile(tmp_path)
     (profile.root / "prompts" / "stray.md").write_text("stray\n", encoding="utf-8")
     assert available(profile) == ["describe", "improve"]
+
+
+# ---------- 分节模板：load_section / split_sections ----------
+
+
+def _write_blocks(profile, body: str) -> str:
+    path = profile.root / "prompts" / "blocks" / "demo.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return "prompts/blocks/demo.md"
+
+
+def test_load_section_preserves_body_bytes(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    rel = _write_blocks(
+        profile,
+        "<!-- @section:a -->\nalpha\n\n<!-- @section:b -->\nbeta",
+    )
+    assert split_sections((profile.root / rel).read_text(encoding="utf-8")) == {
+        "a": "alpha\n\n",
+        "b": "beta",
+    }
+    assert load_section(rel, "a", profile) == "alpha\n\n"
+    assert load_section(rel, "a", profile, trim_trailing_newline=True) == "alpha"
+    assert load_section(rel, "b", profile) == "beta"
+
+
+def test_load_section_allows_marker_whitespace(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    rel = _write_blocks(profile, "<!--  @section:a  -->  \nbody\n")
+    assert load_section(rel, "a", profile) == "body\n"
+
+
+def test_load_section_rejects_duplicate(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    rel = _write_blocks(
+        profile, "<!-- @section:a -->\nx\n<!-- @section:a -->\ny\n"
+    )
+    with pytest.raises(ValueError, match="duplicate template section: a"):
+        load_section(rel, "a", profile)
+
+
+def test_load_section_reports_missing_and_available(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    rel = _write_blocks(
+        profile, "<!-- @section:a -->\nx\n<!-- @section:b -->\ny\n"
+    )
+    with pytest.raises(ValueError, match=r"demo.md#missing.*available=\['a', 'b'\]"):
+        load_section(rel, "missing", profile)
+
+
+def test_load_section_requires_markers(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    rel = _write_blocks(profile, "plain text\n")
+    with pytest.raises(ValueError, match="template section not found"):
+        load_section(rel, "any", profile)
+
+
+def test_load_section_rejects_path_escape(tmp_path):
+    profile = _make_tmp_profile(tmp_path)
+    with pytest.raises(ValueError, match="escapes profile root"):
+        load_section("../profile.yaml", "any", profile)
+
+
+def test_profile_block_sections_contract(profile):
+    expected = {
+        "prompts/blocks/review.md": {
+            "chunk", "batch", "rules_general", "rules_repo",
+        },
+        "prompts/blocks/source.md": {
+            "full", "full_empty", "full_truncated", "partial",
+            "partial_empty", "patch", "patch_context", "patch_context_omitted",
+        },
+        "prompts/blocks/dynamic.md": {
+            "cross_file_refs_empty", "cross_file_refs_refs",
+        },
+    }
+    for rel, names in expected.items():
+        assert set(split_sections(load_template(rel, profile))) == names

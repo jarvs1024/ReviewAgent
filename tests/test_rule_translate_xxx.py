@@ -46,3 +46,41 @@ def test_resolver_translate_handles_R_XXX():
     # 所以单测只验证 translate_rule_key 兜底
     label = translate_rule_key("R-XXX")
     assert "未分类" in label
+
+
+def test_r_other_keys_translate_from_rule_pack_definitions():
+    """R-OTHER 的定义从规则包原文读取，不再依赖 improve.md 单独维护一份."""
+    label = translate_rule_key("R-OTHER:magic_number")
+    assert "魔法数" in label, f"应取规则包定义, got: {label!r}"
+    assert "number" not in label
+
+    label = translate_rule_key("R-OTHER:dead_code")
+    assert "死代码" in label, f"got: {label!r}"
+
+    label = translate_rule_key("R-OTHER-IMPACT:caller_param")
+    assert "调用方" in label, f"got: {label!r}"
+
+
+def test_generic_map_reads_all_profile_rule_packs(monkeypatch):
+    """规则包改名/新增场景包时，翻译来源跟着 profile 配置走."""
+    from types import SimpleNamespace
+
+    import reviewagent.reporting.rule_translate as rt
+    import reviewagent.scenario.profile as sp
+    import reviewagent.scenario.rules.resolver as resolver
+
+    pack = SimpleNamespace(
+        root=rt.Path(__file__).resolve().parents[1]
+        / "profiles"
+        / "ssd-python-autotest",
+        rules=("rules/general_rules.md",),
+        prompts={},
+        fingerprint="test-pack-only",
+    )
+    monkeypatch.setattr(sp, "active_or_load", lambda: pack)
+    monkeypatch.setattr(
+        resolver, "active_rule_set", lambda: SimpleNamespace(fingerprint="x", index_by_key={})
+    )
+    rt._GENERIC_MAP_CACHE.clear()
+    generic = rt._load_generic_map()
+    assert "魔法数" in generic["R-OTHER:magic_number"]

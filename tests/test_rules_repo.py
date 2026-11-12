@@ -14,7 +14,7 @@ from reviewagent.scenario.rules.repo import (
 )
 from reviewagent.scenario.rules.resolver import assemble_base
 
-VERBATIM_SHA256 = "e3e87ab8d36a432ad0964581070e8f29886ebf2415bbd9db4c585967de40420b"
+VERBATIM_SHA256 = "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
 
 
 # ---------------- 迁移：渲染 / 键提取（行为不变） ----------------

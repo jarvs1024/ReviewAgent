@@ -129,6 +129,61 @@ def test_count_hidden_by_cohort_no_dup(tmp_telemetry):
     assert s.count_hidden_by_cohort(project_id=34, mr_iid=263) == 0
 
 
+def test_count_hidden_by_cohort_excludes_terminal_rows(tmp_telemetry):
+    """terminal 记录仍被 list_latest_by_cohort 保留并计入表格 → 不能算「已被合并」.
+
+    场景: 两条 applied 旧代 + 一条 open 最新代. 三条都参与统计 (用户动作不丢),
+    实际隐藏数为 0; 旧实现按 row_number>1 计成 2, 汇总提示自相矛盾.
+    """
+    from reviewagent.telemetry.store import get_store
+    s = get_store()
+    _seed(s, note_id="tm-1", cohort_key="ck-Term", state="applied")
+    _seed(s, note_id="tm-2", cohort_key="ck-Term", state="applied")
+    _seed(s, note_id="tm-3", cohort_key="ck-Term", state="open")
+
+    listed = s.list_latest_by_cohort(project_id=34, mr_iid=263)
+    assert len(listed) == 3, "terminal 全保留, 三条都应计入"
+    assert s.count_hidden_by_cohort(project_id=34, mr_iid=263) == 0
+
+
+def test_backfill_recomputes_legacy_cohort_keys(tmp_telemetry):
+    """旧库里的粗粒度 cohort_key 必须在 Store 初始化时重算.
+
+    否则升级前已发布的 MR: 历史行按 file+header 合并 (少算), 升级后新行按
+    内容指纹 (不合并) —— 同一 MR 两种口径, 跨轮 supersede 也找不到旧代.
+    """
+    import sqlite3
+
+    from reviewagent.telemetry import cohort as ck
+    from reviewagent.telemetry.store import Store, get_store
+
+    s = get_store()
+    for i, code in enumerate(["print(a)\n", "print(b)\n", "print(c)\n"]):
+        s.record_suggestion(
+            project_id=34, mr_iid=263, note_id=f"legacy-{i}",
+            file_path="a.py", target_line=10 + i, target_line_end=10 + i,
+            existing_code=code, improved_code="logger.info(x)\n",
+            header="日志补上下文", label="l",
+            fingerprint=f"fp-legacy-{i}", cohort_key="legacy-coarse",
+            severity_source="rule", head_sha="abc",
+        )
+
+    conn = sqlite3.connect(str(pathlib.Path(tmp_telemetry).resolve()))
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+
+    Store(pathlib.Path(tmp_telemetry).resolve())
+
+    rows = get_store().list_latest_by_cohort(project_id=34, mr_iid=263)
+    rows = [r for r in rows if str(r["note_id"]).startswith("legacy-")]
+    assert len(rows) == 3, f"重算后 3 个不同代码内容应各占一个 cohort, got {len(rows)}"
+    for r in rows:
+        assert r["cohort_key"] == ck.cohort_key(
+            r["file_path"], r["header"], r["existing_code"], r["target_line"],
+        ), r
+
+
 def test_count_superseded_in_mr(tmp_telemetry):
     """count_superseded_in_mr 只算显式 superseded 的."""
     from reviewagent.telemetry.store import get_store

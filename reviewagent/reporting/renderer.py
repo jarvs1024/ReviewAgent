@@ -39,40 +39,40 @@ SECTION_TITLES: dict[str, str] = {
     "repo_scan":   "三、本周代码质量全量扫描",
 }
 
-# 规则 -> 具体跟进动作映射（来自 profile `reporting.actions_file`，按 profile 指纹缓存）
+# 规则 -> 具体跟进动作映射（来自 profile.rule_actions，按 profile 指纹缓存）
 _RULE_ACTIONS_CACHE: dict[str, dict[str, str]] = {}
 
 
 def load_rule_actions(profile: Any) -> dict[str, str]:
-    """读取 profile 声明的规则跟进动作表 (YAML: 规则键 -> 具体动作).
+    """读取 profile `rule_actions` 指向的规则跟进动作表 (YAML: 规则键 -> 具体动作).
 
-    路径取 `profile.reporting["actions_file"]`（相对 profile.root）；
-    进程内按 `profile.fingerprint` 缓存，缺字段 / 读盘失败返回空映射.
+    路径来自 profile 字段（缺省 `rules/rule_actions.yaml`），不同场景包可指向
+    不同文件；进程内按 `profile.fingerprint` 缓存，文件缺失 / 读盘失败返回空映射.
     """
+    from reviewagent.scenario.profile import RULE_ACTIONS_FILE
+
     fingerprint = getattr(profile, "fingerprint", "")
     cached = _RULE_ACTIONS_CACHE.get(fingerprint)
     if cached is not None:
         return cached
-    reporting = getattr(profile, "reporting", None) or {}
-    rel = reporting.get("actions_file")
+    rel = getattr(profile, "rule_actions", "") or RULE_ACTIONS_FILE
+    path = Path(getattr(profile, "root", Path("."))) / rel
     actions: dict[str, str] = {}
-    if rel:
-        path = Path(getattr(profile, "root", Path("."))) / str(rel)
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            data = None
-        if isinstance(data, dict):
-            actions = {
-                str(key): str(value)
-                for key, value in data.items()
-                if key is not None and value is not None
-            }
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        data = None
+    if isinstance(data, dict):
+        actions = {
+            str(key): str(value)
+            for key, value in data.items()
+            if key is not None and value is not None
+        }
     _RULE_ACTIONS_CACHE[fingerprint] = actions
     return actions
 
 
-def _active_rule_actions() -> dict[str, str]:
+def active_rule_actions() -> dict[str, str]:
     """当前激活 profile 的规则动作表；profile 不可用时返回空映射."""
     try:
         from reviewagent.scenario.profile import active_or_load
@@ -517,9 +517,9 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
 
     # 跟进建议不再用"规范 CI / 正确性人工"这种万能套话, 改为基于
     # 本周 top_rules 给出针对性 1~3 条具体动作. 规则前缀 -> 具体建议的
-    # 映射来自 profile `reporting.actions_file`, 缺的类别退化到通用提示
+    # 映射来自 profile `rules/rule_actions.yaml`, 缺的类别退化到通用提示
     # (但不退化成套话).
-    rule_actions = _active_rule_actions()
+    rule_actions = active_rule_actions()
 
     follow_lines: list[str] = []
     seen_categories: set[str] = set()
@@ -531,7 +531,7 @@ def _build_inspection_summary(d: dict[str, Any]) -> str:
         if not action and raw_key.startswith("R-OTHER-IMPACT:"):
             action = rule_actions.get("R-OTHER-IMPACT")
         if not action and raw_key.startswith("R-OTHER:"):
-            action = "针对新增『其他』类违规, 沉淀一条新规则到 AGENTS.md 规范清单"
+            action = rule_actions.get("R-OTHER")
         if not action:
             continue
         # 同类别去重 (避免重复推荐同一类规则)
@@ -743,6 +743,6 @@ def split_markdown(md: str, chunk_limit: int = 18000) -> list[str]:
 
 
 __all__ = [
-    "load_rule_actions", "render_section", "render_markdown", "split_markdown",
+    "active_rule_actions", "load_rule_actions", "render_section", "render_markdown", "split_markdown",
     "section_title", "SECTION_TITLES",
 ]

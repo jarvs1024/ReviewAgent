@@ -20,6 +20,21 @@
 
 ### Changed
 
+- **周报规则动作单一来源**：`rules/rule_actions.yaml` 成为规则键 → 跟进动作的
+  唯一来源，周报确定性渲染与 `weekly_inspection_summary` 的 LLM user prompt
+  均从该文件注入；删除 prompt 内重复的动作清单、`telemetry.py` 的规则键列表和
+  `renderer.py` 里硬编码的 `R-OTHER` 动作。动作表补充 `R-OTHER` 兜底项。
+- **规则相关文件统一到 `rules/`**：`dynamic_rules.yaml` 与 `rule_actions.yaml`
+  从场景包根目录 / `reporting/` 迁入 `rules/`，删除 `reporting/` 目录与
+  `profile.yaml` 的 `reporting` 声明块。规则动作表改为固定路径
+  `rules/rule_actions.yaml`（存在即加载并计入 profile 指纹），`reporting`
+  仅保留 review.yaml 的展示/扫描调参。
+- **场景包 prompt 归类**：`prompts/` 根目录只保留对外 prompt（`improve` / `describe` /
+  `weekly_*`），内部装配片段收进 `prompts/blocks/`，按 `<!-- @section:name -->`
+  分节存放在 `review.md`（chunk / batch / rules_*）、`source.md`（源码上下文变体）、
+  `dynamic.md`（跨文件引用）三个文件里；模板数从 19 降到 9，渲染结果逐字节不变
+  （golden / legacy 对照全绿）。`dynamic_rules.yaml` 的模板字段支持 `path#section`，
+  `sync_qoder_agents` 也不会再把内部片段物化成伪 agent。
 - **文档与代码对齐**：README / QUICKSTART / DEPLOYMENT / LLM_PROVIDER_ADAPTER 补充
   `qoder-sdk`、场景包 prompt 路径（`profiles/<profile>/prompts/`）、`deploy.sh`
   十阶段与各配置键的平面归属/必填范围；`telemetry` README 修正 `triggered_by` 取值、

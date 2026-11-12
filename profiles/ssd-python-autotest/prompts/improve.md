@@ -86,18 +86,12 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 - 跨文件影响类问题**必须产 suggestion**(只要 caller 在 diff 里能 Apply)，**不必先过 R-* 表内命中**
 - `label` 填 `cross-file impact`，`header` 含"caller 同步" / "引用方更新" / "类型契约" / "常量同步"之一
 - `rationale` 字段以 `R-OTHER-IMPACT:<简短描述>` 开头, 例:
-  - `R-OTHER-IMPACT:caller_param` — caller 没传新参数
-  - `R-OTHER-IMPACT:schema_drift` — schema 改了, model/migration 没同步
-  - `R-OTHER-IMPACT:import_path` — import 旧路径还有引用
-  - `R-OTHER-IMPACT:fixture_break` — fixture 改了, 引用它的 test 失配
+  - `R-OTHER-IMPACT:caller_param` — 调用方未同步新增/变更参数
+  - `R-OTHER-IMPACT:schema_drift` — schema 变更未同步 model/migration
+  - `R-OTHER-IMPACT:import_path` — import 旧路径仍有引用
+  - `R-OTHER-IMPACT:fixture_break` — fixture 变更导致引用测试失配
 - **每个 missing parameter 独立产一条 suggestion** — `probe()` 加了 3 个新参数 (timeout, retry, attempts) 而 caller 一个都没传, 必须发 3 条独立 suggestion, 不要合并为 1 条
-- 优先级: **P1** — 见下 `## 总检视顺序` 段 🟠 优先 1 节, 与仓库规则同级 (都是强信号) 但**先于仓库规则执行**; 不要被 R-* / R-OTHER 检查顺序压后
-
-**R-OTHER:magic_number 覆盖范围 (含 inline 循环)**:
-- module-level 常量 (例: `MAX_BUFFER = 4096`) ✓
-- 函数体内硬编码 (例: `time.sleep(0.1)`) ✓
-- **循环边界字面量** (例: `for i in range(3):`, `while attempt < 3:`) ✓ — 计数上限也算 magic
-- 字符串字面量 (例: `print("ERROR")`) 不算, 除非带数字/配置含义
+- 优先级: **P1** — 见下 `## 总检视顺序` 段 🔴 优先 1 节, 与仓库规则同级 (都是强信号) 但**先于仓库规则执行**; 不要被 R-* / R-OTHER 检查顺序压后
 
 **软约束 — 优先用更精确的规则键**:
 - 跨文件影响类问题 (`R-OTHER-IMPACT:*`) 是**兜底标签** — 如果问题能精确归到 R-* (R-RES / R-LOOP / R-ERR / R-SHELL 等) → **优先用 R-* 标签**, 不用 R-OTHER-IMPACT
@@ -122,7 +116,7 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 产 suggestion, `label: cross-file impact`, `rationale` 以 `R-OTHER-IMPACT:<描述>` 开头。
 **跨文件影响类问题不要求先命中通用 R-* 规则**。
 
-### 🟠  优先 2 — 仓库自定义规则 (项目方定义，运行时获取)
+### 🟠 优先 2 — 仓库自定义规则 (项目方定义，运行时获取)
 
 如果 user message 中包含 `<rule_index>` / `<instruction_files>` 块，**先**逐条扫描其中的仓库规则，命中即产 suggestion。
 
@@ -149,10 +143,19 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
   不要提前把 medium / low 降级成 summary 文字 — 那样 reviewer 在 MR 里看不到这条发现
 - 只有关联代码不在 diff 内（GitLab 无法 Apply）时才写 summary 文字，格式见「跨文件影响」段
 
-**兜底规则** (`R-OTHER:*`)：未命中 R-* 20 类但确有价值的野生问题（硬编码魔法数 / 拼写错误 / 命名不一致 / 死代码 / 注释不一致等）。
+**兜底规则** (`R-OTHER:*`)：未命中 `R-*` 规则表但确有价值的野生问题（硬编码魔法数 / 拼写错误 / 命名不一致 / 死代码 / 注释不一致等）。
 - 所有 severity 都产 suggestion；severity 如实标注（high / medium / low），由程序排序与截断
 - `rationale` 以 `R-OTHER:<简短描述>` 开头（例 `R-OTHER:magic_number` / `R-OTHER:typo` / `R-OTHER:dead_code`）
 - **不要为了凑数硬编** — 真的没找到就空着
+
+**`R-OTHER:magic_number` 覆盖范围（含 inline 循环）**：
+- module-level 常量（例 `MAX_BUFFER = 4096`）✓
+- 函数体内硬编码（例 `time.sleep(0.1)`）✓
+- **循环边界字面量**（例 `for i in range(3):` / `while attempt < 3:`）✓ — 计数上限也算 magic
+- 字符串字面量（例 `print("ERROR")`）不算，除非带数字 / 配置含义
+
+**pytest 专项兜底**：参数化重复 / `pytest.raises` 过宽 / patch 目标写错 / 硬编码 `/tmp` 路径
+在规则表内有精确键（`R-PARAM` / `R-RAISE` / `R-MOCK` / `R-TMP`），**优先用精确键**，不要落到 `R-OTHER`。
 
 ## 严格约束（违反即降级为普通文字）
 
@@ -178,9 +181,14 @@ caller 不同步、引用方失配、类型不匹配等问题，类别可能完�
 3. 不要用 context 行（`@@` 附近不变的行）做 suggestion 锚点
 4. 不要用删除行（`-` 行）做 suggestion 锚点
 5. 如果你怀疑某个 issue 的真正目标行**不在** VALID NEW LINES 里：
-   - **`improved_code` 必须为空字符串 `""`**，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
+   - **`improved_code` 必须为空字符串 `""`**，并在 `applicability` 字段写 `"text_only"`，只在 `rationale` 字段文字描述，让 Python 端降级为普通评论
    - 或直接不写这条 suggestion（`suggestions: []` 也是合法输出）
    - ️ **禁止**用 VALID NEW LINES 里的其他行作为"占位锚点"并填写 `improved_code` — 这会导致建议指向错误的代码行
+
+6. **如果你给不出可直接 Apply 的改法**（缺上下文参数 / 需要跨文件补实现 / 修复点不在本次 diff 内）：
+   - `improved_code` 写 `""`，`applicability` 写 `"text_only"`，把结论写进 `rationale`
+   - **绝不要**留一个空的 `improved_code` 而不声明 `applicability` — Python 端会把它当成"删除这段代码"，
+     发出一个**空 Apply 按钮**，reviewer 一点就会把有效代码删掉
 
 #### 示例：目标行不在 VALID NEW LINES
 
@@ -195,6 +203,7 @@ VALID NEW LINES: [7]  # 只有 L7 改了 TESTCASE_TITLE
   "start_line": 7,
   "existing_code": "",
   "improved_code": "",
+  "applicability": "text_only",
   "rationale": "仓库规则键（原样复制）: 测试函数 (L14) 缺失 docstring。L14 不在 VALID NEW LINES 内，无法提供 Apply 建议。"
 }
 
@@ -323,6 +332,10 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 - `header`      - 1-2 词短标签，例如 `修复 None` / `类型提示` / `重构`
 - `existing_code` - 必须**与 diff 中 `+` 行字面一致**（含 4 空格缩进），UI 上会作为原代码块
 - `improved_code`  - 必须能直接 Apply（保留所有缩进、`+` 前缀去掉后只剩代码）
+- `applicability`  - `replace`（默认，有可 Apply 的代码）/ `delete`（建议删掉 `existing_code` 那几行，
+  此时 `improved_code` 留空）/ `text_only`（**给不出**可 Apply 的代码，`improved_code` 留空，
+  只在 `rationale` 里文字描述）。**留空 `improved_code` 时必须显式声明**，否则会被当成"删除代码"，
+  发出一个空的 Apply 按钮 — reviewer 一点就会删掉有效代码。
 - `rationale`   - 一两句说明：为什么改、改后消除了什么风险
 - `label`       - `potential bug` / `enhancement` / `code quality` / `style` / `security` / `cross-file impact` 之一
 - `severity`    - `high` / `medium` / `low`
@@ -333,7 +346,7 @@ diff 里**所有**看起来像 bug / 可改进的 `+` 行都必须有对应的 i
 2. **`existing_code` 必须字面等于 diff 中的 `+` 行串**（含缩进），否则 GitLab UI 无法对齐
 3. **`improved_code` 缩进必须与原代码一致**（每行 4 空格）
 4. **不要捏造不在 diff 中的代码或上下文**
-5. **最多 20 条建议** (config: `IMPROVE_MAX_SUGGESTIONS`, 多而泛 → 少而准; 但本次检视若命中多条独立 R-* / 仓库规则, 应全部产出 (不被合并到一条))
+5. **建议总数与单文件上限由程序统一截断**（见 `improve_max_suggestions` / `improve_max_suggestions_per_file`；多而泛 → 少而准；但若命中多条独立 R-* / 仓库规则，应全部产出，不被合并到一条）
 6. **数组可为空** — 若没有明显可改进点，直接 `"suggestions": []`
 7. **建议 position 必须指向出错的那一行代码（不是 def 行）** — `target_line` / `start_line` 必须指向违规 / 可改进行的那一行；不要指向 `def` / `class` 头
 8. **符号验证 (硬性)** — 改进代码前必须确保所有引用的 Name / Attribute 在目标文件中能解析。

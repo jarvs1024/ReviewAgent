@@ -57,6 +57,10 @@ class DescribeCommand(BaseCommand):
         try:
             if new_title:
                 self.gitlab.update_mr_title(self.project_id, self.mr_iid, new_title)
+                # 同步 telemetry: mr_activity.title 写的是**检视开始前**的旧标题,
+                # 这里改了 GitLab 标题却不回写 → telemetry 与 GitLab 永久漂移
+                # (dashboard 显示旧标题; E2E 的 mr_activity 审计持续报错).
+                events.emit_mr_title(self.project_id, self.mr_iid, new_title)
             if new_desc:
                 self.gitlab.update_mr_description(
                     self.project_id, self.mr_iid, new_desc

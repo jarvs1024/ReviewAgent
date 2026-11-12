@@ -24,11 +24,14 @@ _ADOPT_VALIDATION_FAILURES = frozenset({
 })
 
 
-def _is_effective_action(action: str, validation_status: str | None) -> bool:
+def is_effective_action(action: str, validation_status: str | None) -> bool:
     """判断一条 suggestion_action 是否代表一次真实生效的操作.
 
     action='adopted' 但校验失败 / 目标已是 dismissed|resolved|superseded 时不算采纳;
     重复 /adopt 一个已 applied 的建议 (already-applied) 仍计入 adopted.
+
+    公开 API: API 层（时间线端点的 `effective` 列）必须与统计口径**同源** ——
+    在 SQL 里重写一遍规则会随规则演进悄悄漂移。
     """
     if action != "adopted":
         return True
@@ -38,6 +41,10 @@ def _is_effective_action(action: str, validation_status: str | None) -> bool:
     if status.startswith("already-") and status != "already-applied":
         return False
     return True
+
+
+#: 兼容别名（历史私有名，仍被多处引用）
+_is_effective_action = is_effective_action
 
 
 def _enrich_web_url(row: dict) -> dict:
@@ -87,7 +94,8 @@ CREATE TABLE IF NOT EXISTS review_runs (
     finished_at         TIMESTAMP,
     status              TEXT NOT NULL,
     error               TEXT,
-    model               TEXT,
+    model               TEXT,          -- 实际生效模型 (provider 回报; 未回报则 NULL)
+    model_configured    TEXT,          -- 请求时配置模型 id (run 发起时的配置值)
     prompt_tokens       INTEGER DEFAULT 0,
     completion_tokens   INTEGER DEFAULT 0,
     total_tokens        INTEGER DEFAULT 0,
@@ -236,6 +244,9 @@ class Store:
                 # Batch5: 内容指纹 (existing_code normalize 后 hash), 不依赖 line,
                 # 行号变化 (如 Apply docstring 后 +1) 仍能命中 dedup.
                 "content_fingerprint": "ALTER TABLE suggestions ADD COLUMN content_fingerprint TEXT",
+                # 建议的可 Apply 语义 (replace / delete / text_only) ——
+                # 审计用: text_only 没有 Apply 按钮, delete 的 Apply 会删代码行.
+                "applicability": "ALTER TABLE suggestions ADD COLUMN applicability TEXT",
             }
             for column, sql in migrations.items():
                 if column not in columns:
@@ -248,6 +259,9 @@ class Store:
                 "cost_credits": "ALTER TABLE review_runs ADD COLUMN cost_credits REAL DEFAULT 0",
                 # Batch: 记录 LLM provider (opencode / qodercli), 给 MR detail API 用
                 "llm_provider": "ALTER TABLE review_runs ADD COLUMN llm_provider TEXT",
+                # E8: model 一列历史上塞了两种语义 (配置 id vs provider 回报名),
+                # 拆成 model(实际生效) + model_configured(请求时配置 id).
+                "model_configured": "ALTER TABLE review_runs ADD COLUMN model_configured TEXT",
             }.items():
                 if column not in run_columns:
                     conn.execute(sql)
@@ -343,6 +357,34 @@ class Store:
                     "telemetry.store backfill content_fingerprint rows={}",
                     len(_bf_rows),
                 )
+            # cohort_key 口径迁移 (2026-11):
+            # 旧算法 = file+header, 同文件多处「同标题但不同位置」的独立问题会被
+            # 误并成一个 cohort → 汇总少算、采纳率虚高. 新算法见 telemetry.cohort
+            # (file+header+内容指纹), 需要回填存量行, 否则旧 MR 仍按旧口径聚合.
+            # 用 user_version 一次性门控; 手工 `PRAGMA user_version=0` 可强制重跑.
+            if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+                from reviewagent.telemetry.cohort import cohort_key as _ck
+                _ck_rows = conn.execute(
+                    "SELECT id, file_path, header, existing_code, target_line, "
+                    "       cohort_key FROM suggestions"
+                ).fetchall()
+                _ck_updated = 0
+                for _ck_r in _ck_rows:
+                    _ck_new = _ck(
+                        _ck_r["file_path"], _ck_r["header"],
+                        _ck_r["existing_code"], _ck_r["target_line"],
+                    )
+                    if _ck_new != _ck_r["cohort_key"]:
+                        conn.execute(
+                            "UPDATE suggestions SET cohort_key=? WHERE id=?",
+                            [_ck_new, _ck_r["id"]],
+                        )
+                        _ck_updated += 1
+                conn.execute("PRAGMA user_version = 1")
+                if _ck_updated:
+                    logger.info(
+                        "telemetry.store backfill cohort_key rows={}", _ck_updated,
+                    )
 
     @contextmanager
     def _conn(self):
@@ -416,6 +458,27 @@ class Store:
                 WHERE project_id = ? AND mr_iid = ?
                 """,
                 (now, now, project_id, mr_iid),
+            )
+
+    def update_mr_title(self, project_id: int, mr_iid: int, title: str) -> None:
+        """同步 MR 标题（/describe 改写 GitLab 标题后调用）.
+
+        Why 需要这个方法: `mr_activity.title` 是在检视**开始前**写入的旧标题,
+        而 `/describe` 随后把 GitLab 上的标题换成 LLM 生成的新标题却不回写 ——
+        于是 telemetry 与 GitLab 永久漂移（dashboard 显示旧标题；
+        同一 MR 第二次 describe 换个说法就对不上；E2E 的 mr_activity 审计持续报错）。
+
+        未知 MR 静默跳过: 同步是尽力而为, 不能因为它把整个 describe 打断。
+        """
+        with self._conn() as conn:
+            now = _fmt_dt(_utcnow())
+            conn.execute(
+                """
+                UPDATE mr_activity
+                SET title = ?, updated_at = ?, last_activity_at = ?
+                WHERE project_id = ? AND mr_iid = ?
+                """,
+                (title, now, now, project_id, mr_iid),
             )
 
     def claim_no_more_review_notice(self, project_id: int, mr_iid: int) -> bool:
@@ -608,6 +671,7 @@ class Store:
         status: str,
         error: str | None = None,
         model: str | None = None,
+        model_configured: str | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         cost_credits: float = 0.0,
@@ -621,14 +685,14 @@ class Store:
             conn.execute(
                 """
                 UPDATE review_runs
-                SET finished_at = ?, status = ?, error = ?, model = ?,
+                SET finished_at = ?, status = ?, error = ?, model = ?, model_configured = ?,
                     prompt_tokens = ?, completion_tokens = ?, llm_provider = ?,
                     total_tokens = ?, cost_credits = ?, duration_ms = ?,
                     rule_keys_cited = ?, suggestion_count = ?
                 WHERE id = ?
                 """,
                 (
-                    now, status, error, model,
+                    now, status, error, model, model_configured,
                     prompt_tokens, completion_tokens, llm_provider,
                     prompt_tokens + completion_tokens, cost_credits, duration_ms,
                     ",".join(rule_keys_cited) if rule_keys_cited else None,
@@ -817,6 +881,7 @@ class Store:
         cohort_key: str | None = None,
         severity_source: str | None = None,
         score: int | None = None,
+        applicability: str | None = None,
     ) -> int:
         """记录 improve 发布的一条 inline suggestion (用于后续 /adopt 验证)."""
         with self._conn() as conn:
@@ -829,8 +894,9 @@ class Store:
                     header, severity, head_sha,
                     rule_keys, one_sentence_summary, importance, label,
                     fingerprint, content_fingerprint, cohort_key, severity_source, score, posted_at,
+                    applicability,
                     state, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
                 """,
                 (
                     project_id, mr_iid, note_id, file_path,
@@ -847,6 +913,7 @@ class Store:
                     severity_source,
                     score,
                     _fmt_dt(_utcnow()),
+                    applicability,
                     _fmt_dt(_utcnow()),
                 ),
             )
@@ -1134,13 +1201,13 @@ class Store:
         """列出该 MR 全部 state=open 的 suggestions (给 auto_detect_applied 用).
 
         Returns: list of dict with note_id, file_path, target_line,
-        target_line_end, existing_code, improved_code, head_sha.
+        target_line_end, existing_code, improved_code, head_sha, applicability.
         """
         with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT note_id, file_path, target_line, target_line_end,
-                       existing_code, improved_code, head_sha
+                       existing_code, improved_code, head_sha, applicability
                 FROM suggestions
                 WHERE project_id=? AND mr_iid=? AND state='open'
                 ORDER BY id
@@ -1183,7 +1250,7 @@ class Store:
             rows = conn.execute(
                 f"""
                 SELECT note_id, file_path, target_line, target_line_end,
-                       existing_code, improved_code, head_sha
+                       existing_code, improved_code, head_sha, applicability
                 FROM suggestions
                 WHERE project_id=? AND mr_iid=?
                   AND state='resolved'
@@ -1566,7 +1633,6 @@ class Store:
         # terminal = user/bot 明确决定过的状态. open 不算 (待处理不算决定).
         terminal_states = ("applied", "dismissed", "resolved")
         placeholders = ",".join("?" for _ in terminal_states)
-        # SQLite 不支持 DISTINCT in window functions, 用单独 CTE 聚合再 LEFT JOIN.
         sql = f"""
         WITH siblings AS (
             SELECT s.*,
@@ -1575,21 +1641,13 @@ class Store:
             WHERE s.project_id = ? AND s.mr_iid = ?
               AND COALESCE(s.state, 'open') != 'superseded'
         ),
-        cohort_terminal_count AS (
-            SELECT ck, COUNT(DISTINCT state) AS n_terminal_states
-            FROM siblings
-            WHERE state IN ({placeholders})
-            GROUP BY ck
-        ),
         ranked AS (
             SELECT s.*,
                    ROW_NUMBER() OVER (
                        PARTITION BY s.project_id, s.mr_iid, s.ck
                        ORDER BY s.id DESC
-                   ) AS row_number,
-                   COALESCE(c.n_terminal_states, 0) AS n_terminal_states
+                   ) AS row_number
             FROM siblings s
-            LEFT JOIN cohort_terminal_count c ON s.ck = c.ck
         )
         -- 保留规则 (修复 MR299 + 类似 case):
         --   1) row_number=1 (最新一条) 永远保留 → 同 cohort 全 open 只一条
@@ -1604,10 +1662,8 @@ class Store:
         WHERE row_number = 1
            OR state IN ({placeholders})
         """
-        # params 顺序: siblings WHERE (project_id, mr_iid), cohort_terminal_count IN
-        # (terminal_states x3), ranked WHERE 复用 siblings 参数, 终态 IN (terminal x3).
-        # 但 SQL 里 cohort_terminal_count 用的是 {placeholders} 一次, ranked 终态判断又用一次.
-        params: list = [project_id, mr_iid] + list(terminal_states) + list(terminal_states)
+        # params 顺序: siblings WHERE (project_id, mr_iid), 终态 IN (terminal x3).
+        params: list = [project_id, mr_iid] + list(terminal_states)
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
@@ -1625,13 +1681,14 @@ class Store:
     def count_hidden_by_cohort(self, *, project_id: int, mr_iid: int) -> int:
         """统计被 cohort 归并隐藏的旧记录数 (用于 build_overview_body 末注).
 
-        "隐藏" = 在 list_latest_by_cohort 里 row_number > 1, 也就是同 cohort_key (或
-        note_id fallback) 的非最新记录. 这些不算 applied, 也不出现在汇总里, 但
-        仍保留原始状态用于审计.
+        "隐藏" = 在 `list_latest_by_cohort` 里**既不满足 row_number=1、也不是
+        terminal state** 的记录. terminal (applied/dismissed/resolved) 会被保留并
+        计入汇总表, 因此不能算「已被合并」— 否则提示语会和表格数字自相矛盾
+        (如 3 条 applied 全保留, 却提示「2 条已被合并」).
         """
         sql = """
         WITH ranked AS (
-            SELECT id, ROW_NUMBER() OVER (
+            SELECT id, state, ROW_NUMBER() OVER (
                 PARTITION BY project_id, mr_iid,
                              COALESCE(NULLIF(cohort_key, ''), note_id)
                 ORDER BY id DESC
@@ -1640,7 +1697,9 @@ class Store:
             WHERE project_id = ? AND mr_iid = ?
               AND COALESCE(state, 'open') != 'superseded'
         )
-        SELECT COUNT(*) AS n FROM ranked WHERE row_number > 1
+        SELECT COUNT(*) AS n FROM ranked
+        WHERE row_number > 1
+          AND COALESCE(state, 'open') NOT IN ('applied', 'dismissed', 'resolved')
         """
         with self._conn() as conn:
             row = conn.execute(sql, (project_id, mr_iid)).fetchone()

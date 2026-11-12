@@ -35,14 +35,7 @@
 - 「裸 except Exception ×N → 用 ruff `BLE` + logging.exception 加 CI 阻断」
 - 「R-RES 资源句柄 ×N → 强制 `with` 上下文管理，扫一遍存量 open 调用」
 
-规则名 → 建议动作参考（**不是固定字典**：仓库规则随项目变化，必须以本周数据里 `top_rules_friendly` 的实际命名取最贴的一条）：
-- R-LOOP        → 把『循环边界/无限循环』作为 review checklist 红线
-- R-RES         → 扫 `open/requests/socket`，强制 `with` + 超时
-- R-ERR         → 裸 `except:` / 静默 `pass` 列为硬错误加入 review 范本
-- R-SHELL       → 对所有 shell 调用加超时 + 异常类型细化 + sandbox 跑
-- R-CI          → 并行用例加临时目录 PID 隔离 / 串行锁，修 flaky
-- R-OTHER-IMPACT:* → 对跨文件签名变化在 MR 描述点 caller，拉对应 owner review
-- R-OTHER:*     → 沉淀新规则到 AGENTS.md 规范清单
+规则名 → 建议动作参考由运行时数据提供（**不是固定字典**：仓库规则随项目变化，必须以本周数据里 `top_rules_friendly` 的实际命名取最贴的一条）。
 
 输出格式：每个动作前用 `- **`粗体中文问题类别名**` ×N`：具体动作`**；
 若 top 类别没在映射里，也要**根据本周实际命名给一条具体动作**，不要退化成套话。

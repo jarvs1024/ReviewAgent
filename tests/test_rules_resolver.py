@@ -89,7 +89,7 @@ def test_verbatim_body_checksum_is_stable():
     """规则包正文的漂移护栏：改动 prompts 以外的规则正文须同步更新基线."""
     body = assemble_base(load_profile(None)).verbatim_body.encode()
     assert hashlib.sha256(body).hexdigest() == (
-        "e3e87ab8d36a432ad0964581070e8f29886ebf2415bbd9db4c585967de40420b"
+        "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
     )
 
 

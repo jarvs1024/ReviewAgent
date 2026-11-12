@@ -2,7 +2,7 @@
 #
 # 只允许七组：file_filter / scoring / limits / context / repo_context /
 # rule_keys / reporting。
-# 只写"与场景包默认不同"的值；不写的键沿用 profile.yaml 默认。
+# 只写与默认值不同的项；不写的键回落 settings/schema.py 的默认值。
 # 本文件会入库，禁止写入 token / webhook 等密钥（密钥只放 config/instance.env）。
 #
 # 改完执行：.venv/bin/python -m reviewagent config check
@@ -43,8 +43,10 @@ file_filter:
 scoring:
   # auto=按测试文件占比自动切换；test=测试代码即业务代码；business=忽略测试特征
   review_mode: test
-  # 低于该严重度的建议不发布（low=不过滤；medium=丢掉 low；high=只留 high）
-  min_severity: medium
+  # 低于该严重度的建议不发布（low=不过滤；medium=丢掉 low；high=只留 high）。
+  # 与 prompt 的「所有 severity 都产 suggestion」保持一致：默认不过滤，
+  # 由优先级排序 + max_suggestions / 单文件上限统一截断。
+  min_severity: low
   # 抽样路径与上限：测试资产量大，只抽检一部分；0=不抽样
   test_sample_paths:
     - testcase/

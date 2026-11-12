@@ -65,7 +65,7 @@ def _write_yaml(path: Path, data: Any) -> None:
     path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
-def _ruleset(tmp_path: Path, base: Profile, payload: Any, *, rel: str = "dynamic_rules.yaml"):
+def _ruleset(tmp_path: Path, base: Profile, payload: Any, *, rel: str = "rules/dynamic_rules.yaml"):
     """在 tmp profile 目录写入 dynamic_rules 文件并加载."""
     root = tmp_path / "profile"
     _write_yaml(root / rel, payload)
@@ -105,8 +105,8 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
     assert rule.title == "跨文件引用"
     # T14: 模板拆分为空 / 有引用两条，加载期校验存在性。
     assert rule.template is None
-    assert rule.empty_template == "prompts/dynamic/cross_file_refs_empty.md"
-    assert rule.items_template == "prompts/dynamic/cross_file_refs_refs.md"
+    assert rule.empty_template == "prompts/blocks/dynamic.md#cross_file_refs_empty"
+    assert rule.items_template == "prompts/blocks/dynamic.md#cross_file_refs_refs"
     assert rule.params == {
         "rg_file_type": "py",
         "max_symbols_per_file": 15,
@@ -114,11 +114,10 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
         "hits_per_symbol": 2,
         "timeout_seconds": 35,
         "excludes": [
-            "!reviewagent/**",
             "!tests/**",
-            "!docs/**",
             "!tmp_scripts/**",
-            "!settings/**",
+            "!docs/**",
+            "!tools/**",
             "!.venv/**",
             "!**/__pycache__/**",
             "!.git/**",
@@ -127,7 +126,7 @@ def test_load_declared_rule(base_profile: Profile, declared_ruleset: DynamicRule
     assert rule.limits == {"max_files": 60}
     assert declared_ruleset.fingerprint
     # R5: 指纹是内容摘要（sha256 前 12 位），不是 mtime.
-    raw = (base_profile.root / "dynamic_rules.yaml").read_bytes()
+    raw = (base_profile.root / str(base_profile.dynamic_rules)).read_bytes()
     assert declared_ruleset.fingerprint == hashlib.sha256(raw).hexdigest()[:12]
     assert re.fullmatch(r"[0-9a-f]{12}", declared_ruleset.fingerprint) is not None
 
@@ -168,6 +167,27 @@ def test_profile_root_escape_rejected(tmp_path, base_profile):
     escaped = replace(base_profile, root=root, dynamic_rules="../outside.yaml")
     with pytest.raises(ValueError, match="escapes profile root"):
         load_dynamic_rules(escaped)
+
+
+def test_template_section_reference_validated(tmp_path, base_profile):
+    template = tmp_path / "profile" / "prompts" / "blocks" / "demo.md"
+    template.parent.mkdir(parents=True)
+    template.write_text("<!-- @section:ok -->\nbody\n", encoding="utf-8")
+
+    good = _ruleset(
+        tmp_path,
+        base_profile,
+        {"schema_version": 1, "rules": [
+            _one_rule(empty_template="prompts/blocks/demo.md#ok"),
+        ]},
+    )
+    assert good.rules[0].empty_template == "prompts/blocks/demo.md#ok"
+
+    bad = {"schema_version": 1, "rules": [
+        _one_rule(empty_template="prompts/blocks/demo.md#missing"),
+    ]}
+    with pytest.raises(ValueError, match="references missing section"):
+        _ruleset(tmp_path, base_profile, bad)
 
 
 def test_unsupported_schema_version_rejected(tmp_path, base_profile):

@@ -22,13 +22,13 @@ from typing import Any
 from reviewagent.review.policy import LanguagePolicy
 from reviewagent.review.types import FileContext
 from reviewagent.scenario.profile import Profile, active_or_load
-from reviewagent.scenario.prompts import load_template, render_template
+from reviewagent.scenario.prompts import load_section, load_template, render_template
 from reviewagent.security import fence_for, normalize_untrusted, security_flag
 
-_SOURCE_DIR = "prompts/source"
-_DYNAMIC_DIR = "prompts/dynamic"
-_DEFAULT_EMPTY_TEMPLATE = f"{_DYNAMIC_DIR}/cross_file_refs_empty.md"
-_DEFAULT_ITEMS_TEMPLATE = f"{_DYNAMIC_DIR}/cross_file_refs_refs.md"
+_SOURCE_TEMPLATE = "prompts/blocks/source.md"
+_DYNAMIC_TEMPLATE = "prompts/blocks/dynamic.md"
+_DEFAULT_EMPTY_TEMPLATE = f"{_DYNAMIC_TEMPLATE}#cross_file_refs_empty"
+_DEFAULT_ITEMS_TEMPLATE = f"{_DYNAMIC_TEMPLATE}#cross_file_refs_refs"
 # 单文件 full 源码上限（超出截断，防 prompt 撑爆参数长度）
 _MAX_FULL_LINES = 5000
 # patch 模式最多展示的 merged 段数（控 token 成本）
@@ -56,7 +56,11 @@ def _render(
     trim: bool,
 ) -> str:
     prof = _resolve_profile(profile)
-    text = load_template(rel_path, prof, trim_trailing_newline=trim)
+    path, sep, section = rel_path.partition("#")
+    if sep:
+        text = load_section(path, section, prof, trim_trailing_newline=trim)
+    else:
+        text = load_template(path, prof, trim_trailing_newline=trim)
     return render_template(
         text, values, template_path=rel_path, profile_name=prof.name
     )
@@ -112,7 +116,7 @@ def build_source_block(
     if strategy == "full":
         if not lines:
             return _render(
-                f"{_SOURCE_DIR}/full_empty.md",
+                f"{_SOURCE_TEMPLATE}#full_empty",
                 {"file_path": file_path},
                 profile,
                 trim=True,
@@ -121,7 +125,7 @@ def build_source_block(
         if total > _MAX_FULL_LINES:
             numbered = _fragment(policy, lines[:_MAX_FULL_LINES], 1, "full")
             return _render(
-                f"{_SOURCE_DIR}/full_truncated.md",
+                f"{_SOURCE_TEMPLATE}#full_truncated",
                 {
                     "file_path": file_path,
                     "total": str(total),
@@ -134,7 +138,7 @@ def build_source_block(
             )
         numbered = _fragment(policy, lines, 1, "full")
         return _render(
-            f"{_SOURCE_DIR}/full.md",
+            f"{_SOURCE_TEMPLATE}#full",
             {
                 "file_path": file_path,
                 "total": str(total),
@@ -147,7 +151,7 @@ def build_source_block(
     if strategy == "partial":
         if not lines:
             return _render(
-                f"{_SOURCE_DIR}/partial_empty.md",
+                f"{_SOURCE_TEMPLATE}#partial_empty",
                 {"file_path": file_path},
                 profile,
                 trim=True,
@@ -159,7 +163,7 @@ def build_source_block(
             for lo, hi in merged
         ]
         return _render(
-            f"{_SOURCE_DIR}/partial.md",
+            f"{_SOURCE_TEMPLATE}#partial",
             {
                 "file_path": file_path,
                 "n": str(n),
@@ -190,21 +194,21 @@ def build_source_block(
         }
         if omitted:
             rendered = _render(
-                f"{_SOURCE_DIR}/patch_context_omitted.md",
+                f"{_SOURCE_TEMPLATE}#patch_context_omitted",
                 {**values, "omitted": str(omitted)},
                 profile,
                 trim=False,
             )
         else:
             rendered = _render(
-                f"{_SOURCE_DIR}/patch_context.md",
+                f"{_SOURCE_TEMPLATE}#patch_context",
                 values,
                 profile,
                 trim=False,
             )
         context_block = "\n" + rendered
     return _render(
-        f"{_SOURCE_DIR}/patch.md",
+        f"{_SOURCE_TEMPLATE}#patch",
         {
             "file_path": file_path,
             "n": str(n),

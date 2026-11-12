@@ -123,16 +123,16 @@ def test_apply_file_count_cap_keeps_must_review_and_truncates_tail():
     assert len(kept) == 3
 
 
-def test_apply_file_count_cap_must_exceeds_max_keeps_all_must():
-    # 必保集合本身超过 max → 全保留 must, optional 全截断
+def test_apply_file_count_cap_must_exceeds_max_still_respects_cap():
+    # 必保集合本身超过 max → 按优先级顺序保留前 max 个, 其余进 truncated
     files = ["new1.py", "api/kw1.py", "new2.py", "opt1.py"]
     new_files = {"new1.py", "new2.py"}
     kept, truncated = ImproveCommand._apply_file_count_cap(
         files, new_files, ("/api/",), max_files=2,
     )
-    # must = 3 (new1, kw1, new2) > max=2 → budget=0, optional 全截断
-    assert set(kept) == {"new1.py", "api/kw1.py", "new2.py"}
-    assert truncated == ["opt1.py"]
+    # must = 3 (new1, kw1, new2) > max=2 → 保留前 2 个 must, 其余全部截断
+    assert kept == ["new1.py", "api/kw1.py"]
+    assert truncated == ["new2.py", "opt1.py"]
 
 
 def test_apply_file_count_cap_disabled_when_zero():
@@ -167,7 +167,7 @@ def test_extract_guardrail_markers_keeps_truncation_and_unappliable():
     """数量截断 ℹ️ / 跨文件影响 / 无法自动应用 都必须进入最终总览."""
     sm = (
         "## 改进总览\n\n- file1 L1 — x\n\n"
-        "> ℹ️ 另有 2 条建议因单文件上限（5 条/文件）降为总览文字\n\n"
+        "> ℹ️ 另有 2 条建议因单文件上限（5 条/文件）未展示\n\n"
         "> ℹ️ 另有 3 条低优先级建议未展示（上限 20 条）\n\n"
         "> 跨文件影响: services/caller.py L20 调用了已删除参数\n\n"
         "> 无法自动应用: a.py L9 需要人工评估"

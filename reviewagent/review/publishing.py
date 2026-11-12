@@ -20,10 +20,12 @@ from typing import Any
 from reviewagent.gitlab.client import GitLabError
 from reviewagent.llm import OpencodeOutputError
 from reviewagent.logging_setup import logger
+from reviewagent.review.applicability import DELETE, REPLACE, TEXT_ONLY
 from reviewagent.review.validation import (
     suggestion_content_fingerprint,
     suggestion_fingerprint,
 )
+from reviewagent.telemetry.cohort import cohort_key
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,9 @@ class PublishCallbacks:
     pre_reconcile: Callable[..., dict[str, Any]]
     publish_overview: Callable[..., Any]
     help_footer: str
+    # 无 Apply 按钮时用的页脚 (text_only / 收缩建议) ——
+    # 不能提示「点上方『应用建议』按钮」, 否则 reviewer 会去找一个不存在的按钮.
+    help_footer_text_only: str = ""
 
 
 def _suggestion_fingerprint(file_path: str, line: int, header: str | None) -> str:
@@ -74,6 +79,10 @@ def _suggestion_content_fingerprint(existing_code: str) -> str:
     实现见 review/validation.py:suggestion_content_fingerprint（薄委托）.
     """
     return suggestion_content_fingerprint(existing_code)
+
+
+# 实现放在 telemetry 层, 与存量数据回填端共用同一算法.
+_cohort_key = cohort_key
 
 
 def _raw_rule_keys(raw: Any) -> list[str]:
@@ -218,6 +227,90 @@ def _handle_cohort_reoccurrence(
     )
 
 
+def _record_published_suggestion(
+    *,
+    project_id: int,
+    mr_iid: int,
+    note_id: str,
+    file_path: str,
+    new_line: int,
+    n_lines: int,
+    existing: str,
+    improved: str,
+    normalised: dict[str, Any],
+    raw: Any,
+    rule_set: Any,
+    head_sha: str,
+    score: int,
+    applicability: str,
+    gitlab,
+) -> None:
+    """把**已发布到 GitLab** 的建议落 telemetry (post / general 两条分支共用).
+
+    Why 共用: general 分支 (收缩建议, 无 Apply 按钮) 早期只发评论不落库 ——
+    reviewer 在 MR diff 里看得到这条发现, 顶部「检视汇总」表却不计数,
+    也无法 /adopt / /dismiss (telemetry 没有对应行).
+    实测证据: project=3 mr=3 的 improve.ok 报 inline_posted=9, 但 telemetry 只落 8 行.
+    """
+    from reviewagent.telemetry.store import get_store
+
+    # LLM 不输出 rule_keys 字段 → 从 rationale 文本里抽 R-XXX / R-OTHER / *-RULE-* 前缀;
+    # 显式给出时保留旧优先级, 只追加 promotion 派生键 (见 record_rule_keys).
+    rule_keys = record_rule_keys(raw, normalised, rule_set=rule_set)
+    # 与 dedup_check 同一 helper — 保证两边 fp 一致.
+    fingerprint = _suggestion_fingerprint(
+        file_path, new_line, normalised.get("header")
+    )
+    content_fingerprint = _suggestion_content_fingerprint(existing)
+    cohort_key = _cohort_key(file_path, normalised.get("header"), existing, new_line)
+    store = get_store()
+    store.record_suggestion(
+        project_id=project_id,
+        mr_iid=mr_iid,
+        note_id=note_id,
+        file_path=file_path,
+        target_line=new_line,
+        target_line_end=(new_line + n_lines - 1) if n_lines > 1 else new_line,
+        existing_code=existing,
+        improved_code=improved,
+        header=normalised.get("header"),
+        severity=normalised.get("severity"),
+        head_sha=head_sha,
+        label=normalised.get("label"),
+        rule_keys=rule_keys,
+        one_sentence_summary=(
+            (raw.get("one_sentence_summary") or normalised.get("rationale"))
+            if isinstance(raw, dict) else None
+        ),
+        importance=raw.get("importance") if isinstance(raw, dict) else None,
+        fingerprint=fingerprint,
+        content_fingerprint=content_fingerprint,
+        cohort_key=cohort_key,
+        severity_source="rule" if rule_keys else "llm",
+        score=score,
+        applicability=applicability,
+    )
+    # Batch3: 同 cohort 上一代是 applied/dismissed 且当前问题
+    # 仍然存在 → supersede 旧记录, 把新一条标 generation+1.
+    try:
+        _handle_cohort_reoccurrence(
+            store=store,
+            project_id=project_id, mr_iid=mr_iid,
+            cohort_key=cohort_key,
+            new_note_id=note_id,
+            file_path=file_path,
+            target_line=new_line,
+            target_line_end=(new_line + n_lines - 1) if n_lines > 1 else new_line,
+            existing=existing,
+            head_sha=head_sha,
+            gitlab=gitlab,
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(
+            "improve.cohort_reoccurrence failed (non-fatal): {}", _e,
+        )
+
+
 def make_token_summary(
     prompt_tokens: int, completion_tokens: int, model: str, cost_credits: float = 0.0,
 ):
@@ -346,7 +439,7 @@ def build_summary_v2(
 _MARKER_PREFIXES = ("> ⏭️", "> ✂️", "> 跨文件影响", "> 无法自动应用")
 # validation 的截断提示用 ℹ️; 只保留真正报告"没展示"的行, 否则会把
 # build_summary_v2 自己重算的 "已发过" 重复行也带进来.
-_TRUNCATION_HINTS = ("未展示", "降为总览文字")
+_TRUNCATION_HINTS = ("未展示",)
 
 
 def extract_guardrail_markers(summary_md: str) -> list[str]:
@@ -355,7 +448,7 @@ def extract_guardrail_markers(summary_md: str) -> list[str]:
     V1.1 配套: _publish 重建 summary 时, 把这些行追加到尾部,
     让 GitLab note 显示 C 抽样跳过 / D 文件数截断 / 无法 inline 的跨文件影响.
     匹配行首 `> ⏭️` / `> ✂️` / `> 跨文件影响:` / `> 无法自动应用:`,
-    以及 validation 生成的 `> ℹ️ ... 未展示 / 降为总览文字` 截断提示.
+    以及 validation 生成的 `> ℹ️ ... 未展示` 截断提示.
     """
     if not summary_md:
         return []
@@ -493,28 +586,28 @@ def publish(
             line_map=line_map,
             file_sources=file_sources,
         )
-        # === MR1121 修复: rationale 明确说目标行不在 VALID NEW LINES 内 → 强制降级 general.
-        # Why: LLM 有时在 rationale 里写"降级为普通评论"，但 improved_code 仍指向
-        #      VALID NEW LINES 里的其他行 (占位锚点), 导致建议指向错误代码.
-        # 检测: rationale 包含"不在 VALID NEW LINES" / "不在本次 diff" / "无法提供可 Apply" 等关键词.
-        if decision["action"] == "post":
-            _rationale = (normalised.get("rationale") or "").lower()
-            _not_in_diff_keywords = (
-                "不在 valid new lines",
-                "不在本次 diff",
-                "无法提供可 apply",
-                "降级为普通评论",
-                "not in valid new lines",
-                "not in diff",
+        # === MR1121 修复 + note_1096 回归: 统一用 applicability 语义决定正文形态.
+        # Why: LLM 有时在 rationale 里写"降级为普通评论" / "不提供可直接 Apply 的代码":
+        #      - 前者: improved_code 仍指向 VALID NEW LINES 里的其他行 (占位锚点);
+        #      - 后者: improved_code 为空, 但意图根本不是删除代码.
+        #      两种情况早期都被发成带 Apply 按钮的 suggestion 块, reviewer 一点
+        #      就把有效代码删掉了.
+        # 判定已在 normalise_suggestion 里完成 (review/applicability.py), 正文形态
+        # (有无 suggestion 块) 随之确定; 这里只负责把 text_only 的建议强制走 post
+        # 分支 —— general 分支的正文写的是"代码收缩(删除行)", 对纯文字说明是错的.
+        _applicability = normalised.get("applicability") or REPLACE
+        if _applicability == TEXT_ONLY and decision["action"] == "general":
+            decision = {
+                "action": "post",
+                "new_line": start_line,
+                "reason": "text_only: publish as plain comment (no Apply button)",
+            }
+        if _applicability == TEXT_ONLY and decision["action"] == "post":
+            logger.info(
+                "improve.publish_text_only project={} mr={} file={} line={} rationale={}",
+                project_id, mr_iid, file_path, start_line,
+                (normalised.get("rationale") or "")[:80],
             )
-            if any(kw in _rationale for kw in _not_in_diff_keywords):
-                logger.info(
-                    "improve.force_general_not_in_diff project={} mr={} file={} line={} rationale={}",
-                    project_id, mr_iid, file_path, start_line,
-                    (normalised.get("rationale") or "")[:80],
-                )
-                decision = {"action": "general", "new_line": start_line,
-                            "reason": "rationale indicates target not in VALID NEW LINES"}
         # === A. 跨次去重 — 守卫所有发布动作 (post / general).
         # Why: 此前 dedup 只在 action == "post" 分支内, 收缩建议
         #      (action == "general") 走另一条路径直接发评论, 同一行
@@ -573,52 +666,65 @@ def publish(
                 logger.warning("improve.dedup_check failed (non-fatal): {}", _e)
 
         if decision["action"] == "post":
-            # === apply 风险检测: 引用了 missing 符号时, 在 review 中加 ⚠️ 提示
-            # 永远走 post 路径 (保留 Apply 按钮), reviewer 自己决定怎么处理
-            _risk_level, _risk_msgs = callbacks.detect_apply_risk(
-                file_path=file_path,
-                improved_code=decision.get("normalised_code") or normalised["improved_code"],
-                file_sources=file_sources,
-                suggestion_text=(
-                    f"{normalised.get('rationale') or ''}\n"
-                    f"{normalised.get('header') or ''}"
-                ),
-            )
-            _warn_block = ""
-            if _risk_level == "warn" and _risk_msgs:
-                _warn_block = (
-                    "> ⚠️ **apply 前请确认** — 建议引入了目标文件中尚未存在的符号；\n"
-                    + "\n".join(f"> • {m}" for m in _risk_msgs) + "\n"
-                    + "> 💡 apply 后请补全缺失的 import / 常量 / 方法, 否则会 NameError 或 ImportError.\n\n"
-                )
-                logger.info(
-                    "improve.apply_risk_warn project={} mr={} file={} line={} missing={}",
-                    project_id, mr_iid, file_path, decision["new_line"],
-                    _risk_msgs,
-                )
             body_to_post = normalised["body"]
             nc = decision.get("normalised_code") or normalised["improved_code"]
             n_lines = len(nc.split("\n"))
-            if nc != normalised["improved_code"]:
-                logger.info(
-                    "improve.fix_indent project={} mr={} file={} line={}",
-                    project_id, mr_iid, file_path, decision["new_line"],
+            _warn_block = ""
+            if _applicability != REPLACE:
+                # text_only / delete: 没有可 Apply 的改进代码.
+                #   - 不做 apply 风险检测 (text_only 的 improved_code 可能只是
+                #     「占位锚点」, 分析它只会产出误导性的警告);
+                #   - text_only 不落 improved_code, 避免后续 auto_detect 把它
+                #     当成可 Apply 的目标代码.
+                if _applicability == TEXT_ONLY:
+                    nc = ""
+                    n_lines = 0
+            else:
+                # === apply 风险检测: 引用了 missing 符号时, 在 review 中加 ⚠️ 提示
+                # 永远走 post 路径 (保留 Apply 按钮), reviewer 自己决定怎么处理
+                _risk_level, _risk_msgs = callbacks.detect_apply_risk(
+                    file_path=file_path,
+                    improved_code=decision.get("normalised_code") or normalised["improved_code"],
+                    file_sources=file_sources,
+                    suggestion_text=(
+                        f"{normalised.get('rationale') or ''}\n"
+                        f"{normalised.get('header') or ''}"
+                    ),
                 )
-                sev = normalised.get("severity", "medium").upper()
-                # suggestion:-0+N: +N = N lines AFTER comment line
-                # 替换 N+1 行 (注释行 + N 行后续行)
-                # 要替换 len(existing_lines) 行 → N = len - 1
-                existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
-                existing_lines = existing.split("\n") if existing else []
-                n_replace = max(0, len(existing_lines) - 1)
-                body_to_post = (
-                    f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
-                    f"{normalised['rationale']}\n\n"
-                    f"{_warn_block}"
-                    f"```suggestion:-0+{n_replace}\n{nc}\n```"
-                    + callbacks.help_footer
-                )
-                _warn_block = ""  # 已结构化注入, 避免下面重复
+                if _risk_level == "warn" and _risk_msgs:
+                    _warn_block = (
+                        "> ⚠️ **apply 前请确认** — 建议引入了目标文件中尚未存在的符号；\n"
+                        + "\n".join(f"> • {m}" for m in _risk_msgs) + "\n"
+                        + "> 💡 apply 后请补全缺失的 import / 常量 / 方法, 否则会 NameError 或 ImportError.\n\n"
+                    )
+                    logger.info(
+                        "improve.apply_risk_warn project={} mr={} file={} line={} missing={}",
+                        project_id, mr_iid, file_path, decision["new_line"],
+                        _risk_msgs,
+                    )
+                # fix_indent 重建正文 —— 只对 replace 语义成立:
+                #   - text_only: 正文绝不能出现 suggestion 块 (否则又冒出 Apply 按钮);
+                #   - delete   : 重建会把「删除警告」丢掉, 且 improved 为空无需缩进修正.
+                if nc != normalised["improved_code"]:
+                    logger.info(
+                        "improve.fix_indent project={} mr={} file={} line={}",
+                        project_id, mr_iid, file_path, decision["new_line"],
+                    )
+                    sev = normalised.get("severity", "medium").upper()
+                    # suggestion:-0+N: +N = N lines AFTER comment line
+                    # 替换 N+1 行 (注释行 + N 行后续行)
+                    # 要替换 len(existing_lines) 行 → N = len - 1
+                    existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
+                    existing_lines = existing.split("\n") if existing else []
+                    n_replace = max(0, len(existing_lines) - 1)
+                    body_to_post = (
+                        f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
+                        f"{normalised['rationale']}\n\n"
+                        f"{_warn_block}"
+                        f"```suggestion:-0+{n_replace}\n{nc}\n```"
+                        + callbacks.help_footer
+                    )
+                    _warn_block = ""  # 已结构化注入, 避免下面重复
 
             # === apply 风险: else 分支 (body_to_post 直接用 normalised["body"]) 也需注入 ===
             if _warn_block:
@@ -663,69 +769,23 @@ def publish(
                     )
                 # 记录 suggestion 到 telemetry (用于后续 /adopt 验证 + 跨次去重)
                 try:
-                    from reviewagent.telemetry.store import get_store
-                    head_sha = _publish_head_sha  # Fix A: 用循环前缓存值, race window 几乎归零
-                    existing = (raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else ""
-                    # === 跨次去重: file+line+existing_code 的指纹 ===
-                    import hashlib as _hl
-                    # LLM 不输出 rule_keys 字段 → 从 rationale 文本里抽 R-XXX / R-OTHER / *-RULE-* 前缀;
-                    # 显式给出时保留旧优先级, 只追加 promotion 派生键 (见 record_rule_keys).
-                    rule_keys = record_rule_keys(raw, normalised, rule_set=rule_set)
-                    # 与 dedup_check 同一 helper — 保证两边 fp 一致.
-                    fingerprint = _suggestion_fingerprint(
-                        file_path, decision["new_line"], normalised.get("header")
-                    )
-                    content_fingerprint = _suggestion_content_fingerprint(existing)
-                    # cohort_key 用 file + header (不用 rule_keys / line):
-                    # rule_keys LLM 可能不输出 (→ 空 → key 不稳定);
-                    # line 在 apply 后会漂移. header 同文件同类问题稳定.
-                    _cohort_hdr = re.sub(r"\s+", " ", (normalised.get("header") or "").strip().lower())
-                    cohort_key = _hl.sha256(
-                        f"{file_path}:{_cohort_hdr}".encode()
-                    ).hexdigest()[:24]
-                    get_store().record_suggestion(
+                    _record_published_suggestion(
                         project_id=project_id,
                         mr_iid=mr_iid,
                         note_id=note_id,
                         file_path=file_path,
-                        target_line=decision["new_line"],
-                        target_line_end=(decision["new_line"] + n_lines - 1) if n_lines > 1 else decision["new_line"],
-                        existing_code=existing,
-                        improved_code=nc,
-                        header=normalised.get("header"),
-                        severity=normalised.get("severity"),
-                        head_sha=head_sha,
-                        label=normalised.get("label"),
-                        rule_keys=rule_keys,
-                        one_sentence_summary=(raw.get("one_sentence_summary") or normalised.get("rationale")) if isinstance(raw, dict) else None,
-                        importance=raw.get("importance") if isinstance(raw, dict) else None,
-                        fingerprint=fingerprint,
-                        content_fingerprint=content_fingerprint,
-                        cohort_key=cohort_key,
-                        severity_source="rule" if rule_keys else "llm",
+                        new_line=decision["new_line"],
+                        n_lines=n_lines,
+                        existing=(raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else "",
+                        improved=nc,
+                        normalised=normalised,
+                        raw=raw,
+                        rule_set=rule_set,
+                        head_sha=_publish_head_sha,
                         score=callbacks.score(normalised),
+                        applicability=_applicability,
+                        gitlab=gitlab,
                     )
-                    # Batch3: 同 cohort 上一代是 applied/dismissed 且当前问题
-                    # 仍然存在 → supersede 旧记录, 把新一条标 generation+1.
-                    try:
-                        _handle_cohort_reoccurrence(
-                            store=get_store(),
-                            project_id=project_id, mr_iid=mr_iid,
-                            cohort_key=cohort_key,
-                            new_note_id=note_id,
-                            file_path=file_path,
-                            target_line=decision["new_line"],
-                            target_line_end=(
-                                decision["new_line"] + n_lines - 1
-                            ) if n_lines > 1 else decision["new_line"],
-                            existing=existing,
-                            head_sha=head_sha,
-                            gitlab=gitlab,
-                        )
-                    except Exception as _e:  # noqa: BLE001
-                        logger.warning(
-                            "improve.cohort_reoccurrence failed (non-fatal): {}", _e,
-                        )
                 except Exception as e:
                     logger.warning("improve.record_suggestion failed: {}", e)
             else:
@@ -733,11 +793,14 @@ def publish(
         elif decision["action"] == "general":
             # 收缩建议: 发普通评论（无 Apply 按钮），让用户看到建议但不能一键删除代码
             sev = normalised.get("severity", "medium").upper()
+            # D16: 页脚必须用「无 Apply 引导」版 —— 本分支没有 suggestion 块,
+            #   沿用普通页脚会让 reviewer 去找一个不存在的「应用建议」按钮.
+            _footer = callbacks.help_footer_text_only or callbacks.help_footer
             general_body = (
                 f"**[{sev}]** **{normalised['header']}** — {normalised['label']}\n\n"
                 f"{normalised['rationale']}\n\n"
                 f"> ⚠️ 该建议涉及代码收缩（删除行），请人工评估后手动修改"
-                + callbacks.help_footer
+                + _footer
             )
             note_id = gitlab.post_mr_discussion(
                 project_id,
@@ -758,6 +821,31 @@ def publish(
                     project_id, mr_iid, file_path, decision["new_line"],
                     decision["reason"],
                 )
+                # general 建议同样要落 telemetry —— 否则 reviewer 在 diff 里看得见
+                # 这条发现, 顶部「检视汇总」表却不计数, 也无法 /adopt //dismiss.
+                try:
+                    _record_published_suggestion(
+                        project_id=project_id,
+                        mr_iid=mr_iid,
+                        note_id=note_id,
+                        file_path=file_path,
+                        new_line=decision["new_line"],
+                        n_lines=len((normalised.get("improved_code") or "").split("\n")),
+                        existing=(raw.get("existing_code") or "").strip("\n") if isinstance(raw, dict) else "",
+                        improved="",
+                        normalised=normalised,
+                        raw=raw,
+                        rule_set=rule_set,
+                        head_sha=_publish_head_sha,
+                        score=callbacks.score(normalised),
+                        # D16: general 分支没有 suggestion 块 → 形态上等同 text_only,
+                        #   落库必须记 text_only (记 replace 会与正文形态矛盾:
+                        #   replace 的契约是「有可直接 Apply 的 suggestion 块」).
+                        applicability=TEXT_ONLY,
+                        gitlab=gitlab,
+                    )
+                except Exception as e:
+                    logger.warning("improve.record_suggestion (general) failed: {}", e)
                 try:
                     callbacks.publish_overview(
                         project_id=project_id, mr_iid=mr_iid,

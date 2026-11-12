@@ -191,7 +191,11 @@ class BaseCommand:
         prompt_tokens = 0
         completion_tokens = 0
         cost_credits = 0.0
-        model_used = self.model
+        # E8: model 一列只能记「实际生效模型」(provider 回报).
+        # 请求时用的配置模型 id 是**另一个语义**, 走 model_configured 单独记.
+        # skipped run 根本没调 LLM → model 保持 None, 不拿配置 id 冒充.
+        model_used: str | None = None
+        model_configured = self.model
         _run_finished = False  # finally 安全网: 确保 run 状态一定被标记
 
         def _mark_finished(_run_id, **kw):
@@ -230,7 +234,8 @@ class BaseCommand:
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 _mark_finished(
-                    run_id, status="skipped", model=model_used,
+                    run_id, status="skipped",
+                    model_configured=model_configured,
                     prompt_tokens=0, completion_tokens=0,
                     llm_provider=provider_name,
                     duration_ms=duration_ms,
@@ -247,7 +252,8 @@ class BaseCommand:
                 )
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 _mark_finished(
-                    run_id, status="skipped", model=model_used,
+                    run_id, status="skipped",
+                    model_configured=model_configured,
                     prompt_tokens=0, completion_tokens=0,
                     llm_provider=provider_name,
                     duration_ms=duration_ms,
@@ -299,7 +305,9 @@ class BaseCommand:
             prompt_tokens = self._last_oc_result.prompt_tokens if self._last_oc_result else 0
             completion_tokens = self._last_oc_result.completion_tokens if self._last_oc_result else 0
             cost_credits = self._last_oc_result.cost_credits if self._last_oc_result else 0.0
-            model_used = (self._last_oc_result.model if self._last_oc_result else "") or self.model
+            # E8: 只记 provider 实际生效/回报的模型; 拿不到就留空,
+            # 请求时用的配置 id 由 model_configured 单独承载 (不再两义).
+            model_used = (self._last_oc_result.model if self._last_oc_result else "") or None
 
             if isinstance(agent_result, dict):
                 _preview = str(agent_result)
@@ -330,6 +338,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
                 run_id, status="success", model=model_used,
+                model_configured=model_configured,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
                 llm_provider=provider_name,
@@ -354,6 +363,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
                 run_id, status="failed", error=f"{provider_name}: {e}",
+                model=model_used, model_configured=model_configured,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
                 llm_provider=provider_name,
@@ -364,6 +374,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
                 run_id, status="failed", error=f"infra: {e}",
+                model=model_used, model_configured=model_configured,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
                 llm_provider=provider_name,
@@ -374,6 +385,7 @@ class BaseCommand:
             duration_ms = int((time.monotonic() - t0) * 1000)
             _mark_finished(
                 run_id, status="failed", error=f"unexpected: {e}",
+                model=model_used, model_configured=model_configured,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_credits=cost_credits,
                 llm_provider=provider_name,
@@ -389,6 +401,8 @@ class BaseCommand:
                     events.emit_run_finished(
                         run_id, status="failed",
                         error="process terminated unexpectedly",
+                        model=model_used,
+                        model_configured=model_configured,
                         duration_ms=duration_ms,
                         llm_provider=provider_name,
                     )
@@ -530,7 +544,7 @@ def build_overview_body(
     lines.append("> 🔒 **已关闭（未分类）**：用户在 GitLab 中直接解决了主题，但系统无法确认该建议是采纳还是忽略。")
     lines.append("")
     if superseded_n:
-        lines.append(f"> ♻️ 同问题被多轮重复发布，{superseded_n} 条已被合并到最新版本。")
+        lines.append(f"> ♻️ 同问题被重复检出，{superseded_n} 条旧记录已被合并到最新版本。")
         lines.append("")
     lines.append(f"🆕 **最后新增 {inline_posted_count} 条**{meta_suffix}")
     lines.append("")

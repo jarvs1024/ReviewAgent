@@ -12,6 +12,8 @@ from reviewagent.scenario.profile import Profile, active_or_load
 
 # 占位符两侧允许空白：`{{name}}` / `{{ name }}` 均可。
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+# 模板分节标记：`<!-- @section:name -->` 必须独占一行。
+_SECTION = re.compile(r"^<!--\s*@section:([A-Za-z0-9_.-]+)\s*-->[ \t]*$", re.MULTILINE)
 
 
 def _profile(profile: Profile | None) -> Profile:
@@ -102,6 +104,47 @@ def load_template(
         raise ValueError(f"template escapes profile root: {rel_path}")
     text = path.read_text(encoding="utf-8")
     return text.rstrip("\n") if trim_trailing_newline else text
+
+
+def split_sections(text: str) -> dict[str, str]:
+    """按 ``<!-- @section:<name> -->`` 标记切分模板正文.
+
+    段正文原样保留：从标记行换行后开始，到下一个标记行行首（或 EOF）结束。
+    因此段间空行属于上一段，迁移旧单文件时可逐字节对齐。
+    """
+    matches = list(_SECTION.finditer(text))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        name = match.group(1)
+        if name in sections:
+            raise ValueError(f"duplicate template section: {name}")
+        start = match.end()
+        if text.startswith("\r\n", start):
+            start += 2
+        elif text.startswith("\n", start):
+            start += 1
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[name] = text[start:end]
+    return sections
+
+
+def load_section(
+    rel_path: str,
+    section: str,
+    profile: Profile | None = None,
+    *,
+    trim_trailing_newline: bool = False,
+) -> str:
+    """加载模板文件中的指定 section（换行语义与 `load_template` 一致）."""
+    text = load_template(rel_path, profile)
+    sections = split_sections(text)
+    if section not in sections:
+        raise ValueError(
+            f"template section not found: {rel_path}#{section} "
+            f"(available={sorted(sections)})"
+        )
+    body = sections[section]
+    return body.rstrip("\n") if trim_trailing_newline else body
 
 
 def render_template(

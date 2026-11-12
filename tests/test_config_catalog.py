@@ -46,6 +46,55 @@ def test_profile_sections_are_covered():
     assert sections == set(catalog.PROFILE_SECTIONS) | set(catalog.PROFILE_RESERVED)
 
 
+# ---------------------------------------------------------------------------
+# live 字段的绑定 / 记账护栏
+# ---------------------------------------------------------------------------
+
+
+def _live_fields() -> set[str]:
+    return {name for name, item in catalog.CATALOG.items() if item.kind == "live"}
+
+
+def test_live_fields_are_bound_or_accounted():
+    """每个 live 字段必须**要么**有专属断言，**要么**在缺口台账里显式记账.
+
+    Why: behavior 类有双向绑定，live 类原本**没有** —— 新增 live 字段后
+    全量档不写任何断言，目录仍然全绿，防漏测承诺在 live 类上是空的.
+    """
+    live = _live_fields()
+    bound = set(catalog.LIVE_CHECKS)
+    gaps = set(catalog.LIVE_GAPS)
+    unbound = live - bound - gaps
+    assert not unbound, f"以下 live 字段既无断言也未记账: {sorted(unbound)}"
+    # 台账里不能有已不存在的字段（否则缺口表会失真）
+    assert not (bound | gaps) - live, f"台账里有非 live 字段: {sorted((bound | gaps) - live)}"
+
+
+def test_live_gap_entries_have_a_reason():
+    for field, reason in catalog.LIVE_GAPS.items():
+        assert reason.strip(), f"{field}: 缺口必须写明原因"
+        assert len(reason) >= 10, f"{field}: 缺口原因太含糊"
+
+
+def test_live_check_names_resolve_to_real_assertions():
+    """LIVE_CHECKS 里的断言名必须是真实存在的 E2E 断言（防拼错/防改名失联）."""
+    from scripts.e2e import flows
+
+    known_plain = set(flows.FLOWS) | set(catalog.BEHAVIOR_CHECKS)
+    for field, names in catalog.LIVE_CHECKS.items():
+        assert names, f"{field}: 绑定了空的断言列表"
+        for name in names:
+            if name in known_plain:
+                continue
+            matched = False
+            for prefix, suffixes in catalog.E2E_ASSERTION_SUFFIXES.items():
+                if name.startswith(prefix):
+                    assert name[len(prefix):] in suffixes, f"{field}: 未知断言名 {name}"
+                    matched = True
+                    break
+            assert matched, f"{field}: 未知断言名 {name}"
+
+
 def _invalid_value(spec: FieldSpec) -> Any:
     """构造一个必然被 validate 拒绝的值."""
     t = spec.type

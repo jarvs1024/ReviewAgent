@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
+from fnmatch import fnmatch
 from typing import Any
 
+from reviewagent.review.applicability import DELETE, REPLACE, TEXT_ONLY, resolve_applicability
 from reviewagent.review.policy import score_by_table
 from reviewagent.review.types import FileContext, FileKind, RiskVerdict, Suggestion
 
@@ -35,6 +37,17 @@ PYTHON_KEYWORDS: frozenset[str] = frozenset(
 HELP_TEXT_FOOTER = (
     "\n\n✅ 接受建议\n"
     "   • 直接用：点上方「应用建议」按钮\n"
+    "   • 自己改：请先提交修改，再回复 `/adopt [理由]`\n"
+    "\n❌ 关闭建议\n"
+    "   • 回复 `/dismiss [理由]`\n"
+    "\n💡 为保证数据采集的正确性，请优先使用以上方式来处理MR建议; "
+    "非必要不要直接点「解决主题」或 ✓ 图标来关闭主题."
+)
+
+# 纯文字说明 (applicability=text_only) 用的 footer — 没有 Apply 按钮,
+# 不能再提示「点上方『应用建议』按钮」, 否则 reviewer 会去找一个不存在的按钮.
+HELP_TEXT_FOOTER_TEXT_ONLY = (
+    "\n\n✅ 接受建议\n"
     "   • 自己改：请先提交修改，再回复 `/adopt [理由]`\n"
     "\n❌ 关闭建议\n"
     "   • 回复 `/dismiss [理由]`\n"
@@ -176,7 +189,8 @@ def find_line_by_existing_code(
     """
     if not file_lines or not existing_code.strip():
         return None
-    target_lines = existing_code.strip("\n").split("\n")
+    original_lines = existing_code.strip("\n").split("\n")
+    target_lines = list(original_lines)
     # 裁掉 leading trivial 行，避免定位到非代码行
     # 策略：只裁掉明确的非代码行，保留注释/关键字/运算符行
     while target_lines:
@@ -192,10 +206,12 @@ def find_line_by_existing_code(
         # 保留注释行
         if first.startswith('#'):
             break
-        # 保留关键字开头的行
+        # 保留关键字开头的行（assert 必须在内：pytest 用例里常见的
+        # `assert status is not None` 不含运算符/点号，否则会被误判成 docstring 裁掉）
         if first.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'return ',
                               'import ', 'from ', 'try', 'except', 'with ', 'yield ',
-                              'else', 'elif ', 'case ', 'raise ', 'pass', 'break', 'continue')):
+                              'else', 'elif ', 'case ', 'raise ', 'pass', 'break', 'continue',
+                              'assert ', 'del ', 'global ', 'nonlocal ', 'async ', 'await ')):
             break
         # 保留包含运算符/括号的行
         if any(c in first for c in '()[]{}=+-*/<>!&|'):
@@ -208,6 +224,10 @@ def find_line_by_existing_code(
             break
         # 纯文本行（docstring 内容）→ 裁掉
         target_lines.pop(0)
+    if not target_lines:
+        # 整段都被判成 prose（典型: 单行 docstring 就是锚点）→ 回退原文，
+        # 否则这条 suggestion 永远定位不到、被当作 agent 输出不一致丢弃.
+        target_lines = original_lines
     target_first = target_lines[0].strip() if target_lines else ""
     if not target_first:
         return None
@@ -275,7 +295,14 @@ def fix_indent(target_line: str, improved_code: str) -> str:
 
 
 def normalise_suggestion(s: dict[str, Any]) -> dict[str, Any]:
-    """校验 + 构造 GitLab "Apply suggestion" inline comment body."""
+    """校验 + 构造 GitLab "Apply suggestion" inline comment body.
+
+    正文形态由 `applicability` 决定 (见 `review/applicability.py`):
+      * `replace`   — 有可直接 Apply 的改进代码 → 带 ```suggestion``` 块 (Apply 按钮);
+      * `delete`    — 建议删除现有代码 → 带 ```suggestion``` 块 (Apply 会删行) + 显式警告;
+      * `text_only` — 给不出可 Apply 的代码 → **不带** suggestion 块 (无 Apply 按钮),
+        避免 reviewer 误点 Apply 把有效代码删掉.
+    """
     if not isinstance(s, dict):
         raise ValueError(f"suggestion must be dict, got {type(s).__name__}")
     file_path = s.get("file")
@@ -286,11 +313,6 @@ def normalise_suggestion(s: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("missing 'start_line' (int > 0)")
     existing = (s.get("existing_code") or "").strip("\n")
     improved = (s.get("improved_code") or "").strip("\n")
-    # 空 improved_code 表示删除整段 existing (GitLab suggestion:-0+(N-1) + 空 body)
-    # 典型场景: duplicated_definition / dead_code, agent 不知怎么 "删除 N 行"
-    # 要求: existing 必须非空, 否则 raise 防止误删
-    if not improved and not existing:
-        raise ValueError("missing 'improved_code' (non-empty) and empty 'existing_code'")
 
     header = (s.get("header") or "建议改进").strip()
     rationale = (s.get("rationale") or "").strip()
@@ -308,12 +330,42 @@ def normalise_suggestion(s: dict[str, Any]) -> dict[str, Any]:
     existing_lines = existing.split("\n") if existing else []
     n_replace = max(0, len(existing_lines) - 1)
 
-    body = (
-        f"**[{severity.upper()}]** **{header}** — {label}\n\n"
-        f"{rationale}\n\n"
-        f"```suggestion:-0+{n_replace}\n{improved}\n```"
-        + HELP_TEXT_FOOTER
+    head_line = f"**[{severity.upper()}]** **{header}** — {label}\n\n"
+    applicability = resolve_applicability(
+        s,
+        improved=improved,
+        existing=existing,
+        header=header,
+        rationale=rationale,
     )
+
+    if applicability == REPLACE:
+        body = (
+            f"{head_line}"
+            f"{rationale}\n\n"
+            f"```suggestion:-0+{n_replace}\n{improved}\n```"
+            + HELP_TEXT_FOOTER
+        )
+    elif applicability == DELETE:
+        # 删除本身就是这条建议的内容 → 保留 Apply 按钮, 但必须写清 Apply 会删掉代码.
+        n_del = len(existing_lines)
+        body = (
+            f"{head_line}"
+            f"{rationale}\n\n"
+            f"> ⚠ **本条建议为「删除」** — 点击「应用建议」(Apply suggestion) "
+            f"会删除锚点处的 {n_del} 行代码；删除后请确认没有残留引用。\n\n"
+            f"```suggestion:-0+{n_replace}\n\n```"
+            + HELP_TEXT_FOOTER
+        )
+    else:
+        # 纯文字说明 → 绝不能出现 suggestion 块 (GitLab 会渲染成 Apply 按钮).
+        body = (
+            f"{head_line}"
+            f"{rationale}\n\n"
+            "> ℹ **本条为文字说明** — 无法给出可直接 Apply 的代码，"
+            "请人工按上述说明修改后回复 `/adopt [理由]`。"
+            + HELP_TEXT_FOOTER_TEXT_ONLY
+        )
     return {
         "file": file_path,
         "new_line": start_line,
@@ -322,6 +374,7 @@ def normalise_suggestion(s: dict[str, Any]) -> dict[str, Any]:
         "rationale": rationale,
         "label": label,
         "severity": severity,
+        "applicability": applicability,
         "body": body,
     }
 
@@ -801,11 +854,33 @@ class PythonPolicy:
         self._cfg = cfg
         self._read_lines = read_lines
 
+    def _test_paths(self) -> tuple[str, ...]:
+        """profile.test_paths 是测试文件分类的唯一来源（与 GenericPolicy 同语义）."""
+        explicit = getattr(self._profile, "test_paths", None)
+        if explicit:
+            return tuple(str(p) for p in explicit)
+        scoring = getattr(self._profile, "scoring", None)
+        if isinstance(scoring, dict):
+            return tuple(str(p) for p in (scoring.get("test_paths") or ()))
+        return ()
+
     def classify_file(self, path: str) -> FileKind:
-        lowered = path.replace("\\", "/")
-        if lowered.endswith("conftest.py") or "fixture" in lowered:
+        normalized = (path or "").replace("\\", "/")
+        if not normalized:
+            return FileKind.OTHER
+        base = normalized.rsplit("/", 1)[-1]
+        if base == "conftest.py" or "fixture" in normalized:
             return FileKind.FIXTURE
-        if any(part in lowered for part in ("/tests/", "tests/")) or lowered.rsplit("/", 1)[-1].startswith("test_"):
+        for pattern in self._test_paths():
+            if pattern.endswith("/"):
+                if pattern.rstrip("/") in normalized.split("/")[:-1]:
+                    return FileKind.TEST
+            elif fnmatch(normalized, pattern) or fnmatch(base, pattern):
+                return FileKind.TEST
+        # profile 未配置 test_paths 时保留 Python 惯例兜底（tests/ 目录 + test_ 前缀）。
+        if "/tests/" in normalized or normalized.startswith("tests/"):
+            return FileKind.TEST
+        if base.startswith("test_"):
             return FileKind.TEST
         return FileKind.SOURCE
 

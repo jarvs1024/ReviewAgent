@@ -7,7 +7,7 @@ params（全部可选；缺省值为语言中立的保守默认，语言相关�
 `rg_file_type` / `excludes` 必须由场景 profile 的 dynamic_rules 提供）：
 
 * `rg_file_type` — rg `-t` 参数；空 / None / 缺失时不传 `-t`；
-* `excludes` — rg `-g` 排除项；缺失时不传任何排除（由 profile 负责）；
+* `excludes` — rg `-g` 排除项，相对被检仓库 worktree 匹配；缺失时不传任何排除（由 profile 负责）；
 * `max_symbols_per_file` — 每个 diff 文件最多参与 rg 的标识符数（legacy 15）；
 * `max_refs_per_file` — 每个文件最多保留的 caller 引用数（legacy 6）；
 * `hits_per_symbol` — 每个标识符最多命中数（legacy 2）；
@@ -34,8 +34,8 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "timeout_seconds": 35,
 }
 
-# 默认不排除任何路径：语言/项目相关的排除项由 profile 的 dynamic_rules 提供
-# （`profiles/ssd-python-autotest/dynamic_rules.yaml` 里有 legacy 的那 5 条）。
+# 默认不排除任何路径：排除项由 profile 的 dynamic_rules 按被检仓库声明
+# （见 `profiles/ssd-python-autotest/rules/dynamic_rules.yaml`）。
 DEFAULT_EXCLUDES: tuple[str, ...] = ()
 
 _STOP_IDENTS = {"self", "cls", "None", "True", "False", "args", "kwargs"}

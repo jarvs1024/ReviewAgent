@@ -179,6 +179,22 @@ def test_facade_safe_parse_defs_delegates():
     assert defs == {"json", "C"}
 
 
+def test_find_line_matches_bare_assert_line():
+    """`assert x is not None` 不含运算符/点号，不能被当成 docstring 裁掉."""
+    lines = ["def test_x():", "    status = q()", "    assert status is not None"]
+    assert find_line_by_existing_code(
+        lines, "    assert status is not None", hint_line=3,
+    ) == 3
+
+
+def test_find_line_matches_single_line_docstring_anchor():
+    """整段 existing_code 就是单行 docstring 时，裁到底要回退原文而不是返回 None."""
+    lines = ['def test_x():', '    """查询 GC 状态并校验返回值。"""', "    q()"]
+    assert find_line_by_existing_code(
+        lines, '    """查询 GC 状态并校验返回值。"""', hint_line=2,
+    ) == 2
+
+
 def test_facade_find_line_fix_indent_normalise_delegate():
     lines = ["def f():", "    x = 1", "    return x"]
     assert ImproveCommand._find_line_by_existing_code(
@@ -197,6 +213,7 @@ def test_facade_find_line_fix_indent_normalise_delegate():
         "rationale": "",
         "label": "enhancement",
         "severity": "medium",
+        "applicability": "replace",
         "body": (
             "**[MEDIUM]** **建议改进** — enhancement\n\n\n\n"
             "```suggestion:-0+0\ny = 2\n```" + HELP_TEXT_FOOTER
@@ -258,7 +275,8 @@ def test_facade_test_feature_density_reads_keywords_at_call_time(tmp_path, monke
 # ---------------------------------------------------------------------------
 
 def test_generic_policy_hooks():
-    profile = _profile()  # scoring.test_paths = ["tests/", "test_*.py"]
+    # 显式构造 profile 数据，避免与具体场景包的 test_paths 耦合
+    profile = SimpleNamespace(test_paths=("tests/", "test_*.py"), scoring={})
     pol = GenericPolicy(profile=profile, cfg=current(), read_lines=lambda p: [])
     assert pol.classify_file("tests/foo.py") is FileKind.TEST
     assert pol.classify_file("pkg/test_unit.py") is FileKind.TEST

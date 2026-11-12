@@ -510,8 +510,14 @@ def test_normalise_suggestion_allows_empty_improved_with_existing():
     assert out["new_line"] == 10
 
 
-def test_normalise_suggestion_rejects_empty_both():
-    """improved 和 existing 都为空 → 仍然 raise (防止误删)"""
+def test_normalise_suggestion_empty_both_becomes_text_only():
+    """improved 和 existing 都为空 → 降级为纯文字说明, **不得**整条丢弃.
+
+    契约 (profiles/ssd-python-autotest/prompts/improve.md:180-183, 192-199) 要求:
+    「目标行不在 VALID NEW LINES 内」时 improved_code 必须为空, 只在 rationale 里文字
+    描述, "让 Python 端降级为普通评论".
+    旧实现直接 raise ValueError → 该发现被静默吞掉, reviewer 在 MR 上完全看不到.
+    """
     from reviewagent.commands.improve import ImproveCommand
     cmd = ImproveCommand.__new__(ImproveCommand)
     s = {
@@ -524,8 +530,12 @@ def test_normalise_suggestion_rejects_empty_both():
         "label": "l",
         "severity": "high",
     }
-    with pytest.raises(ValueError, match="missing 'improved_code'"):
-        cmd._normalise_suggestion(s)
+    out = cmd._normalise_suggestion(s)
+    # 正文保留结论, 但绝不能出现 suggestion 块 (GitLab 会渲染成 Apply 按钮)
+    assert "```suggestion" not in out["body"], out["body"]
+    assert out["applicability"] == "text_only"
+    assert out["file"] == "x.py"
+    assert out["new_line"] == 10
 
 
 def test_validate_suggestion_empty_improved_passes_through_shrink_check():

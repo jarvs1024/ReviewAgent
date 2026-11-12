@@ -56,10 +56,13 @@ def suggestion_content_fingerprint(existing_code: str) -> str:
     与 suggestion_fingerprint 互补:
       - suggestion_fingerprint: 同 file:line 同类问题 (行号敏感)
       - suggestion_content_fingerprint: 同 existing_code 内容 (行号不敏感)
+
+    实现在 `telemetry.cohort` — 与 cohort_key 共用同一 normalize 口径,
+    否则写入端与统计端的指纹会出现两套语义.
     """
-    import re as _cf_re
-    code_norm = _cf_re.sub(r"\s+", " ", (existing_code or "").strip())
-    return hashlib.sha256(code_norm.encode()).hexdigest()[:16]
+    from reviewagent.telemetry.cohort import content_fingerprint
+
+    return content_fingerprint(existing_code)
 
 
 def validate_suggestion(
@@ -470,7 +473,7 @@ def merge_chunks(
         kept_list.extend(suggs)
     if per_file_truncated > 0:
         logger.info(
-            "improve.per_file_limit max_per_file={} min={} truncated={} (降为总览文字)",
+            "improve.per_file_limit max_per_file={} min={} truncated={} (仅保留计数，不再展开)",
             max_per_file, min_per_file, per_file_truncated,
         )
     merged_suggestions = kept_list
@@ -537,7 +540,10 @@ def merge_chunks(
         if truncated_count > 0:
             merged_summary += f"\n\n> ℹ️ 另有 {truncated_count} 条低优先级建议未展示（上限 {max_suggestions} 条）"
         if per_file_truncated > 0:
-            merged_summary += f"\n\n> ℹ️ 另有 {per_file_truncated} 条建议因单文件上限（{max_per_file} 条/文件）降为总览文字"
+            merged_summary += (
+                f"\n\n> ℹ️ 另有 {per_file_truncated} 条建议因单文件上限"
+                f"（{max_per_file} 条/文件）未展示"
+            )
         if skipped_files:
             # V6: skipped_files 现在仅含测试/配置文件 (IMPROVE_FULL_FILES 软阈值化后不再丢文件)
             display = skipped_files[:10]

@@ -26,6 +26,7 @@ from reviewagent.config import current
 from reviewagent.review.manifest import build_manifest, verify_job
 from reviewagent.scenario.dynamic import load_dynamic_rules
 from reviewagent.scenario.profile import load_profile
+from reviewagent.scenario.prompts import split_sections
 from reviewagent.scenario.rules.resolver import assemble_base
 from reviewagent.settings.binder import fingerprint as binder_fingerprint
 from reviewagent.settings.schema import SCHEMA
@@ -375,7 +376,7 @@ def test_startup_exposes_dynamic_rules_and_fingerprint(isolated_profiles):
 
 
 def test_startup_fails_on_unknown_dynamic_provider(isolated_profiles):
-    dyn_path = isolated_profiles / "ssd-python-autotest" / "dynamic_rules.yaml"
+    dyn_path = isolated_profiles / "ssd-python-autotest" / "rules" / "dynamic_rules.yaml"
     data = yaml.safe_load(dyn_path.read_text(encoding="utf-8"))
     data["rules"][0]["provider"] = "not_registered"
     dyn_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
@@ -386,7 +387,7 @@ def test_startup_fails_on_unknown_dynamic_provider(isolated_profiles):
 
 
 def test_startup_rejects_unknown_provider_even_when_disabled(isolated_profiles):
-    dyn_path = isolated_profiles / "ssd-python-autotest" / "dynamic_rules.yaml"
+    dyn_path = isolated_profiles / "ssd-python-autotest" / "rules" / "dynamic_rules.yaml"
     data = yaml.safe_load(dyn_path.read_text(encoding="utf-8"))
     data["rules"][0]["provider"] = "not_registered"
     data["rules"][0]["enabled"] = False
@@ -397,12 +398,16 @@ def test_startup_rejects_unknown_provider_even_when_disabled(isolated_profiles):
 
 
 def test_default_profile_dynamic_rules_load_with_templates(tmp_path):
-    """R5: 模板 fail-fast 后默认 profile 仍可加载（两个模板文件都存在）."""
+    """R5: 模板 fail-fast 后默认 profile 仍可加载（两个模板文件 / section 都存在）."""
     profile = load_profile(None)
     ruleset = load_dynamic_rules(profile)
     rule = ruleset.rules[0]
     root = Path(profile.root)
     for rel in (rule.empty_template, rule.items_template):
-        assert rel and (root / rel).is_file()
-    raw = (root / "dynamic_rules.yaml").read_bytes()
+        path_part, _, section = rel.partition("#")
+        path = root / path_part
+        assert path.is_file()
+        if section:
+            assert section in split_sections(path.read_text(encoding="utf-8"))
+    raw = (root / str(profile.dynamic_rules)).read_bytes()
     assert ruleset.fingerprint == hashlib.sha256(raw).hexdigest()[:12]

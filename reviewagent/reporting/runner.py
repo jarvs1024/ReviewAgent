@@ -104,6 +104,24 @@ def _build_notifier(cfg: WeeklyReportConfig, *, dry_run: bool | None = None) -> 
     raise RuntimeError(f"unsupported notifier: {cfg.notifier!r}")
 
 
+def _should_send_notice(*, push: bool, cfg: Any) -> bool:
+    """周报是否**真发**(外发到钉钉群)。
+
+    真发条件 = 显式 ``--push``(定时任务 launchd 通过 ``WEEKLY_PUSH=true`` 透传)
+    **且** 环境未开启 ``weekly_dingtalk_dry_run``(环境级总开关)。
+
+    Why 不再用 ``push or not cfg.dingtalk_dry_run``:
+        生产配置里 ``weekly_dingtalk_dry_run`` 默认 false, 那个条件意味着
+        **任何一次手动本地执行**(验证 / 调试 / 补跑) 都会把内部周报真实推到
+        团队群, 与调用方是否显式要求外发无关 —— 2026-11-11 真实业务验证时
+        手动跑一次 ``scripts/weekly_report.py`` 就误发了一次。
+
+    手动本地跑(无 ``--push``)仍会走一次 dry-run 的 ``notifier.send``,
+    产出 artifact + markdown, 只是不外发, 并让日志能看到分片情况。
+    """
+    return bool(push) and not bool(cfg.dingtalk_dry_run)
+
+
 def run_weekly_job(
     cfg: WeeklyReportConfig | None = None,
     *,
@@ -232,8 +250,8 @@ def run_weekly_job(
 
     # 4. notify
     delivery: dict[str, Any] = {"skipped": True}
-    if push or not cfg.dingtalk_dry_run:
-        # 显式关掉 dry_run: --push 时即使 env 配置了 DRY_RUN=true 也要真发
+    if _should_send_notice(push=push, cfg=cfg):
+        # 真发: 显式 --push 且环境未开 dry_run
         notifier = _build_notifier(cfg, dry_run=False)
         chunks = split_markdown(md_text, chunk_limit=cfg.markdown_chunk_limit)
         result = notifier.send(
@@ -249,7 +267,8 @@ def run_weekly_job(
             "meta": result.meta,
         }
     else:
-        # 总是走一次 notifier.send (dry_run), 让 log 看到分片
+        # 手动本地跑 (无 --push) 一律 dry_run: 产出 artifact/markdown 但不外发,
+        # 仍走一次 notifier.send 让 log 能看到分片.
         notifier = _build_notifier(cfg, dry_run=True)
         chunks = split_markdown(md_text, chunk_limit=cfg.markdown_chunk_limit)
         result = notifier.send(

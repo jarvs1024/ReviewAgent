@@ -71,8 +71,8 @@ def test_degraded_evidence_forces_empty_template(profile):
 def test_declared_templates_and_params_match_legacy_profile(profile):
     ruleset = load_dynamic_rules(profile)
     rule = ruleset.rules[0]
-    assert rule.empty_template == "prompts/dynamic/cross_file_refs_empty.md"
-    assert rule.items_template == "prompts/dynamic/cross_file_refs_refs.md"
+    assert rule.empty_template == "prompts/blocks/dynamic.md#cross_file_refs_empty"
+    assert rule.items_template == "prompts/blocks/dynamic.md#cross_file_refs_refs"
     assert rule.template is None
     assert rule.params == {
         "rg_file_type": "py",
@@ -81,11 +81,10 @@ def test_declared_templates_and_params_match_legacy_profile(profile):
         "hits_per_symbol": 2,
         "timeout_seconds": 35,
         "excludes": [
-            "!reviewagent/**",
             "!tests/**",
-            "!docs/**",
             "!tmp_scripts/**",
-            "!settings/**",
+            "!docs/**",
+            "!tools/**",
             "!.venv/**",
             "!**/__pycache__/**",
             "!.git/**",

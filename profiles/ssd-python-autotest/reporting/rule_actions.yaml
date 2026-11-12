@@ -1,9 +1,0 @@
-# 通用规则键 -> 改进行动建议（周报展示用）。
-# 仓库自定义规则键不在此登记：它们随被检仓库变化，由运行时发现的规则原文提供标题，
-# 周报里未登记的键会回退到规则名解析（reporting/rule_translate.py）。
-R-LOOP: "把『循环边界/无限循环』作为 review checklist 红线条款"
-R-RES: "扫一遍 `open/requests/socket` 调用, 强制 `with` + 超时"
-R-ERR: "把裸 `except:` 与静默 `pass` 列为硬错误, 加入 review 范本"
-R-SHELL: "对所有 shell 调用加超时 + 异常类型细化 + sandbox 跑"
-R-CI: "对并行用例加临时目录 PID 隔离 / 串行锁, 修 flaky"
-R-OTHER-IMPACT: "对跨文件函数签名变化在 MR 描述里点出 caller, 拉对应 owner review"

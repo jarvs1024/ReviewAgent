@@ -31,10 +31,35 @@ _REPO_KEY_RE = re.compile(r"^(?P<prefix>[A-Z][A-Z0-9]*)[-_]RULE[-_](?P<suffix>.+
 _GENERIC_MAP_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 
-def _load_generic_map() -> dict[str, str]:
-    """解析规则集 (R-*) 与 profile improve.md (R-OTHER-IMPACT:/R-OTHER:) 得到中文名映射.
+def _profile_texts(profile: Any) -> list[str]:
+    """profile 里所有可能定义 R-OTHER 键的文本（规则包 + prompt + blocks）.
 
-    缓存按 `RuleSet.fingerprint`（附带 profile 指纹，improve.md 变更同样失效）.
+    规则包是规则键的权威来源；prompt（尤其 improve.md / blocks/dynamic.md）
+    补充 `R-OTHER-IMPACT:<key>` 这类跨文件兜底键。全部按 profile 根目录解析，
+    不假设固定文件名或目录.
+    """
+    root = Path(getattr(profile, "root", Path(".")))
+    rels: list[str] = [str(rel) for rel in (getattr(profile, "rules", ()) or ())]
+    prompts = getattr(profile, "prompts", None) or {}
+    rels.extend(str(rel) for rel in prompts.values())
+    blocks = root / "prompts" / "blocks"
+    if blocks.is_dir():
+        rels.extend(path.relative_to(root).as_posix() for path in sorted(blocks.glob("*.md")))
+    texts: list[str] = []
+    for rel in rels:
+        path = root / rel
+        if path.is_file():
+            try:
+                texts.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+    return texts
+
+
+def _load_generic_map() -> dict[str, str]:
+    """解析规则集 (R-*) 与 profile 规则包/prompt (R-OTHER-IMPACT:/R-OTHER:) 得到中文名映射.
+
+    缓存按 `RuleSet.fingerprint`（附带 profile 指纹，规则包 / prompt 变更同样失效）.
     """
     from reviewagent.scenario.profile import active_or_load
     from reviewagent.scenario.rules.resolver import active_rule_set
@@ -52,19 +77,14 @@ def _load_generic_map() -> dict[str, str]:
         if key.startswith("R-"):
             m.setdefault(key, rule.title)
 
-    # 2) R-OTHER-IMPACT:xxx / R-OTHER:xxx: profile improve.md 列表
-    #    `R-OTHER-IMPACT:caller_param` — caller 没传新参数
-    rel = (profile.prompts or {}).get("improve")
-    if rel:
-        ipath = (Path(profile.root) / str(rel)).expanduser()
-        if ipath.is_file():
-            text = ipath.read_text(encoding="utf-8")
-            for pat in (
-                r"`(R-OTHER-IMPACT:[a-z_]+)`\s*[—\-]\s*([^\n,]+)",
-                r"`(R-OTHER:[a-z_]+)`\s*[—\-]\s*([^\n,]+)",
-            ):
-                for mm in re.finditer(pat, text):
-                    m.setdefault(mm.group(1), mm.group(2).strip())
+    # 2) R-OTHER-IMPACT:xxx / R-OTHER:xxx: 规则包与 prompt 里的定义列表
+    #    `R-OTHER:magic_number` — 硬编码魔法数（端口 / 超时 / 重试等）
+    pat = re.compile(r"`(R-OTHER(?:-IMPACT)?:[a-z0-9_]+)`\s*[—\-–]\s*([^\n（(]+)")
+    for text in _profile_texts(profile):
+        for mm in pat.finditer(text):
+            label = mm.group(2).strip().rstrip(".,;；。，")
+            if label:
+                m.setdefault(mm.group(1), label)
 
     # 3) 历史/幻觉规则兜底: LLM 偶尔会在 rule_keys 里塞不存在的键 (e.g.
     #    `R-XXX` 当占位符). 这种键如果不显式映射就会被 `_humanize` strip
@@ -228,6 +248,20 @@ def translate_rule_key(
 
 def _humanize(token: str) -> str:
     """把 MY_RULE_NAME 这类 token 尽力变成可读中文/英文混合标签."""
+    composite = {
+        "magic_number": "硬编码魔法数",
+        "dead_code": "死代码",
+        "naming_inconsistency": "命名不一致",
+        "duplicated_definition": "重复定义",
+        "stale_comment": "过期注释",
+        "unused_param": "未使用参数",
+        "caller_param": "调用方参数未同步",
+        "schema_drift": "结构漂移",
+        "import_path": "导入路径",
+        "fixture_break": "夹具失配",
+    }
+    if token in composite:
+        return composite[token]
     parts = re.split(r"[-_]", token)
     word_map = {
         "no": "缺少", "not": "未", "missing": "缺失", "required": "必填",
@@ -235,7 +269,7 @@ def _humanize(token: str) -> str:
         "exception": "异常", "res": "资源", "resource": "资源", "shell": "命令",
         "sql": "SQL", "inject": "注入", "injection": "注入", "loop": "循环",
         "err": "错误", "error": "错误", "type": "类型", "hint": "注解",
-        "doc": "文档", "docstring": "文档字符串", "import": "导入",
+        "typehints": "类型注解", "doc": "文档", "docstring": "文档字符串", "import": "导入",
         "wildcard": "通配符", "naming": "命名", "leak": "泄漏", "memory": "内存",
         "security": "安全", "unsafe": "不安全", "race": "竞态", "thread": "线程",
         "lock": "锁", "null": "空值", "none": "空值", "param": "参数",
@@ -243,10 +277,11 @@ def _humanize(token: str) -> str:
         "caller": "调用方", "auth": "鉴权", "timeout": "超时", "retry": "重试",
         "bare": "裸", "print": "打印", "comment": "注释", "const": "常量",
         "magic": "魔法数", "typo": "拼写", "dead": "死", "duplicate": "重复",
-        "stale": "过期", "unused": "未用", "state": "状态", "data": "数据",
-        "clean": "清理", "repro": "可复现", "skip": "跳过", "ci": "CI",
-        "dep": "依赖", "perf": "性能", "assert": "断言", "time": "时序",
-        "lock": "锁", "mem": "内存", "fix": "夹具",
+        "duplicated": "重复", "inconsistency": "不一致", "number": "数字",
+        "code": "代码", "stale": "过期", "unused": "未用", "state": "状态",
+        "data": "数据", "clean": "清理", "repro": "可复现", "skip": "跳过",
+        "ci": "CI", "dep": "依赖", "perf": "性能", "assert": "断言",
+        "time": "时序", "mem": "内存", "fix": "夹具",
     }
     out: list[str] = []
     for p in parts:

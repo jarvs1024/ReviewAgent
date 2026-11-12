@@ -252,7 +252,7 @@ def test_partial_separates_far_ranges(profile):
 
 def test_cross_file_section_empty(profile):
     out = context.render_cross_file_section([], profile=profile)
-    assert out.startswith("## 🟠 优先 1")
+    assert out.startswith("## 🔴 优先 1")
     assert "未发现 cross-file 关联" in out
     assert out.endswith("\n\n")
 

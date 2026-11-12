@@ -144,7 +144,7 @@ def test_template_render_smoke(golden_env):
     general = "### 通用规则\n\n- R-1"
     assert build_rules_block("", general, profile=golden_env) == general + "\n\n"
     repo_block = build_rules_block("## AGENTS.md", general, profile=golden_env)
-    assert repo_block.startswith("## 🔴 优先 2")
+    assert repo_block.startswith("## 🟠 优先 2")
     assert "## AGENTS.md" in repo_block
     assert repo_block.endswith(general + "\n\n")
 

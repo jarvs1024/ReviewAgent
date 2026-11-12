@@ -256,7 +256,7 @@ def test_sampling_disabled_when_max_zero():
 
 
 def test_priority_weights_and_order():
-    cfg = current()
+    cfg = dataclasses.replace(current(), improve_review_mode="test")
     files = ["services/api.py", "utils/big.py", "newmod/fresh.py", "pkg/dense.py"]
     sizes = {
         "services/api.py": 100, "utils/big.py": 4000,
@@ -313,6 +313,17 @@ def test_new_file_bonus_can_be_disabled():
 
 def test_test_feature_density_not_computed_when_weight_zero():
     cfg = dataclasses.replace(current(), improve_priority_weight_test_feature=0.0)
+    policy = FakePolicy(densities={"pkg/a.py": 1.0})
+    p = _plan(["pkg/a.py"], cfg=cfg, sizes={"pkg/a.py": 10}, line_counts={"pkg/a.py": 1}, policy=policy)
+    assert policy.density_calls == []
+    assert p.file_priorities["pkg/a.py"] == pytest.approx(
+        math.log1p(1) * cfg.improve_priority_weight_diff
+    )
+
+
+def test_test_feature_density_ignored_in_business_mode():
+    """business 模式即使配置了测试特征权重也不参与打分（review_mode 有真实行为）."""
+    cfg = dataclasses.replace(current(), improve_review_mode="business")
     policy = FakePolicy(densities={"pkg/a.py": 1.0})
     p = _plan(["pkg/a.py"], cfg=cfg, sizes={"pkg/a.py": 10}, line_counts={"pkg/a.py": 1}, policy=policy)
     assert policy.density_calls == []
@@ -747,7 +758,7 @@ def test_facade_sample_and_cap_delegate_to_planner():
 def test_facade_rule_block_text_checksum_unchanged():
     text = ImproveCommand._rule_block_text()
     assert hashlib.sha256(text.encode()).hexdigest() == (
-        "e3e87ab8d36a432ad0964581070e8f29886ebf2415bbd9db4c585967de40420b"
+        "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
     )
 
 

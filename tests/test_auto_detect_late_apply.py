@@ -216,9 +216,12 @@ def test_deletion_kind_region_changed_flips_to_applied(tmp_telemetry):
     from reviewagent.telemetry.store import get_store
 
     s = get_store()
-    head_sha = "8b7e58a3" + "0" * 32
+    # posted head (发布建议时的 head) ≠ current head (用户 push 后的 head):
+    # auto_detect 就是在 head 变化时才跑的, 两者相同 = 文件没变 = 无从判断.
+    posted_sha = "0a9043b0" * 4
+    head_sha = "8b7e58a3" * 4
     _seed_resolved_suggestion(
-        s, head_sha=head_sha,
+        s, head_sha=posted_sha,
         target_line=11, target_line_end=11,
         existing_code="from services.r10_order_v1 import parse_query_v2  # ImportError\n",
         improved_code="",  # 关键: 删除型落库为空
@@ -230,7 +233,7 @@ def test_deletion_kind_region_changed_flips_to_applied(tmp_telemetry):
     posted = "def parse_query(raw):\n    from services.r10_order_v1 import parse_query_v2\n    return parse_query_v2(raw)\n"
     current = "def parse_query(raw):\n    return parse_query_v2(raw)\n"
     gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
-        posted if sha.startswith("0a9043b0") else current
+        posted if sha == posted_sha else current
     )
     gl.is_discussion_resolved.return_value = True
 
@@ -281,9 +284,10 @@ def test_deletion_kind_records_two_actions(tmp_telemetry):
     from reviewagent.telemetry.store import get_store
 
     s = get_store()
-    head_sha = "8b7e58a3" + "0" * 32
+    posted_sha = "0a9043b0" * 4
+    head_sha = "8b7e58a3" * 4
     _seed_resolved_suggestion(
-        s, head_sha=head_sha,
+        s, head_sha=posted_sha,
         target_line=11, target_line_end=11,
         existing_code="from foo import bar  # broken\n",
         improved_code="",
@@ -293,7 +297,7 @@ def test_deletion_kind_records_two_actions(tmp_telemetry):
     posted = "def f():\n    from foo import bar  # broken\n    return bar(x)\n"
     current = "def f():\n    return bar(x)\n"
     gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
-        posted if sha.startswith("0a9043b0") else current
+        posted if sha == posted_sha else current
     )
     gl.is_discussion_resolved.return_value = True
 
@@ -583,11 +587,9 @@ def test_build_overview_body_dedup(tmp_telemetry):
     open_n, applied_n, dismissed_n, resolved_n, sum_n = map(int, m.groups())
     assert applied_n == 3, f"3 条 applied terminal 都应保留, got {applied_n}"
     assert sum_n == 3, f"3 条 cohort 成员都应参与, got {sum_n}"
-    # "已被合并" 标注对应 cohort 隐藏数 (row_number > 1): 3 条 cohort 留 3 条,
-    # 但 hidden by cohort 只算 row_number > 1 = 2. 这里验证 '已被合并' 行存在且数字对.
-    # 修复前 (Batch2 旧语义): 只留 1, hidden=2 标注有; 修复后: 留 3, hidden=2 (同样).
-    assert "已被合并" in body, f"应显示 cohort 隐藏数标注:\n{body}"
-    assert "2 条已被合并" in body, f"cohort c-doc 3 条, hidden by cohort 应为 2:\n{body}"
+    # 3 条 applied 全部被 list_latest_by_cohort 保留并计入表格 → 没有任何记录
+    # 被 cohort 归并隐藏, 因此不应出现「已被合并」提示 (否则与表格自相矛盾).
+    assert "已被合并" not in body, f"3 条 terminal 均已计入, 不该提示合并:\n{body}"
 
 
 # ---------- Batch3: occurrence/generation ----------
@@ -910,3 +912,39 @@ def test_handle_push_calls_auto_detect_even_under_cooldown():
     assert mock_mrs.called, (
         f"list_project_mrs 应被调用, got calls={mock_mrs.call_args_list}"
     )
+
+
+def test_deletion_kind_modified_in_place_does_not_flip(tmp_telemetry):
+    """D13 负例: 删除型建议的目标段被**改写**(不是被删) → 不算采纳, 保持 resolved.
+
+    Why: 旧判定用「existing_code 原文案不在 current 文件里」→
+         用户只是把那段改了, 原文案同样消失 → 假阳性翻 applied(采纳率虚高).
+         正确语义: 目标区段必须是被**删除**(行级 diff 的 delete 操作码).
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    s = get_store()
+    posted_sha = "0a9043b0" * 4
+    head_sha = "8b7e58a3" * 4
+    _seed_resolved_suggestion(
+        s, head_sha=posted_sha,
+        target_line=2, target_line_end=2,
+        existing_code="    from foo import bar  # broken\n",
+        improved_code="",
+    )
+
+    gl = MagicMock()
+    posted = "def f():\n    from foo import bar  # broken\n    return bar(x)\n"
+    current = "def f():\n    from foo import baz  # broken\n    return bar(x)\n"  # 改了, 没删
+    gl.get_file_at_sha.side_effect = lambda pid, path, sha: (
+        posted if sha == posted_sha else current
+    )
+    gl.is_discussion_resolved.return_value = True
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gl):
+        result = auto_detect_applied(project_id=34, mr_iid=247, head_sha=head_sha)
+
+    assert result["late_apply"] == 0, f"改写≠删除, 不应翻 applied, got {result}"
+    final = s.get_suggestion_by_note_id("resolved-note-1")
+    assert final["state"] == "resolved", f"应保持 resolved, got {final['state']}"

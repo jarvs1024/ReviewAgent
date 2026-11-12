@@ -70,8 +70,24 @@
 |---|---|
 | `emit_mr_activity(mr: MRRecord)` | 写入或更新 `mr_activity` 行 (保留已有 `author_sticky`) |
 | `emit_run_started(run: ReviewRun) -> int` | 插入 `review_runs` 行, 返回 `run_id` (失败返回 `-1`) |
-| `emit_run_finished(run_id, *, status, error=None, model=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0, llm_provider=None)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli / qoder-sdk 路径有值); `llm_provider` 透传给 store (记录当前 run 用的 opencode/qodercli/qoder-sdk) |
+| `emit_run_finished(run_id, *, status, error=None, model=None, model_configured=None, prompt_tokens=0, completion_tokens=0, cost_credits=0.0, duration_ms=0, llm_provider=None)` | 更新 `review_runs` 状态, 自动写入 `finished_at` 与 `total_tokens` (= prompt+completion); `cost_credits` 透传给 store (qodercli / qoder-sdk 路径有值); `llm_provider` 透传给 store (记录当前 run 用的 opencode/qodercli/qoder-sdk) |
 | `emit_description_generated(project_id, mr_iid)` | 标记 `description_generated=1` + 同步 touch `last_activity_at` |
+
+### `model` 与 `model_configured` 的语义（E8 起拆开）
+
+历史上一列 `model` 塞了**两种语义**：skipped 行走配置 id（如 `deepseek/deepseek-v4-flash`）、
+成功行走 provider 回报值（如 `DeepSeek-Flash`）—— 同列两义，聚合分析会分裂。现拆为两列：
+
+| 列 | 语义 | 取值 |
+|---|---|---|
+| `model` | **provider 实际回报**的模型 | provider 没回报时为 `NULL`（**不再拿配置 id 冒充**） |
+| `model_configured` | **请求时配置**的模型 id | 每次 run 都记（success / skipped / failed） |
+
+推论：`model` 为空 ⇒ 本轮**没调 LLM**（如 improve 全文件复用早退），此时 token 与 credits 都应为 0；
+`model` 非空 ⇒ 真的调了，此时**必须**有成本信号（`total_tokens > 0` 或 `cost_credits > 0`）。
+
+> E8 之前的历史行 `model_configured` 为 `NULL` —— E2E 遥测审计据此豁免历史行（`model` 两义无法判定）。
+> 若库中该列不存在（迁移未生效），审计会**报红**而不是静默豁免（宁可误报不可漏报）。
 
 调用点 (`reviewagent/commands/_common.py`):
 
@@ -132,7 +148,7 @@
 | `get_latest_in_cohort_excluding(*, project_id, mr_iid, cohort_key, exclude_note_id) -> dict \| None` | cohort 内排除某 note 后取最新一条（Batch3 improve 去重用，跳过 state='superseded'） |
 | `list_latest_by_cohort(*, project_id, mr_iid) -> list[dict]` | 每个 cohort_key (fallback 到 note_id) 取最新一条 + 任何 terminal state 全保留 (Batch6/MR263 + MR299 二次扩展)。排除 superseded。规则: `row_number=1` (最新一条) 永远保留;任何 terminal state (applied/dismissed/resolved) 全部保留——不论 row_number。MR299 修复 "terminal + open 共存" 场景: 用户对老版本做了 applied/resolved/dismissed, 新一轮又发了同位置 open suggestion 时, 老版本 terminal 与新 open 都参与统计 (旧版本用户动作不能被新一代 open 覆盖) |
 | `count_superseded_in_mr(*, project_id, mr_iid) -> int` | 显式 superseded 数（`supersede_suggestion` 触发） |
-| `count_hidden_by_cohort(*, project_id, mr_iid) -> int` | cohort 归并隐藏的旧记录数（list_latest_by_cohort 中 row_number > 1） |
+| `count_hidden_by_cohort(*, project_id, mr_iid) -> int` | cohort 归并隐藏的旧记录数（`list_latest_by_cohort` 中 `row_number > 1` 且非 terminal state；terminal 会被保留并计入表格，不算「已被合并」） |
 
 ### Action (`suggestion_actions`)
 
@@ -242,7 +258,7 @@
 | `severity_source` | text | `rule` (命中规则键) / `llm` (纯 LLM), improve 发布时写入 |
 | `fingerprint` | text | 单条 suggestion 指纹 (跨次去重主键) |
 | `content_fingerprint` | text | existing_code normalize 后 hash，行号变化 (如 Apply docstring 后 +1) 仍能命中 dedup (Batch5) |
-| `cohort_key` | text | 同类 bug 聚合键 (跨次去重兜底) |
+| `cohort_key` | text | 同类 bug 聚合键 (跨次去重兜底)。算法见 `telemetry.cohort.cohort_key`: 文件 + 归一化 header + existing_code 内容指纹（existing_code 为空时用 target_line 兜底）；旧库首次升级会按 `PRAGMA user_version` 一次性回填 |
 | `cohort_generation` | int | cohort 代际号（默认 1）；跨多轮重复发布区分代际 (Batch2/3) |
 | `supersedes_note_id` | text | 本条 suggestion 取代的旧 note_id (Batch2/3) |
 | `superseded_at` | timestamp | 何时被取代 (Batch2/3) |
@@ -517,7 +533,7 @@ curl http://127.0.0.1:3000/api/v1/telemetry/weekly-reports
 | 检查 | 断言 |
 |---|---|
 | `telemetry:mr_activity` | `title` 未被 `[no_more_review]` 污染；分支 / state / `created_at`(±2s) 与 GitLab 一致；`author_username` / `author_sticky` 是 MR 作者而非事件操作者；`last_activity_at` 已写 |
-| `telemetry:review_runs` | 每条 run 有 `started_at` / `command` / `triggered_by`，终态有 `finished_at` 且不早于开始；`total_tokens = prompt + completion`；success run 有 `model` / `llm_provider`；note 触发的 run 有 `actor_username`；success improve run 的 `suggestion_count` 覆盖其 `[started, finished)` 窗口内落库的 suggestions，`rule_keys_cited` 包含这些 suggestion 的规则键 |
+| `telemetry:review_runs` | 每条 run 有 `started_at` / `command` / `triggered_by`，终态有 `finished_at` 且不早于开始；`total_tokens = prompt + completion`；success run 有 `llm_provider`；note 触发的 run 有 `actor_username`；success improve run 的 `suggestion_count` 覆盖其 `[started, finished)` 窗口内落库的 suggestions，`rule_keys_cited` 包含这些 suggestion 的规则键；**成本信号语义（E11）**：计量值不得为负；provider 回报了模型（`model` 非空）⇒ 必须有成本信号（`total_tokens > 0` 或 `cost_credits > 0`）；`model` 为空 ⇒ 必须既无 token 也无 credits；整体至少一个 success run 带成本信号（E8 之前的历史行按 `model_configured IS NULL` 豁免；该列不存在时报红而非静默豁免） |
 | `telemetry:suggestions` | 文件在 MR `/changes` 内、`target_line > 0`、severity 合法、`head_sha` = MR head、`note_id` 能在 GitLab discussions 找到、`severity_source ∈ {rule, llm}`、`score` 为整数、rule 来源必须有 `rule_keys`、`posted_at` / `created_at` 非空；`improved_code` 非空时须原样出现在对应 GitLab note 正文中（防 DB 与发布内容漂移），为空时仅允许"删除整段"形态（`existing_code` 非空且 note 内含 suggestion 块） |
 | `telemetry:actions` | action ∈ {adopted, dismissed}，`actor_username` / `validation_status` / `head_sha_posted` / `created_at` 齐全，`head_sha_posted = suggestion.head_sha`；dismiss 后 suggestion 为 `dismissed` 且镜像 reason；adopt 校验通过 (`ok` / `already-*` / `late-detect-apply`) 时 suggestion 为 `applied`/`resolved`；实际跑过 `/adopt` `/dismiss` 时必须各有一条 |
 | `telemetry:file_state` | 每行有 `blob_sha` / `head_sha`(= MR head) / `profile_fingerprint` / `ruleset_fingerprint` / `reviewed_at`；有 suggestion 的文件都被 `reviewed_file_state` 覆盖 |

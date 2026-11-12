@@ -5,8 +5,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
-
 from scripts.sync_qoder_agents import sync_qoder_agents
 
 
@@ -32,6 +30,16 @@ def test_writes_one_md_per_prompt(tmp_path: Path) -> None:
     _write_prompt(prompts, "describe", "You write MR descriptions.", description="Describer")
     written = sync_qoder_agents(prompts, agents)
     assert sorted(p.name for p in written) == ["describe.md", "improve.md"]
+
+
+def test_internal_blocks_subdirectory_not_synced(tmp_path: Path) -> None:
+    prompts = tmp_path / "prompts"
+    blocks = prompts / "blocks"
+    blocks.mkdir(parents=True)
+    _write_prompt(prompts, "improve", "body", description="Reviewer")
+    _write_prompt(blocks, "review", "internal fragment", description="internal")
+    written = sync_qoder_agents(prompts, tmp_path / "agents")
+    assert [p.name for p in written] == ["improve.md"]
 
 
 def test_disallowed_tools_mapping(tmp_path: Path) -> None:

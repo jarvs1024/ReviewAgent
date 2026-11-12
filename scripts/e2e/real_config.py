@@ -27,7 +27,6 @@ from scripts.e2e.report import FeatureResult
 # app/extra.py 作对照（不命中任何关键路径，diff 更大）。
 API_FILE = "testlib/lib_baw/e2e_helper.py"
 EXTRA_FILE = "app/extra.py"
-PRIORITY_FILES = (API_FILE,)
 
 SAMPLING_COUNT = 51
 SAMPLING_BRANCH_FMT = "e2e/sampling-r{}"
@@ -141,7 +140,17 @@ def audit_review_config(
         no_keyword = plan_changes(
             changes, _cfg(cfg, improve_keyword_paths=()), profile=profile, policy=policy
         )
-        cap = len([fp for fp in PRIORITY_FILES if fp in changes.files]) + 1
+        # 硬上限语义：必保集合（新增 + 关键路径）本身也可能被截断，
+        # 因此配额设为必保数量 + 1，保证关键路径仍能胜出、额外文件被截断。
+        must = [
+            fp for fp in changes.files
+            if fp in changes.new_files
+            or any(
+                kw.lstrip("/") in fp or kw in fp.lstrip("/")
+                for kw in cfg.improve_keyword_paths
+            )
+        ]
+        cap = len(must) + 1
         capped = plan_changes(
             changes, _cfg(cfg, improve_max_files_to_review=cap), profile=profile, policy=policy
         )

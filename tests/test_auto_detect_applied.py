@@ -336,3 +336,101 @@ def test_unresolved_unrelated_target_change_stays_open(tmp_telemetry):
 
     assert result["applied"] == 0
     assert store.get_suggestion_by_note_id("note-1")["state"] == "open"
+
+
+# ---------- D11: delete 型建议在讨论未 resolve 时也应能被自动判定为已采纳 ----------
+def _seed_delete_suggestion(store, *, note_id="del-1", applicability="delete",
+                            existing_code="    return 1\n"):
+    """种子一条「删除型」建议: improved_code 为空 (Apply 即删除该段)."""
+    store.record_suggestion(
+        project_id=34, mr_iid=200, note_id=note_id,
+        file_path="a.py", target_line=3, target_line_end=3,
+        existing_code=existing_code,
+        improved_code="",
+        header="删掉这行", label="code quality",
+        fingerprint=f"fp-{note_id}", cohort_key=f"c-{note_id}",
+        severity_source="rule", head_sha="oldhead",
+        applicability=applicability,
+    )
+
+
+def test_delete_kind_applied_detected_when_discussion_unresolved(tmp_telemetry):
+    """D11: 用户点 Apply 删掉代码后**不**手动 resolve 线程, 也必须识别为已采纳.
+
+    Why: delete 型建议 improved_code 为空 → exact_match 恒 False;
+         原本 delete_range 判定排在 `resolved is not True` 的提前 return 之后,
+         未 resolve 的讨论根本走不到 → 建议永远停在 open, 图1 待处理虚高.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    store = get_store()
+    _seed_delete_suggestion(store)
+
+    gitlab = MagicMock()
+    gitlab.is_discussion_resolved.return_value = False   # 用户没点 resolve
+    posted = "def foo():\n    pass\n    return 1\n"
+    current = "def foo():\n    pass\n"                     # 那行已被 Apply 删掉
+    gitlab.get_file_at_sha.side_effect = (
+        lambda pid, path, sha: current if sha == "newhead" else posted
+    )
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gitlab), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=store):
+        result = auto_detect_applied(project_id=34, mr_iid=200, head_sha="newhead")
+
+    assert result["applied"] == 1, f"删除型 + 线程未 resolve 也应判定采纳, got {result}"
+    assert store.get_suggestion_by_note_id("del-1")["state"] == "applied"
+
+
+def test_delete_kind_not_applied_when_block_still_present(tmp_telemetry):
+    """D11 负例: 目标代码块还在 (只是内容被改) → 不算采纳, 保持 open."""
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    store = get_store()
+    _seed_delete_suggestion(store)
+
+    gitlab = MagicMock()
+    gitlab.is_discussion_resolved.return_value = False
+    posted = "def foo():\n    pass\n    return 1\n"
+    current = "def foo():\n    pass\n    return 2\n"     # 还在, 只是改了内容
+    gitlab.get_file_at_sha.side_effect = (
+        lambda pid, path, sha: current if sha == "newhead" else posted
+    )
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gitlab), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=store):
+        result = auto_detect_applied(project_id=34, mr_iid=200, head_sha="newhead")
+
+    assert result["applied"] == 0, f"代码块仍在不应判采纳, got {result}"
+    assert store.get_suggestion_by_note_id("del-1")["state"] == "open"
+
+
+def test_text_only_kind_not_treated_as_delete_range(tmp_telemetry):
+    """D12: text_only 建议不能用「原代码消失」当采纳证据.
+
+    Why: text_only 的语义是「文字说明怎么改」, 没有可机检的落地形态;
+         原代码消失 ≠ 用户按建议改完 (可能只是重构掉了).
+         误判成 applied 会虚高采纳率.
+    """
+    from reviewagent.commands.suggestion_actions import auto_detect_applied
+    from reviewagent.telemetry.store import get_store
+
+    store = get_store()
+    _seed_delete_suggestion(store, note_id="txt-1", applicability="text_only")
+
+    gitlab = MagicMock()
+    gitlab.is_discussion_resolved.return_value = True    # 用户 resolve 了线程
+    posted = "def foo():\n    pass\n    return 1\n"
+    current = "def foo():\n    pass\n"                    # 原代码消失
+    gitlab.get_file_at_sha.side_effect = (
+        lambda pid, path, sha: current if sha == "newhead" else posted
+    )
+
+    with patch("reviewagent.commands.suggestion_actions.GitLabClient", return_value=gitlab), \
+         patch("reviewagent.commands.suggestion_actions.get_store", return_value=store):
+        result = auto_detect_applied(project_id=34, mr_iid=200, head_sha="newhead")
+
+    assert result["applied"] == 0, f"text_only 不应被判为采纳, got {result}"
+    assert store.get_suggestion_by_note_id("txt-1")["state"] == "resolved"

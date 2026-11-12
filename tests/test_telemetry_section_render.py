@@ -82,6 +82,37 @@ def test_deterministic_summary_problem_types_is_bullet():
     assert any("×" in b and any(ch.isdigit() for ch in b) for b in bullets)
 
 
+def test_inspection_summary_rule_actions_come_from_profile(monkeypatch):
+    """跟进建议的动作来自 profile `rules/rule_actions.yaml`，代码里不硬编码."""
+    from reviewagent.reporting import renderer
+
+    monkeypatch.setattr(
+        renderer,
+        "active_rule_actions",
+        lambda: {"R-RES": "YAML 资源动作", "R-OTHER": "YAML 兜底动作"},
+    )
+    data = _sample_data()
+    data["top_rules"] = [("R-OTHER:magic_number", 5), ("R-RES", 3)]
+    follow = _build_inspection_summary(data).split("**跟进建议**")[1]
+    assert "YAML 兜底动作" in follow
+    assert "YAML 资源动作" in follow
+
+
+def test_telemetry_prompt_rule_actions_come_from_profile(monkeypatch):
+    """LLM user prompt 的规则动作表同样注入自 profile YAML."""
+    from reviewagent.reporting import renderer
+    from reviewagent.reporting.collectors.telemetry import TelemetryCollector
+
+    monkeypatch.setattr(
+        renderer, "active_rule_actions", lambda: {"R-RES": "YAML 资源动作"},
+    )
+    prompt = TelemetryCollector()._build_llm_prompt(
+        {"top_rules_friendly": [("资源句柄未释放", 3)]},
+    )
+    assert "R-RES → YAML 资源动作" in prompt
+    assert "R-LOOP, R-RES" not in prompt
+
+
 def test_render_telemetry_appends_dashboard_link_when_url_given():
     """dashboard_url 非空时, 在指标表后追加 `📈 检视看板: [url](url)` 一行."""
     out = _render_telemetry(_sample_data(), dashboard_url="http://127.0.0.1:8080/code-review")

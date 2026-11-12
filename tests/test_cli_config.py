@@ -131,8 +131,8 @@ def test_config_show_sources(tmp_path, monkeypatch, capsys):
     assert by_key["improve_review_mode"] == "improve_review_mode: test  # source=env"
     # 未被 review.yaml / env 覆盖的映射字段 → schema 默认值
     assert by_key["improve_max_suggestions"] == "improve_max_suggestions: 15  # source=default"
-    # profile.yaml 自身写的字段
-    assert by_key["rule_key_prefix"] == "rule_key_prefix: auto  # source=profile"
+    # profile.yaml 不再固定 rule_keys：前缀回落 schema 默认值
+    assert by_key["rule_key_prefix"] == "rule_key_prefix: auto  # source=default"
     # 未出现在任何 profile/env 的字段
     assert by_key["log_level"] == "log_level: INFO  # source=default"
 

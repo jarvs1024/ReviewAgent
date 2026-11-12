@@ -53,6 +53,19 @@ def _evidence_problem(evidence: str) -> str:
         source = path.read_text(encoding="utf-8", errors="ignore")
         if anchor not in source:
             return f"证据符号已失效: {rel}:{anchor}"
+    if anchor and anchor.isdigit():
+        # 数字锚点至少要落在**非空行**上 —— 行号越界/指向空行说明代码已漂移.
+        # Why 不是万能防线: 行号漂到另一段**非空**代码仍发现不了,
+        # 所以 catalog 里的关键条目一律用符号锚点（上面那条会真校验）。
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        try:
+            idx = int(anchor) - 1
+        except ValueError:
+            return f"证据行号非法: {rel}:{anchor}"
+        if idx < 0 or idx >= len(lines):
+            return f"证据行号越界: {rel}:{anchor} (文件共 {len(lines)} 行)"
+        if not lines[idx].strip():
+            return f"证据行号指向空行: {rel}:{anchor}"
     return ""
 
 
@@ -121,6 +134,24 @@ def scenario_config_snapshot() -> Any:
         config_mod._current = previous
 
 
+def _paths_skipped(files: list[Any], skip_paths: tuple[str, ...]) -> bool:
+    """这些文件是否命中了 skip_paths（目录前缀 / 路径片段匹配）."""
+    if not skip_paths:
+        return False
+    for path in files:
+        norm = str(path or "").replace("\\", "/")
+        for pattern in skip_paths:
+            pat = str(pattern).replace("\\", "/")
+            if not pat:
+                continue
+            if pat.endswith("/"):
+                if pat.rstrip("/") in norm.split("/")[:-1]:
+                    return True
+            elif pat in norm:
+                return True
+    return False
+
+
 def observable_checks(suggestions: list[dict], cfg: Any) -> list[tuple[str, bool, str]]:
     """全量档：用真实 suggestions 验证「配置确实作用到了产物」（可单测）."""
     checks: list[tuple[str, bool, str]] = [
@@ -143,8 +174,27 @@ def observable_checks(suggestions: list[dict], cfg: Any) -> list[tuple[str, bool
         ]
         checks.append(("no_below_min_severity", not below, f"min={min_severity} below={below[:3]}"))
 
+    # conftest.py: 是否参与检视由**配置**决定，不写死「一定不检视」。
+    # Why: 场景包策略已改为「conftest.py 不跳过 —— fixture 是测试业务的真实契约面，
+    # 需要参与检视」（config/.../review.yaml 的 file_filter 注释 + priority_paths 含
+    # /conftest.py），而 improve_skip_test_paths 也从「文件名黑名单」改成了「目录黑名单」。
+    # 旧断言把「conftest 一律不检视」写死，跟随策略变更后就成了假阳性。
+    # 现在按 skip_paths 判定：被策略跳过的文件不该有建议；没被跳过的应当有建议。
     conftest = [s.get("file") for s in suggestions if str(s.get("file", "")).endswith("conftest.py")]
-    checks.append(("conftest_not_reviewed", not conftest, f"conftest suggestions={conftest[:3]}"))
+    skip_paths = tuple(cfg.improve_skip_test_paths or ())
+    # 逐文件判定：只有「命中 skip_paths 却仍出了建议」才算违规；
+    # 未命中 skip_paths 的 conftest 有建议是正常结果（策略允许检视）。
+    violations = [f for f in conftest if _paths_skipped([f], skip_paths)]
+    if violations:
+        checks.append(
+            ("conftest_skip_policy_respected", False,
+             f"conftest 命中 skip_paths 却仍有建议: {violations[:3]}；skip_paths={list(skip_paths)[:5]}")
+        )
+    else:
+        checks.append(
+            ("conftest_skip_policy_respected", True,
+             f"conftest 未命中 skip_paths → 允许参与检视；实际 conftest 建议={conftest[:3]}")
+        )
 
     cited = [
         s.get("file")

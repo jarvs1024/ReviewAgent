@@ -182,7 +182,11 @@ def _run_full(args: argparse.Namespace, logdir: Path, stamp: str) -> int:
             fixture = next((f for f in created if f.mr_iid == mr_iid), None)
             if fixture is not None:
                 os.environ["REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID"] = str(fixture.project_id)
-            for feature in features:
+            # 会改变 MR 状态的 flow 放到审计之后跑（见 flows.STATE_MUTATING_FEATURES）
+            run_features = [f for f in features if f not in flows.STATE_MUTATING_FEATURES]
+            late_features = [f for f in features if f in flows.STATE_MUTATING_FEATURES]
+
+            def _run_feature(feature: str) -> None:
                 log: list[str] = [
                     f"=== feature={feature} round={round_idx} stamp={stamp} mr={mr_iid}"
                 ]
@@ -195,6 +199,9 @@ def _run_full(args: argparse.Namespace, logdir: Path, stamp: str) -> int:
                     )
                 report.print_result(result)
                 results.append(result)
+
+            for feature in run_features:
+                _run_feature(feature)
             pid = fixture.project_id if fixture is not None else stack.project_id()
             if {"improve", "auto_chain"} & set(features):
                 results.extend(_config_observations(mr_iid, round_idx, effective_cfg, pid))
@@ -217,6 +224,11 @@ def _run_full(args: argparse.Namespace, logdir: Path, stamp: str) -> int:
                 for result in extra:
                     report.print_result(result)
                 results.extend(extra)
+            # 收尾阶段: 会改 MR 状态的 flow（改代码 / 改建议状态）
+            # Why 放最后: 它们会改变 MR head 与建议状态, 放在审计前会把
+            #   「head_sha 与 MR head 不一致」这类基线断言搞脏（假失败）。
+            for feature in late_features:
+                _run_feature(feature)
     finally:
         if original_pid is None:
             os.environ.pop("REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID", None)

@@ -2,7 +2,7 @@
 
 覆盖:
 - `build_summary_v2` / `build_summary_placeholder` 与门面输出一致 (相同字节)
-- `load_rule_actions` 读取 profile `reporting.actions_file`
+- `load_rule_actions` 读取 profile 固定路径 `rules/rule_actions.yaml`
 - `publish` 的入口守卫 / drop 分支
 - dedup / record 的规则键抽取 (仓库规则键 + promotion)
 """
@@ -130,9 +130,11 @@ def test_load_rule_actions_from_profile():
 
     actions = load_rule_actions(load_profile(None))
     # 仓库规则键不在场景包里登记（随被检仓库变化），只保留通用规则动作。
-    assert len(actions) == 6
+    # 规则包的全部 R-* + R-OTHER-IMPACT / R-OTHER 两个兜底键都要有动作。
+    assert len(actions) == 26
     assert not any(key.endswith("-RULE-TYPEHINTS") for key in actions)
     assert actions["R-OTHER-IMPACT"] == "对跨文件函数签名变化在 MR 描述里点出 caller, 拉对应 owner review"
+    assert "规则包" in actions["R-OTHER"]
     assert actions["R-CI"] == "对并行用例加临时目录 PID 隔离 / 串行锁, 修 flaky"
 
 

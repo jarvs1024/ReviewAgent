@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from reviewagent.logging_setup import logger
-from reviewagent.telemetry.store import get_store
+from reviewagent.telemetry.store import get_store, is_effective_action
 
 
 router = APIRouter(prefix="/api/v1/telemetry", tags=["telemetry"])
@@ -49,6 +49,14 @@ def _parse_iso(s: str | None) -> str | None:
     s = s.strip()
     # 接受 'YYYY-MM-DD' 或完整 ISO
     if len(s) == 10:
+        # Why 要严格校验: 之前只看长度, 任何 10 个字符都被当成日期
+        # (`since=not-a-date` 会静默通过, 查询按错误时间窗返回数据而不是 400).
+        try:
+            datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail=f"invalid ISO datetime: {s}"
+            )
         return s + "T00:00:00+00:00"
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -166,19 +174,37 @@ async def mr_stats(project_id: int, mr_iid: int) -> dict[str, Any]:
 
 @router.get("/mr/{project_id}/{mr_iid}/timeline")
 async def mr_timeline(project_id: int, mr_iid: int, limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+    """MR 事件时间线。
+
+    `effective` 列（仅 suggestion_action 事件有意义）标注这条动作**是否真的生效**:
+    `/adopt` 校验失败也会写一行 `action='adopted'` 作审计（`validation_status` 区分）,
+    但那不是一次真实采纳 —— 消费者不必自己复刻 `is_effective_action` 规则,
+    直接看 `effective` 即可（1=生效, 0=只是尝试/被拒）。
+    """
     s = get_store()
     with s._conn() as conn:  # noqa: SLF001
         rows = conn.execute(
-            "SELECT started_at AS at, 'run' AS event_type, id AS event_id, command AS detail, status AS state "
+            "SELECT started_at AS at, 'run' AS event_type, id AS event_id, command AS detail, "
+            "       status AS state, NULL AS effective "
             "FROM review_runs WHERE project_id=? AND mr_iid=? "
-            "UNION ALL SELECT created_at, 'suggestion_action', id, action, validation_status "
+            "UNION ALL SELECT created_at, 'suggestion_action', id, action, validation_status, NULL "
             "FROM suggestion_actions WHERE project_id=? AND mr_iid=? "
-            "UNION ALL SELECT created_at, 'suggestion_posted', id, file_path, state "
+            "UNION ALL SELECT created_at, 'suggestion_posted', id, file_path, state, NULL "
             "FROM suggestions WHERE project_id=? AND mr_iid=? "
             "ORDER BY at DESC LIMIT ?",
             (project_id, mr_iid, project_id, mr_iid, project_id, mr_iid, limit),
         ).fetchall()
-    return {"events": [dict(row) for row in rows]}
+    events = []
+    for row in rows:
+        event = dict(row)
+        if event.get("event_type") == "suggestion_action":
+            # 单一事实源: store.is_effective_action（统计口径与这里必须一致，
+            # 在 SQL 里重写一遍规则会随规则演进悄悄漂移）
+            event["effective"] = int(
+                is_effective_action(str(event.get("detail") or ""), event.get("state"))
+            )
+        events.append(event)
+    return {"events": events}
 
 
 @router.get("/mrs")

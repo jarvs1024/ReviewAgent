@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from reviewagent.gitlab.client import GitLabError, GitLabClient
@@ -206,13 +207,28 @@ def _late_detect_single(
     # improved_code 解析时落空, target_line 11 也超出了 posted 4 行文件范围,
     # _target_region_changed 直接 return False).
     # 此时 token_fallback 因 sug_improved 空已跳过, 唯一可用证据是:
-    # "existing_code 在 current 文件中消失" = 用户删了这段 = 采纳.
-    # 比 _target_region_changed 更稳健, 不依赖 line 在 posted 范围内有效.
-    is_deletion_kind = (not sug_improved) and bool((existing_code or "").strip())
+    # "目标区段在 current 文件里被**删除**" = 用户真删了 = 采纳.
+    # 注意不能用「existing_code 原文案不在 current 里」当证据 ——
+    #   用户只是把这段改了, 原文案同样会消失 → 假阳性采纳.
+    # 也不能用于 text_only: 它的语义是「文字说明怎么改」, 原代码消失 ≠ 采纳.
+    _applicability = str(sug.get("applicability") or "").strip().lower()
+    is_deletion_kind = (
+        _applicability == "delete"
+        or (
+            not _applicability
+            and (not sug_improved)
+            and bool((existing_code or "").strip())
+        )
+    )
     deletion_evicted = False
-    if not changed and is_deletion_kind:
-        existing_stripped = (existing_code or "").strip()
-        deletion_evicted = existing_stripped and (existing_stripped not in (current_content or ""))
+    if not changed and is_deletion_kind and current_content is not None:
+        deletion_evicted = _deleted_region_confirmed(
+            posted_content or "",
+            current_content,
+            line=target_line,
+            line_end=target_line_end,
+            existing_code=existing_code or "",
+        )
 
     if not changed:
         if is_deletion_kind and deletion_evicted:
@@ -388,6 +404,58 @@ def _exact_improved_code_near_target(
         nearby[index:index + width] == improved_lines
         for index in range(max(0, len(nearby) - width + 1))
     )
+
+
+def _deleted_region_confirmed(
+    posted_content: str,
+    current_content: str,
+    *,
+    line: int,
+    line_end: int,
+    existing_code: str = "",
+) -> bool:
+    """目标区段在当前文件里是否**被删除**（而不是被改写）.
+
+    Why 不能用「原文案不在 current 文件里」当删除证据:
+        那种判定把「用户只是把这段代码改了」也当成「用户删了」→
+        假阳性采纳（采纳率虚高 + 状态失真）.
+        例: 建议删 `    return 1`, 用户改成 `    return 2` →
+        原文案确实不在文件里了, 但用户根本没删.
+
+    判定方式:
+        1. 首选行级 diff（difflib.SequenceMatcher）: 目标区段必须整段落在
+           delete 操作码里 —— 'replace'（改写）不算删除;
+        2. 目标行超出 posted 文件范围（历史数据 target_line 越界）时退化为
+           「existing_code 原文案消失 + 当前文件行数比 posted 少」——
+           行数变少是「删了」的必要证据, 光是文案消失不够.
+
+    Returns: True 表示确认被删除（= 用户采纳了删除型建议）.
+    """
+    if not posted_content or not current_content:
+        return False
+    posted_lines = posted_content.splitlines()
+    current_lines = current_content.splitlines()
+    lo = max(0, line - 1)
+    hi = min(len(posted_lines), line_end)
+
+    if lo < hi:
+        matcher = SequenceMatcher(None, posted_lines, current_lines, autojunk=False)
+        deleted = 0
+        for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+            if tag == "delete" and i1 >= lo and i2 <= hi:
+                deleted += i2 - i1
+            elif tag != "equal" and i2 > lo and i1 < hi:
+                # 目标区段里有内容被改写 / 移动 → 不是纯删除
+                return False
+        return deleted == (hi - lo)
+
+    # 退化路径: target_line 超出 posted 文件范围 → 用 existing_code + 行数判断
+    existing_stripped = (existing_code or "").strip()
+    if not existing_stripped:
+        return False
+    if existing_stripped in (current_content or ""):
+        return False
+    return len(current_lines) < len(posted_lines)
 
 
 def _token_adoption_match(
@@ -1291,16 +1359,61 @@ def auto_detect_applied(
             line_end=target_line_end,
         )
 
+        # === delete_range 判定（删除语义）===
+        # 必须在 `resolved is not True` 的提前 return **之前**求值:
+        #   delete 型建议 improved_code 为空 → exact_match 恒 False;
+        #   若未 resolve 的讨论直接 return, 用户点 Apply 删掉代码后
+        #   建议永远停在 open → 图1「待处理」虚高, 用户还得手动 /adopt.
+        # 只对「删除语义」生效:
+        #   applicability='delete' → 显式删除型;
+        #   applicability 为空(历史数据无该列) 且 improved_code 空 + existing_code 非空
+        #     → 按旧语义视为删除型;
+        #   text_only **不适用** —— 它的语义是「文字说明怎么改」, 没有可机检的落地形态,
+        #     原代码消失 ≠ 用户按建议改完 (可能只是重构掉了), 误判 applied 会虚高采纳率.
+        _applicability = str(sug.get("applicability") or "").strip().lower()
+        _delete_semantics = (
+            _applicability == "delete"
+            or (
+                not _applicability
+                and not sug_improved
+                and bool((sug.get("existing_code") or "").strip())
+            )
+        )
+        delete_range_confirmed = False
+        if not exact_match and _delete_semantics:
+            sug_existing = (sug.get("existing_code") or "").strip()
+            if sug_existing and current_content is not None:
+                # 目标区段必须是被**删除**, 而非被改写 —— 改写不算采纳删除型建议
+                delete_range_confirmed = _deleted_region_confirmed(
+                    posted_content or "",
+                    current_content,
+                    line=target_line,
+                    line_end=target_line_end,
+                    existing_code=sug_existing,
+                )
+                if delete_range_confirmed:
+                    logger.info(
+                        "auto_detect_applied delete_range_confirmed note={} file={} line={}",
+                        note_id[:8], file_path, target_line,
+                    )
+                else:
+                    logger.info(
+                        "auto_detect_applied delete_range_not_confirmed note={} file={} line={} "
+                        "(区段未真被删除)",
+                        note_id[:8], file_path, target_line,
+                    )
+
         # unresolved discussion 只接受建议代码精确落地，避免把同位置的其它修改误算采纳。
+        # delete 型是例外: 它的落地形态就是「这段代码消失」, 由 delete_range 判定.
         if resolved is not True:
-            if not exact_match:
+            if not (exact_match or delete_range_confirmed):
                 result["unchanged"] += 1
                 if resolved is None:
                     result["errors"] += 1
                 continue
             changed = True
         else:
-            changed = exact_match
+            changed = exact_match or delete_range_confirmed
 
         # resolved discussion: Batch1 收紧采纳口径.
         # 旧逻辑: exact_match=False 时, region_changed 单独即可算采纳 (太多假阳性).
@@ -1349,31 +1462,7 @@ def auto_detect_applied(
                     note_id[:8], file_path, target_line,
                 )
 
-        # delete_range 特殊判定: improved_code 为空 + existing_code 非空 →
-        # 这条建议是"删除一段代码", 必须验证 target 行在 current 文件中**消失**
-        # 才算采纳. 否则用户只是改了 L33 内容, 不算"删".
-        if not changed:
-            sug_existing = (sug.get("existing_code") or "").strip()
-            sug_improved_full = (sug.get("improved_code") or "").strip()
-            if not sug_improved_full and sug_existing and current_content is not None:
-                # 用 posted_content 拿到 target 行的实际内容, 检查 current 是否还有这段
-                src_content = posted_content if posted_content is not None else current_content
-                src_lines = src_content.splitlines()
-                lo = max(0, target_line - 1)
-                hi = min(len(src_lines), target_line_end)
-                if lo < hi:
-                    deleted_block = "\n".join(src_lines[lo:hi]).strip()
-                    if deleted_block and deleted_block not in current_content:
-                        changed = True
-                        logger.info(
-                            "auto_detect_applied delete_range_confirmed note={} file={} line={}",
-                            note_id[:8], file_path, target_line,
-                        )
-                    elif deleted_block:
-                        logger.info(
-                            "auto_detect_applied delete_range_not_confirmed note={} file={} line={} (block still present)",
-                            note_id[:8], file_path, target_line,
-                        )
+        # delete_range 判定已在前面（resolved 分支之前）求值, 结果在 delete_range_confirmed.
 
         if not changed:
             # GitLab “解决主题”只表示 Discussion 被关闭，不能直接算采纳。

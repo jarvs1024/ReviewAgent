@@ -23,7 +23,7 @@ python3.12 -m venv .venv
 cp config/examples/instance.env.example config/instance.env
 chmod 600 config/instance.env
 # 编辑 config/instance.env，填入 GITLAB_URL / GITLAB_PERSONAL_ACCESS_TOKEN / GITLAB_WEBHOOK_SECRET（必填）
-# REVIEW_PROFILE 建议显式写；留空时回退 ssd-python-autotest 并打 WARNING；场景调参见 config/profiles/<name>/review.yaml
+# REVIEW_PROFILE 建议显式写；留空时自动选中唯一场景包（多个场景则启动失败）；场景调参见 config/profiles/<name>/review.yaml
 
 # 3. 载入配置到当前 shell（config check 读进程环境）
 set -a; source config/instance.env; set +a

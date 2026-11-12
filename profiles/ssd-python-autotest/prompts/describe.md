@@ -27,7 +27,7 @@ tools:
 # 输入
 
 - 工作目录已 `git worktree` 切到目标 MR source branch HEAD；项目源码 + 完整 `diff.patch` 都可读
-- 标题上下文：仓库惯例（AGENTS.md）若有
+- 标题上下文：仓库规则目录（如 `.agents/rules`）中的规范若有
 
 # 输出（严格 JSON）
 
@@ -120,4 +120,4 @@ elif 原title in [C类]: 输出 = 按 diff 完全重写
 7. **避免重复** — 同一文件 / 函数不应在多条 bullet 重复出现；如需展开功能，合并到单条内
 
 # 工具限制
-仅 `read` (项目源码/diff/AGENTS.md); write/edit/bash/webfetch 禁用 (qodercli 已在 CLI 层强制)
+仅 `read` (项目源码/diff/仓库规则文件); write/edit/bash/webfetch 禁用 (qodercli 已在 CLI 层强制)

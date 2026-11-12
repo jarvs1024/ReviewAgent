@@ -194,6 +194,18 @@ class TelemetryCollector:
         med = sev.get("medium", 0)
         low = sev.get("low", 0) + sev.get("warning", 0) + sev.get("other", 0)
         rules = data.get("top_rules_friendly") or []
+        # 动作表唯一来源：profile.rule_actions 指向的 YAML（含 R-OTHER 兜底）。
+        from reviewagent.reporting.renderer import active_rule_actions
+
+        rule_action_lines = [
+            f"  {key} → {action}" for key, action in active_rule_actions().items()
+        ]
+        if rule_action_lines:
+            rule_action_lines = [
+                "规则名 → 建议动作参考（不是固定字典：仓库规则随项目变化，以本周数据里已翻译的类别名为准）：",
+                "  类型注解 / docstring / 日志 / print / 可变默认参数 / 资源管理 / 导入等类别 → 对应 CI 工具；",
+                *rule_action_lines,
+            ]
 
         lines = [
             "请输出「本周检视汇总」，必须严格使用下面三个固定小节（粗体小标题，顺序不变，小节之间空一行，标题与正文之间也必须空一行）：",
@@ -220,9 +232,7 @@ class TelemetryCollector:
             "  · 「类型注解缺失 ×N → 启用 ruff `ANN` / mypy strict 加入 CI 一次性消存量」",
             "  · 「裸 except Exception ×N → 用 ruff `BLE` + logging.exception 加 CI 阻断」",
             "  · 「R-RES 资源句柄 ×N → 强制 `with` 上下文管理，扫一遍存量 open 调用」",
-            "规则名 → 建议动作参考（不是固定字典：仓库规则随项目变化，以本周数据里已翻译的类别名为准）：",
-            "  类型注解 / docstring / 日志 / print / 可变默认参数 / 资源管理 / 导入等类别 → 对应 CI 工具；",
-            "  R-LOOP, R-RES, R-ERR, R-SHELL, R-CI, R-OTHER-IMPACT:*",
+            *rule_action_lines,
             "输出格式：每个动作前用 `- **`粗体中文问题类别名**` ×N`：具体动作`**；",
             "若 top 类别没在映射里，也要**根据本周实际命名给一条具体动作**，不要退化成套话。",
             "",

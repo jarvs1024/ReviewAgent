@@ -34,6 +34,9 @@ from reviewagent.review.policies.python import (
     HELP_TEXT_FOOTER as _HELP_TEXT_FOOTER,
 )
 from reviewagent.review.policies.python import (
+    HELP_TEXT_FOOTER_TEXT_ONLY as _HELP_TEXT_FOOTER_TEXT_ONLY,
+)
+from reviewagent.review.policies.python import (
     code_first_line_matches,
     collect_defined_names,
     detect_apply_risk,
@@ -85,6 +88,9 @@ class ImproveCommand(BaseCommand):
     # GitLab 归类为「已关闭(未分类)」, /adopt /dismiss 检测不到, telemetry 缺失处理数据.
     # 正文由 Python 策略提供（suggestion body 构造在 review/policies/python.py）.
     HELP_TEXT_FOOTER = _HELP_TEXT_FOOTER
+    # 无 Apply 按钮时用的页脚 (text_only / 收缩建议) ——
+    # 不能提示「点上方『应用建议』按钮」, 否则 reviewer 会去找一个不存在的按钮.
+    HELP_TEXT_FOOTER_TEXT_ONLY = _HELP_TEXT_FOOTER_TEXT_ONLY
     # ---------- 并行分块调用 ----------
     def _lazy_deps(self):
         from reviewagent.review.dynamic import load_dynamic_rules
@@ -277,7 +283,7 @@ class ImproveCommand(BaseCommand):
     def _render_cross_file_section(self, refs: list[dict]) -> str:
         """把 cross-file 引用渲染成 chunk prompt 段.
 
-        文案在 ``prompts/dynamic/cross_file_refs_*.md``，实现见
+        文案在 ``prompts/blocks/dynamic.md#cross_file_refs_*``，实现见
         review/context.py:render_cross_file_section（门面薄委托）.
         模板路径优先取当前动态规则集里首个启用的声明，缺省用 legacy 模板。
         """
@@ -363,7 +369,7 @@ class ImproveCommand(BaseCommand):
         # Why: chunk prompt 跟 system prompt 分开发给 LLM, 引用式提示会被
         #      LLM 跳过或被长上下文稀释注意力 → R-XXX 20 类基本不被识别.
         #      把清单 inline 后, LLM 能直接看到每条规则的命中条件.
-        # 规则文案在 prompts/rules_repo.md / rules_general.md（assembly 装配）.
+        # 规则文案在 prompts/blocks/review.md 的 rules_repo / rules_general 节（assembly 装配）.
         from reviewagent.review.assembly import (
             ChunkPromptParts,
             build_chunk_prompt,
@@ -1203,6 +1209,7 @@ class ImproveCommand(BaseCommand):
             pre_reconcile=self._pre_reconcile_silent,
             publish_overview=publish_overview,
             help_footer=self.HELP_TEXT_FOOTER,
+            help_footer_text_only=self.HELP_TEXT_FOOTER_TEXT_ONLY,
         )
         return _publish_impl(
             ctx, agent_result, rule_set=rule_set, profile=_profile,

@@ -7,21 +7,37 @@
 profiles/
 └── ssd-python-autotest/            # SSD 自动化测试 Python 检视
     ├── profile.yaml                # 身份 + 内容清单（见下）
-    ├── prompts/                    # 提示词模板（frontmatter + 正文）
+    ├── prompts/                    # 提示词模板
     │   ├── improve.md / describe.md      # 主检视 / MR 描述（profile.prompts 登记）
     │   ├── weekly_*.md                   # 周报三件套（profile.prompts 登记）
-    │   ├── chunk.md / batch.md           # 单文件 / 多文件批次整体框架（固定路径读取）
-    │   ├── rules_repo.md / rules_general.md  # 规则块（有 / 无仓库规则，固定路径读取）
-    │   ├── source/                       # 源码上下文块（patch/full/partial…）
-    │   └── dynamic/                      # 动态规则上下文块（cross_file_refs…）
-    ├── rules/general_rules.md      # 规则条文（正文逐条解析为规则键）
-    ├── dynamic_rules.yaml          # 动态规则声明（grep/AST 探针）
-    └── reporting/rule_actions.yaml # 规则键 → 处置动作映射
+    │   └── blocks/                       # 内部装配片段（固定路径读取）
+    │       ├── review.md                 # chunk / batch / rules_general / rules_repo
+    │       ├── source.md                 # full / partial / patch 等源码上下文变体
+    │       └── dynamic.md                # cross_file_refs 空 / 有引用
+    ├── rules/                      # 规则相关全部在此
+    │   ├── general_rules.md        # 静态规则条文（正文逐条解析为规则键）
+    │   ├── dynamic_rules.yaml      # 动态规则声明（grep/AST 探针）
+    │   └── rule_actions.yaml       # 规则键 → 周报跟进动作（默认路径，可选）
 ```
 
-`profile.yaml` 的 `prompts` 只登记 `improve` / `describe` / 周报三件套；`chunk.md` /
-`batch.md` / `rules_*.md` 与 `source/`、`dynamic/` 由 `review/assembly.py` 和
-`review/context.py` 按固定路径读取，不要写进 `prompts` 映射。
+`profile.yaml` 的 `prompts` 只登记 `improve` / `describe` / 周报三件套。
+`prompts/blocks/*.md` 是**内部装配片段**：不写进 `prompts` 映射、不会被
+`sync_qoder_agents` 物化成 `.qoder/agents/*.md`，由 `review/assembly.py` 与
+`review/context.py` 按固定路径读取。
+
+### 内部片段的分节约定
+
+一个 blocks 文件可以承载多个片段，按 `<!-- @section:<name> -->` 分节（标记必须
+独占一行）。代码用 `路径#section` 引用，例如：
+
+```yaml
+# rules/dynamic_rules.yaml
+empty_template: prompts/blocks/dynamic.md#cross_file_refs_empty
+```
+
+- 段正文从标记行换行后开始，到下一个标记行行首（或 EOF）结束；
+- 段间空行属于**上一段正文**（`rules_general` / `cross_file_refs_*` 依赖这个尾空行）；
+- 占位符校验、路径逃逸校验与普通模板一致（`scenario.prompts.load_section`）。
 
 ## profile.yaml 只放"身份 + 内容"
 
@@ -33,8 +49,13 @@ profiles/
 | `test_paths` | 测试文件判定（GenericPolicy 命中即按测试代码策略检视） |
 | `prompts` | 提示词文件清单（`improve` / `describe` 必填） |
 | `rules` / `dynamic_rules` / `rule_keys` / `rule_key_promotions` / `rule_overrides` / `disable` | 规则装配 |
+| `rule_actions` | 规则键 → 周报跟进动作的 YAML 路径（缺省 `rules/rule_actions.yaml`） |
 | `capabilities` / `security` | 能力与安全开关 |
-| `reporting` | 仅 `actions_file`（包内代码路径引用，不开放用户覆写） |
+
+规则动作映射（规则键 → 周报跟进动作）由 `profile.yaml` 的 `rule_actions` 指向，
+缺省读取 `rules/rule_actions.yaml`；不同场景包可指向不同文件。它是唯一来源——
+周报渲染与 LLM user prompt 均从此文件注入；文件存在即加载并计入 profile 指纹，
+显式声明但文件缺失会启动失败，未声明且默认文件缺失时周报回退到规则名兜底。
 
 **调参组（`file_filter` / `scoring` / `limits` / `context` / `repo_context`，以及
 `rule_keys.repo_prefix` 和 `reporting` 的展示/扫描类键 `weekly_title` /
@@ -47,7 +68,8 @@ profiles/
 ## 新增一个场景包
 
 1. 复制 `ssd-python-autotest/` 为新目录，改 `name` / `description` / `language`，
-   替换 prompts 与 rules 内容（`improve` / `describe` 两个 prompt 必须存在）。
+   替换 prompts 与 rules 内容（`improve` / `describe` 两个 prompt 必须存在；
+   内部装配片段在 `prompts/blocks/`，按 `<name>` 分节替换文案）。
 2. 需要差异化调参时，建 `config/profiles/<新场景名>/review.yaml` 只写差异值。
 3. 自检 + 入口登记：
 

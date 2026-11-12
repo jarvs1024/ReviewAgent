@@ -28,6 +28,12 @@ SEVERITIES = {"low", "medium", "high", "critical"}
 DISMISSAL_ACTIONS = {"adopted", "dismissed"}
 # 命令名 -> 落库的 action 值（/adopt 写 adopted）
 REQUIRED_ACTION_MAP = {"adopt": "adopted", "dismiss": "dismissed"}
+# applicability 三态（与 reviewagent/review/applicability.py 保持一致）:
+#   replace  —— 有可直接 Apply 的 suggestion 块
+#   delete   —— 空 improved_code + 空 suggestion 块 (Apply 即删除该段)
+#   text_only—— 无 suggestion 块, 只能人工改后 /adopt
+# 历史数据没有该列 → 视为 replace。
+APPLICABILITIES = {"replace", "delete", "text_only"}
 
 CHECK_ORDER = ("mr_activity", "review_runs", "suggestions", "actions", "file_state", "api_params")
 
@@ -200,9 +206,46 @@ def audit_review_runs(snap: Snapshot, expect: MrExpectation) -> tuple[bool, str]
         tokens = int(run.get("prompt_tokens") or 0) + int(run.get("completion_tokens") or 0)
         if total != tokens:
             problems.append(f"{tag}: total_tokens={total} != prompt+completion={tokens}")
+        # E11: 计量值不得为负 —— 负 token / 负 credits 一定是 bug
+        if total < 0:
+            problems.append(f"{tag}: total_tokens={total} < 0")
+        if tokens < 0:
+            problems.append(f"{tag}: prompt+completion={tokens} < 0")
+        credits = float(run.get("cost_credits") or 0.0)
+        if credits < 0:
+            problems.append(f"{tag}: cost_credits={credits} < 0")
         if status == "success":
-            if not run.get("model"):
-                problems.append(f"{tag}: model missing")
+            # E8: model 列现在只记 provider **实际回报**的模型;
+            # 为空 = 本轮没调 LLM (improve 全文件复用早退), 属合法路径.
+            # E11: model 非空 ⇒ 真调了 ⇒ 必须有成本信号;
+            #       model 为空 ⇒ 必须既无 token 也无 credits.
+            #
+            # 历史行豁免: E8 之前 `model` 被配置 id 兜底填充, 语义两义
+            # (实测 58 条历史 success 行 = 配置 id + 零信号, 实为全复用早退).
+            # 判别依据 = `model_configured`: E8 之后每行都写, 之前为 NULL.
+            #
+            # 额外防护: 该列**不存在**时 (老库未迁移) 绝不能把全部行当历史行
+            # 豁免 —— 那等于关掉整个断言. 此时一律按新口径判定, 宁可误报。
+            has_cfg_column = "model_configured" in run
+            is_legacy = has_cfg_column and run.get("model_configured") is None
+            reported_model = str(run.get("model") or "").strip()
+            has_signal = total > 0 or credits > 0
+            if not has_cfg_column:
+                problems.append(
+                    f"{tag}: review_runs 缺 model_configured 列 (E8 迁移未生效) — "
+                    "无法区分新旧 model 口径"
+                )
+            if not is_legacy:
+                if reported_model and not has_signal:
+                    problems.append(
+                        f"{tag}: provider 回报模型 {reported_model} 但无任何成本信号 "
+                        f"(total_tokens={total}, cost_credits={credits})"
+                    )
+                if not reported_model and has_signal:
+                    problems.append(
+                        f"{tag}: 无模型回报却有成本信号 "
+                        f"(total_tokens={total}, cost_credits={credits})"
+                    )
             if not run.get("llm_provider"):
                 problems.append(f"{tag}: llm_provider missing")
         if run.get("triggered_by") == "note" and not run.get("actor_username"):
@@ -229,6 +272,21 @@ def audit_review_runs(snap: Snapshot, expect: MrExpectation) -> tuple[bool, str]
 
     if not any(run.get("status") == "success" for run in runs):
         problems.append("no successful run")
+    # E11: 整体口径 —— 至少一个 success run 必须带成本信号.
+    # Why: 每行单看都可能「自洽」(model=None + 零计量 = 没调 LLM),
+    # 但**整个 MR** 的 success run 全都零信号 ⇒ 计量链路整体静默失效,
+    # 这种缺陷恒等式断言永远抓不到.
+    if any(run.get("status") == "success" for run in runs):
+        signalled = [
+            r for r in runs
+            if r.get("status") == "success"
+            and (int(r.get("total_tokens") or 0) > 0 or float(r.get("cost_credits") or 0.0) > 0)
+        ]
+        if not signalled:
+            problems.append(
+                "no successful run carries any cost signal (total_tokens/cost_credits 全为 0) "
+                "— 计量链路可能整体失效"
+            )
     if snap.suggestions and not windows:
         problems.append("suggestions exist but no improve run recorded suggestion_count/rule_keys_cited")
 
@@ -245,21 +303,49 @@ def audit_review_runs(snap: Snapshot, expect: MrExpectation) -> tuple[bool, str]
 
 
 def _improved_code_problems(sug: dict, body: str) -> list[str]:
-    """improved_code 与 GitLab note 正文对齐.
+    """improved_code 与 GitLab note 正文对齐 —— 按 applicability 三态分别校验.
 
-    空 improved_code 是合法形态（删除整段 existing，见 policies/python.py 的
-    suggestion 组装），但必须满足：existing_code 非空 + note 里有 suggestion 块。
-    非空时必须原样出现在 note 正文里，防止 DB 与真实发布内容漂移.
+    三态（reviewagent/review/applicability.py）:
+        replace   —— improved_code 非空, 且必须原样出现在 note 正文里.
+        delete    —— improved_code 必须为空, 且 note 必须带 suggestion 块
+                      (空块 = Apply 即删除该段 existing_code).
+        text_only —— improved_code 必须为空, 且 note **不得**带 suggestion 块
+                      (带了就会又冒出 Apply 按钮, reviewer 一点就删有效代码).
+
+    Why 按态区分: 三态落地前只有「空 improved_code ⇒ 删除语义」一条规则,
+    于是正确的 text_only 建议被误判为「缺少 suggestion 块」——
+    真实 MR !3 上实测 2/15 条假阳性, 会让 `--tier full` 在正确行为上报红.
     """
     tag = _short(sug.get("note_id"))
+    applicability = str(sug.get("applicability") or "replace").strip().lower()
     improved = str(sug.get("improved_code") or "").strip("\n")
+    has_block = "```suggestion" in (body or "")
+    has_existing = bool(str(sug.get("existing_code") or "").strip())
+
+    if applicability == "text_only":
+        if has_block:
+            return [f"{tag}: text_only must not carry a suggestion block"]
+        if improved.strip():
+            return [f"{tag}: text_only must not carry improved_code"]
+        return []
+
+    if applicability == "delete":
+        if improved.strip():
+            return [f"{tag}: delete must not carry improved_code"]
+        if not has_existing:
+            return [f"{tag}: improved_code missing (no existing_code to delete)"]
+        if body and not has_block:
+            return [f"{tag}: empty improved_code but note has no suggestion block"]
+        return []
+
+    # replace（含历史数据无 applicability 列的情况）
     if improved.strip():
         if body and improved not in body:
             return [f"{tag}: improved_code diverges from posted note"]
         return []
-    if not str(sug.get("existing_code") or "").strip():
+    if not has_existing:
         return [f"{tag}: improved_code missing (no existing_code to delete)"]
-    if body and "```suggestion" not in body:
+    if body and not has_block:
         return [f"{tag}: empty improved_code but note has no suggestion block"]
     return []
 
@@ -289,6 +375,9 @@ def audit_suggestions(snap: Snapshot, expect: MrExpectation) -> tuple[bool, str]
             problems.append(f"{tag}: state={sug.get('state')!r}")
         if sug.get("severity_source") not in ("rule", "llm"):
             problems.append(f"{tag}: severity_source={sug.get('severity_source')!r}")
+        applicability = str(sug.get("applicability") or "replace").strip().lower()
+        if applicability not in APPLICABILITIES:
+            problems.append(f"{tag}: applicability={sug.get('applicability')!r}")
         if not isinstance(sug.get("score"), int):
             problems.append(f"{tag}: score={sug.get('score')!r}")
         if sug.get("severity_source") == "rule" and not _split_rule_keys(sug.get("rule_keys")):

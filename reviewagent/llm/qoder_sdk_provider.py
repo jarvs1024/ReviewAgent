@@ -689,6 +689,12 @@ class QoderSDKProvider:
         completion_tokens = 0
         cost_credits = 0.0
         context_usage_ratio = 0.0
+        # usage 原始键 —— 用于诊断「上游到底回填了哪些字段」
+        # Why: 2026-11 复验发现 credits / context_usage_ratio 非零而 token 恒为 0,
+        #   根因是上游 usage 响应里没有 input_tokens/output_tokens。
+        #   没有这行日志就只能靠猜 —— 把 usage 的键打出来才能一眼确认。
+        usage_keys: set[str] = set()
+        usage_seen = False
         last_text = ""
         model_id = options.model or ""
         result_msg: ResultMessage | None = None
@@ -705,6 +711,11 @@ class QoderSDKProvider:
                             last_text += block.text
                     usage = getattr(message, "usage", None)
                     if usage:
+                        usage_seen = True
+                        try:
+                            usage_keys.update(str(k) for k in usage.keys())
+                        except Exception:  # noqa: BLE001 - usage 可能是非 dict
+                            pass
                         prompt_tokens = max(
                             prompt_tokens, int(usage.get("input_tokens", 0) or 0)
                         )
@@ -724,6 +735,11 @@ class QoderSDKProvider:
                     if getattr(message, "usage", None):
                         u = message.usage
                         if u:
+                            usage_seen = True
+                            try:
+                                usage_keys.update(str(k) for k in u.keys())
+                            except Exception:  # noqa: BLE001
+                                pass
                             if u.get("input_tokens"):
                                 prompt_tokens = max(prompt_tokens, int(u["input_tokens"]))
                             if u.get("output_tokens"):
@@ -819,6 +835,14 @@ class QoderSDKProvider:
             agent, model_id, prompt_tokens, completion_tokens,
             cost_credits, context_usage_ratio, duration_ms,
         )
+        if usage_seen and prompt_tokens == 0 and completion_tokens == 0:
+            # 上游回了 usage 但没有 token 字段 → 落库的 total_tokens 只能是 0,
+            # 消费者分不清「真的是 0」与「不可用」。把原始键打出来便于确认根因。
+            logger.warning(
+                "qoder_sdk.usage_tokens_unavailable agent={} model={} usage_keys={} "
+                "credits={:.4f} ctx_ratio={:.4f} — 上游未回填 token, total_tokens 将记 0",
+                agent, model_id, sorted(usage_keys), cost_credits, context_usage_ratio,
+            )
         if result_msg and result_msg.subtype == "error_max_turns":
             logger.warning(
                 "qoder_sdk output truncated (subtype=error_max_turns); agent={}",

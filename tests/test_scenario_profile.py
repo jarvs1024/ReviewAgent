@@ -1,4 +1,4 @@
-"""scenario.profile — 默认回退 / preset 合并 / 未知字段 / instance 绑定."""
+"""scenario.profile — 隐式场景选择 / preset 合并 / 未知字段 / instance 绑定."""
 
 from __future__ import annotations
 
@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reviewagent.scenario.profile import DEFAULT_PROFILE, bind_instance, load_profile
+from reviewagent.scenario.profile import (
+    bind_instance,
+    default_profile_name,
+    load_profile,
+)
+
+PROFILE_ROOT = Path(__file__).resolve().parents[1] / "profiles"
+DEFAULT_PROFILE = default_profile_name(PROFILE_ROOT)
 
 
 def _write_yaml(path: Path, data: dict) -> None:
@@ -53,6 +60,14 @@ def test_default_profile_falls_back(monkeypatch):
     assert profile.language == "python"
 
 
+def test_implicit_profile_requires_unique_scenario(tmp_path):
+    """REVIEW_PROFILE 未设置时只允许唯一场景包；多个必须显式指定."""
+    _write_profile(tmp_path, "alpha")
+    _write_profile(tmp_path, "beta")
+    with pytest.raises(ValueError, match="multiple scenarios"):
+        load_profile(None, root=tmp_path)
+
+
 def test_missing_profile_lists_available(tmp_path):
     with pytest.raises(ValueError, match="available="):
         load_profile("does-not-exist", root=tmp_path)
@@ -86,12 +101,18 @@ def test_default_profile_applies_scenario_config():
     assert cfg.improve_review_mode == "auto"
     assert cfg.repo_context_rules_dir == ".agents/rules"
     assert cfg.review_exclude_extensions[0] == ".md"
-    # rule_keys 是 profile.yaml 的身份/内容键：auto=不绑定具体仓库前缀
+    # rule_keys 不在 profile 侧固定：前缀回落 schema 默认 auto
     assert cfg.rule_key_prefix == "auto"
-    assert profile.sources["rule_keys"] == "profile"
-    assert profile.sources["rule_key_prefix"] == "profile"
-    # test_paths 从 preset 的 scoring.test_paths 提升为顶层键
-    assert profile.test_paths == ("tests/", "test_*.py")
+    assert "rule_keys" not in profile.sources
+    assert "rule_key_prefix" not in profile.sources
+    # test_paths 从 preset 的 scoring.test_paths 提升为顶层键（SSD 自动化目录布局）
+    assert profile.test_paths == (
+        "testcase/",
+        "testlib/",
+        "test_components/",
+        "test_*.py",
+        "conftest.py",
+    )
     # review.yaml 装载的三组（file_filter/scoring/limits 等）默认缺席
     assert "scoring" not in profile.sources
 
@@ -116,10 +137,10 @@ def test_profile_yaml_extends_rejected(tmp_path):
         load_profile("alt", root=tmp_path)
 
 
-def test_profile_yaml_reporting_display_keys_rejected(tmp_path):
-    """reporting 展示/扫描键只允许出现在 review.yaml."""
+def test_profile_yaml_reporting_rejected(tmp_path):
+    """reporting 不再进 profile.yaml：动作表固定 rules/rule_actions.yaml，展示键归 review.yaml."""
     _write_profile(tmp_path, "alt", reporting={"weekly_title": "周报"})
-    with pytest.raises(ValueError, match=r"review\.yaml"):
+    with pytest.raises(ValueError, match=r"rules/rule_actions\.yaml"):
         load_profile("alt", root=tmp_path)
 
 
@@ -219,9 +240,40 @@ def test_missing_dynamic_rules_file_rejected(tmp_path):
         load_profile("bad", root=tmp_path)
 
 
-def test_missing_actions_file_rejected(tmp_path):
-    _write_profile(tmp_path, "bad", reporting={"actions_file": "reporting/rule_actions.yaml"})
-    with pytest.raises(ValueError, match="reporting.actions_file"):
+def test_rule_actions_file_is_optional(tmp_path):
+    """未放 rules/rule_actions.yaml 的 profile 仍可加载（动作表是可选约定）."""
+    _write_profile(tmp_path, "alt")
+    assert load_profile("alt", root=tmp_path).fingerprint
+
+
+def test_fingerprint_tracks_rule_actions_file(tmp_path):
+    profile_dir = _write_profile(tmp_path, "alt")
+    first = load_profile("alt", root=tmp_path)
+    actions = profile_dir / "rules" / "rule_actions.yaml"
+    actions.parent.mkdir(parents=True)
+    actions.write_text("R-LOOP: a\n", encoding="utf-8")
+    second = load_profile("alt", root=tmp_path)
+    assert second.fingerprint != first.fingerprint
+    actions.write_text("R-LOOP: b\n", encoding="utf-8")
+    assert load_profile("alt", root=tmp_path).fingerprint != second.fingerprint
+
+
+def test_rule_actions_path_is_configurable(tmp_path):
+    """不同场景包可把动作表放到任意文件（`rule_actions` 字段），无需改代码."""
+    profile_dir = _write_profile(tmp_path, "alt", rule_actions="rules/actions_custom.yaml")
+    custom = profile_dir / "rules" / "actions_custom.yaml"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("R-LOOP: 自定义动作\n", encoding="utf-8")
+    profile = load_profile("alt", root=tmp_path)
+    assert profile.rule_actions == "rules/actions_custom.yaml"
+    from reviewagent.reporting.renderer import load_rule_actions
+
+    assert load_rule_actions(profile) == {"R-LOOP": "自定义动作"}
+
+
+def test_missing_explicit_rule_actions_file_rejected(tmp_path):
+    _write_profile(tmp_path, "bad", rule_actions="rules/nope.yaml")
+    with pytest.raises(ValueError, match="rule_actions"):
         load_profile("bad", root=tmp_path)
 
 
@@ -252,6 +304,21 @@ def test_fingerprint_stable_and_sensitive_to_profile_content(tmp_path):
     _write_profile(tmp_path, "alt", capabilities={"ast_validation": False})
     changed = load_profile("alt", root=tmp_path)
     assert changed.fingerprint != first.fingerprint
+
+
+def test_fingerprint_tracks_internal_blocks(tmp_path):
+    profile_dir = _write_profile(tmp_path, "alt")
+    first = load_profile("alt", root=tmp_path)
+
+    block = profile_dir / "prompts" / "blocks" / "review.md"
+    block.parent.mkdir()
+    block.write_text("<!-- @section:chunk -->\nA\n", encoding="utf-8")
+    second = load_profile("alt", root=tmp_path)
+    assert second.fingerprint != first.fingerprint
+
+    block.write_text("<!-- @section:chunk -->\nB\n", encoding="utf-8")
+    third = load_profile("alt", root=tmp_path)
+    assert third.fingerprint != second.fingerprint
 
 
 def test_instance_binding_rejects_corrupt_json(tmp_path):

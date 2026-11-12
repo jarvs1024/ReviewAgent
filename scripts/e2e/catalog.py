@@ -81,28 +81,32 @@ _WITNESSES: tuple[Witness, ...] = (
     _live("log_level", "logging_setup.py:419"),
     _live("log_format", "logging_setup.py:404"),
     _live("log_rotation", "logging_setup.py:431"),
-    _live("review_profile", "cli.py:66 / scenario/profile.py:335；场景包选择"),
+    _live("review_profile", "cli.py:cfg.review_profile；scenario/profile.py:335；场景包选择"),
     _live("review_profile_root", "cli.py:67 / scenario/profile.py:99；场景包根目录"),
     _behavior("review_config_dir", "review_config_dir",
               "scenario/profile.py:102；用户覆盖层目录（test_scenario_wiring）"),
     # ---------- 周报 ----------
-    _live("weekly_enabled", "reporting/runner.py:115"),
-    _live("weekly_target_project_id", "reporting/runner.py:180"),
-    _live("weekly_target_branch", "reporting/runner.py:183"),
+    # Why 用**符号锚点**而不是行号: 数字锚点不被 `_evidence_problem` 校验内容,
+    # 改一次代码就静默漂移到无关行 (2026-11-11 实测: runner.py 的 11 个行号
+    # 锚点全部漂移到无关代码, 目录却仍显示"绿"). 符号锚点会被真校验.
+    _live("weekly_enabled", "reporting/runner.py:cfg.enabled"),
+    _live("weekly_target_project_id", "reporting/runner.py:target_project_id"),
+    _live("weekly_target_branch", "reporting/runner.py:target_branch"),
     _behavior("weekly_timezone", "weekly_timezone",
               "reporting/runner.py:_resolve_tz；周边界随时区移动（test_scenario_wiring）"),
-    _live("weekly_collectors", "reporting/runner.py:187"),
-    _live("weekly_notifier", "reporting/runner.py:84"),
-    _live("weekly_dingtalk_webhook_url", "reporting/runner.py:86"),
-    _live("weekly_dingtalk_secret", "reporting/runner.py:87"),
-    _live("weekly_dingtalk_dry_run", "reporting/runner.py:222；全量档 dry-run 断言"),
-    _live("weekly_dingtalk_retry", "reporting/runner.py:88"),
-    _live("weekly_md_chunk_limit", "reporting/runner.py:225"),
-    _live("weekly_report_title", "reporting/runner.py:205,227；全量档标题断言"),
-    _live("weekly_report_emoji", "reporting/runner.py:206,227"),
+    _live("weekly_collectors", "reporting/runner.py:cfg.collectors"),
+    _live("weekly_notifier", "reporting/runner.py:_build_notifier"),
+    _live("weekly_dingtalk_webhook_url", "reporting/runner.py:_build_notifier"),
+    _live("weekly_dingtalk_secret", "reporting/runner.py:_build_notifier"),
+    _live("weekly_dingtalk_dry_run",
+          "reporting/runner.py:_should_send_notice；全量档 dry-run 断言见 flows.weekly_notify_gate"),
+    _live("weekly_dingtalk_retry", "reporting/runner.py:dingtalk_retry"),
+    _live("weekly_md_chunk_limit", "reporting/runner.py:markdown_chunk_limit"),
+    _live("weekly_report_title", "reporting/runner.py:report_title；全量档标题断言"),
+    _live("weekly_report_emoji", "reporting/runner.py:report_emoji"),
     _script("weekly_cron_schedule",
             "scripts/services_ops.sh:render_weekly_timer → systemd drop-in"),
-    _live("weekly_dashboard_url", "reporting/runner.py:207 → renderer.py:358"),
+    _live("weekly_dashboard_url", "reporting/runner.py:dashboard_url"),
     # ---------- 场景：diff / 仓库上下文 ----------
     _behavior("max_diff_chars", "diff_overflow",
               "commands/_common.py:partition_overflow；超出改走 overflow→patch"),
@@ -124,40 +128,40 @@ _WITNESSES: tuple[Witness, ...] = (
     _behavior("improve_keyword_paths", "priority_weights",
               "review/planner.py:priority_score 关键路径加分；全量档 real_config priority_paths"),
     _behavior("improve_skip_test_paths", "plan_filters",
-              "review/planner.py:522；测试路径过滤"),
+              "review/planner.py:cfg.improve_skip_test_paths；测试路径过滤"),
     _behavior("improve_partial_context_lines", "source_context_lines",
               "review/context.py:155；partial 上下文行数"),
     _behavior("improve_patch_context_lines", "source_context_lines",
               "review/context.py:174；patch 上下文行数"),
     _behavior("improve_max_suggestions", "suggestion_max",
-              "review/validation.py:479；全局限流"),
+              "review/validation.py:merge_chunks；全局限流"),
     _behavior("improve_max_suggestions_per_file", "suggestion_per_file_max",
-              "review/validation.py:440；单文件预算"),
+              "review/validation.py:merge_chunks；单文件预算"),
     _behavior("improve_min_suggestions_per_file", "suggestion_per_file_min",
-              "review/validation.py:441；单文件下限"),
-    _behavior("improve_min_score", "score_filter", "review/validation.py:411"),
-    _behavior("improve_min_severity", "severity_filter", "review/validation.py:388"),
+              "review/validation.py:merge_chunks；单文件下限"),
+    _behavior("improve_min_score", "score_filter", "review/validation.py:merge_chunks"),
+    _behavior("improve_min_severity", "severity_filter", "review/validation.py:merge_chunks"),
     _behavior("improve_review_mode", "plan_filters",
-              "review/planner.py:521；全量档 real_config review_mode"),
-    _behavior("improve_priority_weight_diff", "priority_weights", "review/planner.py:359"),
-    _behavior("improve_priority_weight_keyword", "priority_weights", "review/planner.py:363"),
-    _behavior("improve_priority_weight_density", "priority_weights", "review/planner.py:366"),
+              "review/planner.py:cfg.improve_review_mode；全量档 real_config review_mode"),
+    _behavior("improve_priority_weight_diff", "priority_weights", "review/planner.py:cfg.improve_priority_weight_diff"),
+    _behavior("improve_priority_weight_keyword", "priority_weights", "review/planner.py:cfg.improve_priority_weight_keyword"),
+    _behavior("improve_priority_weight_density", "priority_weights", "review/planner.py:cfg.improve_priority_weight_density"),
     _behavior("improve_priority_weight_test_feature", "priority_weights",
-              "review/planner.py:368"),
+              "review/planner.py:cfg.improve_priority_weight_test_feature"),
     _behavior("improve_test_feature_keywords", "test_feature_keywords",
               "review/policies/python.py:817"),
-    _behavior("review_exclude_extensions", "plan_filters", "review/planner.py:503"),
-    _behavior("improve_max_files_to_review", "file_count_cap", "review/planner.py:677"),
-    _behavior("improve_new_file_full", "priority_weights", "review/planner.py:371"),
+    _behavior("review_exclude_extensions", "plan_filters", "review/planner.py:cfg.review_exclude_extensions"),
+    _behavior("improve_max_files_to_review", "file_count_cap", "review/planner.py:cfg.improve_max_files_to_review"),
+    _behavior("improve_new_file_full", "priority_weights", "review/planner.py:cfg.improve_new_file_full"),
     _behavior("improve_test_sample_paths", "test_sampling",
               "review/planner.py:sample_case_files；全量档 real_config test_sampling"),
     _behavior("improve_test_sample_max", "test_sampling",
               "review/planner.py:sample_case_files；全量档 real_config test_sampling"),
-    _behavior("improve_batch_enabled", "batch_grouping", "review/planner.py:691"),
-    _behavior("improve_batch_max_diff_lines", "batch_grouping", "review/planner.py:694"),
-    _behavior("improve_batch_max_files", "batch_grouping", "review/planner.py:695"),
-    _behavior("improve_batch_max_total_lines", "batch_grouping", "review/planner.py:696"),
-    _behavior("improve_clip_diff_lines", "full_source_budget", "review/planner.py:203"),
+    _behavior("improve_batch_enabled", "batch_grouping", "review/planner.py:cfg.improve_batch_enabled"),
+    _behavior("improve_batch_max_diff_lines", "batch_grouping", "review/planner.py:cfg.improve_batch_max_diff_lines"),
+    _behavior("improve_batch_max_files", "batch_grouping", "review/planner.py:cfg.improve_batch_max_files"),
+    _behavior("improve_batch_max_total_lines", "batch_grouping", "review/planner.py:cfg.improve_batch_max_total_lines"),
+    _behavior("improve_clip_diff_lines", "full_source_budget", "review/planner.py:cfg.improve_clip_diff_lines"),
 )
 
 CATALOG: dict[str, Witness] = {w.field: w for w in _WITNESSES}
@@ -165,6 +169,111 @@ CATALOG: dict[str, Witness] = {w.field: w for w in _WITNESSES}
 BEHAVIOR_CHECKS: frozenset[str] = frozenset(
     w.check for w in _WITNESSES if w.kind == "behavior"
 )
+
+
+# ---------------------------------------------------------------------------
+# live 字段的断言绑定（防漏测护栏）
+# ---------------------------------------------------------------------------
+#
+# Why 需要这一层: behavior 类有 `BEHAVIOR_CHECKS` 双向绑定 —— 登记了但不实现
+# witness，`tests/test_config_catalog.py` 就会红。但 **live 类没有任何绑定**:
+# 新增一个 live 字段后，全量档不写任何断言，这个目录仍然全绿，
+# 整个 witness 体系的「防漏测」承诺在 live 类上是空的。
+#
+# 补法: 每个 live 字段必须落进下面两张表之一 ——
+#   LIVE_CHECKS —— 已有专属断言（全量档跑一次就能证伪该字段）
+#   LIVE_GAPS   —— 尚无专属断言，**显式记账**（含原因），不允许静默遗漏
+#
+# 契约由 `tests/test_config_catalog.py::test_live_fields_are_bound_or_accounted` 守住:
+# 新增 live 字段却既不绑定也不记账 → 测试红。
+LIVE_CHECKS: dict[str, tuple[str, ...]] = {
+    # ---------- 冷却 / 限流 / 命令链 ----------
+    "mr_cooldown_seconds": ("cooldown",),
+    "max_review_calls_per_mr": ("rate_limit",),
+    "pr_commands": ("auto_chain",),
+    "push_commands": ("push_dispatch",),
+    # ---------- 仓库规则上下文 ----------
+    "repo_context_rules_dir": ("config_real:repo_context",),
+    "review_profile_root": ("config_real:repo_context",),
+    # ---------- 场景包驱动规划 ----------
+    "review_profile": ("config_real:review_mode",),
+    # ---------- LLM ----------
+    "llm_provider": ("telemetry:review_runs",),
+    "qoder_sdk_model": ("telemetry:review_runs",),
+    # ---------- 周报 ----------
+    "weekly_dingtalk_dry_run": ("weekly_notify_gate",),
+    "weekly_collectors": ("weekly_report",),
+    "weekly_enabled": ("weekly_report",),
+    "weekly_target_project_id": ("weekly_report",),
+    "weekly_target_branch": ("weekly_report",),
+    "data_dir": ("weekly_report",),
+}
+
+#: live 字段中**尚无专属 E2E 断言**的台账（field -> 原因）。
+#: 台账只应随新断言落地而缩小，不应新增。
+LIVE_GAPS: dict[str, str] = {
+    # ---------- GitLab / webhook ----------
+    "gitlab_url": "全量档全程依赖，但没有『URL 配错会红』的专属断言",
+    "gitlab_pat": "同上：鉴权失败会中断，但没有独立的断言面",
+    "gitlab_webhook_secret": "同上：鉴权有单元测试，E2E 侧无专属断言",
+    "gitlab_bot_username": "机器人回环在真实 E2E 里不会被触发（E2E 客户端是真人账号）",
+    "gitlab_disable_bot_loop_check": "同上，且该开关默认关闭",
+    # ---------- LLM: opencode provider（本部署未启用） ----------
+    "opencode_url": "本部署 LLM_PROVIDER 非 opencode，无 live 断言面",
+    "opencode_username": "本部署 LLM_PROVIDER 非 opencode，opencode 分支从未执行",
+    "opencode_password": "本部署 LLM_PROVIDER 非 opencode，opencode 分支从未执行",
+    "opencode_model": "本部署 LLM_PROVIDER 非 opencode，opencode 分支从未执行",
+    "opencode_timeout": "本部署 LLM_PROVIDER 非 opencode，opencode 分支从未执行",
+    # ---------- LLM: qodercli fallback provider（本部署未启用） ----------
+    "qodercli_node_path": "本部署走 qoder_sdk，qodercli 仅兜底路径未触发",
+    "qodercli_js_path": "本部署走 qoder_sdk，qodercli 兜底路径未触发",
+    "qodercli_model": "本部署走 qoder_sdk，qodercli 兜底路径未触发",
+    "qodercli_timeout": "本部署走 qoder_sdk，qodercli 兜底路径未触发",
+    "qodercli_permission_mode": "本部署走 qoder_sdk，qodercli 兜底路径未触发",
+    "qodercli_max_turns": "本部署走 qoder_sdk，qodercli 兜底路径未触发",
+    "qodercli_fallback_model": "本部署走 qoder_sdk，qodercli 兜底路径未触发",
+    # ---------- LLM: qoder_sdk ----------
+    "qoder_sdk_pat": "凭证类字段，E2E 断言只能间接体现为『调用成功』",
+    "qoder_sdk_edition": "同上：edition 只决定加载哪个品牌 SDK",
+    "qoder_sdk_cli_path": "CLI 路径只在特定部署形态下生效，本机走 SDK 内置",
+    "qoder_sdk_fallback_model": "仅在主模型失败时触发，E2E 未构造该场景",
+    "qoder_sdk_timeout": "超时场景未在 E2E 构造",
+    "qoder_sdk_max_turns": "轮次上限场景未在 E2E 构造",
+    "qoder_sdk_permission_mode": "权限模式场景未在 E2E 构造",
+    "qoder_sdk_disallowed_tools": "禁用工具列表未在 E2E 验证",
+    # ---------- 队列 ----------
+    "redis_url": "队列可用性由 E2E 全流程隐式覆盖，没有独立断言面",
+    "rq_queue_name": "队列可用性由全流程隐式覆盖，无独立断言面",
+    "rq_weekly_queue_name": "周报队列未被 E2E 触发（周报走同步路径）",
+    "rq_worker_timeout": "超时场景未在 E2E 构造",
+    # ---------- 日志 ----------
+    "log_level": "日志内容未纳入 E2E 断言",
+    "log_format": "日志格式未纳入 E2E 断言",
+    "log_rotation": "轮转是时间/体积触发，E2E 难以构造",
+    # ---------- 周报 ----------
+    "weekly_notifier": "notify 实现由 weekly_notify_gate 覆盖，但 notifier 名本身未断言",
+    "weekly_dingtalk_webhook_url": "凭证类字段；真发被安全闸挡住，E2E 刻意不验证外发",
+    "weekly_dingtalk_secret": "凭证类字段；真发被安全闸挡住，E2E 刻意不验证外发",
+    "weekly_dingtalk_retry": "重试只在真发失败时触发，E2E 不做真发",
+    "weekly_md_chunk_limit": "分片数只体现在 CLI 输出的 chunks，未作为断言面",
+    "weekly_report_title": "标题未纳入 E2E 断言（周报 flow 只断言产物存在）",
+    "weekly_report_emoji": "emoji 未纳入 E2E 断言（周报 flow 只断言产物存在）",
+    "weekly_dashboard_url": "dashboard 链接未纳入 E2E 断言",
+}
+
+#: 带前缀的断言名里，允许出现的后缀全集（防拼错）。
+E2E_ASSERTION_SUFFIXES: dict[str, frozenset[str]] = {
+    "telemetry:": frozenset({
+        "mr_activity", "review_runs", "suggestions", "actions", "file_state", "api_params",
+    }),
+    "config_real:": frozenset({
+        "review_mode", "priority_paths", "full_files", "test_sampling", "repo_context",
+    }),
+    "config:": frozenset({
+        "suggestions_present", "suggestions_within_limit", "no_below_min_severity",
+        "conftest_skip_policy_respected", "rule_key_cited",
+    }),
+}
 
 # profile 段里没有消费点的键（不进 schema，因此不属于 CATALOG；单独登记以免再次漂移）。
 PROFILE_RESERVED: dict[str, str] = {
@@ -178,6 +287,7 @@ PROFILE_SECTIONS: dict[str, str] = {
     "rules": "tests/test_rules_resolver.py",
     "dynamic_rules": "tests/test_dynamic_rules.py",
     "rule_keys": "tests/test_rules_keys.py",
+    "rule_actions": "tests/test_publishing_module.py",
     "rule_key_promotions": "tests/test_rules_resolver.py::test_normalize_keys_promotion_when_any",
     "rule_overrides": "tests/test_rules_resolver.py::test_override_applies_only_severity_and_weight",
     "disable": "tests/test_rules_resolver.py::test_disable_keeps_verbatim_body_but_drops_index",

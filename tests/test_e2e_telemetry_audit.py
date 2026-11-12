@@ -59,6 +59,9 @@ def _run(**over):
         prompt_tokens=100, completion_tokens=20, total_tokens=120,
         duration_ms=60000, cost_credits=0.1, llm_provider="qodercli",
         rule_keys_cited="R-ERR,SSD-RULE-FORBIDDEN-WILDCARD-IMPORT", suggestion_count=1,
+        # E8: model = provider 实际回报; model_configured = 请求时配置 id.
+        # 二者语义已拆开, 审计器靠 model_configured 区分新旧口径（NULL = E8 之前的历史行）.
+        model_configured="deepseek/deepseek-v4-flash",
     )
     base.update(over)
     return base
@@ -71,6 +74,7 @@ def _sug(**over):
         existing_code="from app.utils import *", improved_code="from app import utils",
         header="禁止 wildcard import", severity="medium", head_sha=MR_SHA,
         rule_keys="R-ERR", state="open", severity_source="rule", score=77,
+        applicability="replace",
         posted_at="2026-11-08T10:01:20+00:00",
         created_at="2026-11-08T10:01:30+00:00", updated_at=None,
         dismissed_at=None, dismissed_by=None, dismissed_reason=None,
@@ -233,6 +237,89 @@ def test_suggestions_fail_when_improved_code_diverges_from_posted_note() -> None
     })
     ok, detail = ta.audit_suggestions(_snapshot(), expect)
     assert ok is False and "diverges" in detail
+
+
+# ---------------------------------------------------------------------------
+# applicability 三态 (replace / delete / text_only)
+# ---------------------------------------------------------------------------
+
+
+def test_suggestions_pass_for_text_only_without_suggestion_block() -> None:
+    """text_only: 空 improved_code + 正文无 suggestion 块 —— 这是合法形态.
+
+    回归: 三态落地前, 审计把「空 improved_code」一律当成删除语义,
+    要求正文必须带 suggestion 块, 于是对正确的 text_only 建议报假阳性
+    (真实 MR !3 上 2/15 条误报).
+    """
+    snap = _snapshot(suggestions=[
+        _sug(applicability="text_only", improved_code="",
+             existing_code="    state = gc_ob.gc_get_status()")
+    ])
+    expect = _expect(discussion_bodies={
+        "d1": "**[HIGH]** caller 缺 blk_id 参数\n\n> ℹ **本条为文字说明** — "
+              "无法给出可直接 Apply 的代码，请人工按上述说明修改后回复 `/adopt`。\n"
+    })
+    ok, detail = ta.audit_suggestions(snap, expect)
+    assert ok, detail
+
+
+def test_suggestions_fail_when_text_only_carries_suggestion_block() -> None:
+    """text_only 带着 suggestion 块 = 又冒出 Apply 按钮, 必须报错."""
+    snap = _snapshot(suggestions=[
+        _sug(applicability="text_only", improved_code="",
+             existing_code="    state = gc_ob.gc_get_status()")
+    ])
+    expect = _expect(discussion_bodies={
+        "d1": "```suggestion:-0+0\n    state = gc_ob.gc_get_status(blk_id)\n```"
+    })
+    ok, detail = ta.audit_suggestions(snap, expect)
+    assert ok is False and "text_only" in detail
+
+
+def test_suggestions_fail_when_text_only_carries_improved_code() -> None:
+    snap = _snapshot(suggestions=[
+        _sug(applicability="text_only", improved_code="    state = gc_ob.gc_get_status(1)",
+             existing_code="    state = gc_ob.gc_get_status()")
+    ])
+    expect = _expect(discussion_bodies={"d1": "只有文字说明，没有 suggestion 块"})
+    ok, detail = ta.audit_suggestions(snap, expect)
+    assert ok is False and "text_only" in detail
+
+
+def test_suggestions_pass_for_delete_with_suggestion_block() -> None:
+    """delete: 空 improved_code + 正文带空 suggestion 块 (Apply 即删除)."""
+    snap = _snapshot(suggestions=[
+        _sug(applicability="delete", improved_code="",
+             existing_code="GC_POLL_TIMEOUT = 300")
+    ])
+    expect = _expect(discussion_bodies={
+        "d1": "⚠️ 该建议将删除以下代码\n\n```suggestion:-0+0\n\n```\n"
+    })
+    ok, detail = ta.audit_suggestions(snap, expect)
+    assert ok, detail
+
+
+def test_suggestions_fail_when_delete_has_no_suggestion_block() -> None:
+    snap = _snapshot(suggestions=[
+        _sug(applicability="delete", improved_code="",
+             existing_code="GC_POLL_TIMEOUT = 300")
+    ])
+    expect = _expect(discussion_bodies={"d1": "建议删除这行常量"})
+    ok, detail = ta.audit_suggestions(snap, expect)
+    assert ok is False and "suggestion" in detail
+
+
+def test_suggestions_fail_when_applicability_unknown() -> None:
+    snap = _snapshot(suggestions=[_sug(applicability="whatever")])
+    ok, detail = ta.audit_suggestions(snap, _expect())
+    assert ok is False and "applicability" in detail
+
+
+def test_suggestions_allow_missing_applicability_as_replace() -> None:
+    """历史数据没有 applicability 列 —— 按 replace 处理, 不能因此报错."""
+    snap = _snapshot(suggestions=[_sug(applicability=None)])
+    ok, detail = ta.audit_suggestions(snap, _expect())
+    assert ok, detail
 
 
 # ---------------------------------------------------------------------------

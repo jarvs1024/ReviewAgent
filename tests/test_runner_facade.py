@@ -168,3 +168,57 @@ def test_facade_budget_override_reaches_runner(tmp_path, monkeypatch):
 
     assert "summary_md" in result and "suggestions" in result
     assert len(chunk_calls) == 1
+
+
+def test_failed_chunk_is_not_marked_reviewed(tmp_path, monkeypatch):
+    """LLM 失败的 chunk 不写 reviewed_file_state.
+
+    否则下一轮增量按"已检视 0 条"复用，一次 LLM 抖动就让该文件永久跳过检视。
+    """
+    from reviewagent.llm.base import LLMResult
+    import reviewagent.telemetry.store as store_mod
+
+    upserted: list[str] = []
+
+    class _Store:
+        def get_file_review_states(self, *_args):
+            return {}
+
+        def list_suggestions(self, **_kwargs):
+            return []
+
+        def upsert_file_review_state(self, **kwargs):
+            upserted.append(kwargs["file_path"])
+
+    monkeypatch.setattr(store_mod, "get_store", lambda: _Store())
+
+    def _fake_chunk(prompt, ws, fp):
+        if fp == "a.py":
+            raise RuntimeError("Control request timeout: initialize")
+        return LLMResult(
+            data={"summary_md": "", "suggestions": []},
+            prompt_tokens=1, completion_tokens=1, model="test",
+        )
+
+    cfg = dataclasses.replace(
+        current(),
+        review_exclude_extensions=(),
+        improve_batch_enabled=False,
+        improve_parallel_workers=1,
+    )
+    ctx = _ctx(
+        tmp_path,
+        diff_line_map=lambda: {"a.py": {1}, "b.py": {2}},
+        cfg=cfg,
+        split_diff=lambda diff_file, files: {fp: "+x = 1\n" for fp in files},
+        head_sha=lambda: "head-1",
+        call_chunk=_fake_chunk,
+    )
+    ctx.policy = SimpleNamespace(
+        score_suggestion=lambda s: 100,
+        test_feature_density=lambda fp, n: 0.0,
+    )
+
+    run(ctx)
+
+    assert upserted == ["b.py"]

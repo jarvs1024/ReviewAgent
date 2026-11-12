@@ -1,0 +1,25 @@
+schema_version: 1
+rules:
+  - key: DYN-CROSS-FILE-REFS
+    title: 跨文件引用
+    provider: cross_file_refs
+    enabled: true
+    empty_template: prompts/blocks/dynamic.md#cross_file_refs_empty
+    items_template: prompts/blocks/dynamic.md#cross_file_refs_refs
+    params:
+      rg_file_type: py
+      max_symbols_per_file: 15
+      max_refs_per_file: 6
+      hits_per_symbol: 2
+      timeout_seconds: 35
+      # rg -g 排除项按被检仓库工作区匹配，与 ReviewAgent 自身目录无关；
+      # 路径范围对齐 review.yaml 的 file_filter.skip_paths + 通用基础设施目录。
+      excludes:
+        - "!tests/**"
+        - "!tmp_scripts/**"
+        - "!docs/**"
+        - "!tools/**"
+        - "!.venv/**"
+        - "!**/__pycache__/**"
+        - "!.git/**"
+    limits: {max_files: 60}

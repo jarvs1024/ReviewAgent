@@ -48,7 +48,7 @@ def _review_cfg():
         improve_test_sample_paths=("testcase/",),
         improve_test_sample_max=50,
         improve_max_suggestions=20,
-        improve_min_severity="medium",
+        improve_min_severity="low",
         improve_full_files=5,
         improve_max_files_to_review=60,
     )

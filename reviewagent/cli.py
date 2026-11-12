@@ -66,7 +66,7 @@ def _load(args: argparse.Namespace, bind: bool = True) -> tuple[Any, Any]:
 
     cfg = _resolve_config()
     # `args.profile` 缺省时取本次 env 解析出的 REVIEW_PROFILE；空串交给
-    # load_profile 处理（回退 DEFAULT_PROFILE 并打 WARNING）。
+    # load_profile 处理（唯一 profile 自动选中，多个则报错要求显式指定）。
     name = args.profile if args.profile is not None else cfg.review_profile
     profile = load_profile(name, root=Path(cfg.review_profile_root))
     if bind:
@@ -292,9 +292,10 @@ def _cmd_profile_list(_args: argparse.Namespace) -> int:
         # bare shell（没 source 过 env 文件）里顺序反了会直接崩。
         if env_file.is_file():
             _source_env_file(env_file)
-        from reviewagent.scenario.profile import DEFAULT_PROFILE, available_profiles
+        from reviewagent.scenario.profile import available_profiles, default_profile_name
 
-        current = os.environ.get("REVIEW_PROFILE", "").strip() or DEFAULT_PROFILE
+        env_name = os.environ.get("REVIEW_PROFILE", "").strip()
+        current = env_name or default_profile_name(Path(_profile_root()))
         entries = available_profiles(_profile_root())
     except Exception as exc:  # noqa: BLE001 — 一行错误 + 退出码 2
         print(f"profile list failed: {exc}", file=sys.stderr)

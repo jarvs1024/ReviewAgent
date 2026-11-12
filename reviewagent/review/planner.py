@@ -36,6 +36,7 @@ from typing import Any
 
 from reviewagent.git.diff_lines import parse_diff_line_map
 from reviewagent.logging_setup import logger
+from reviewagent.review.types import FileKind
 
 # Linux MAX_ARG_STRLEN: 单个 argv 参数的字节上限 (32 pages × 4KB)。
 # qodercli 的 prompt 以位置参数传递, 编码后超此值即 OSError [Errno 7]。
@@ -127,6 +128,18 @@ def _matches_any_path(file_path: str, patterns: Sequence[str]) -> bool:
     return any(pat in file_path or name.startswith(pat.rstrip("/")) for pat in patterns)
 
 
+def _is_test_file(file_path: str, policy: Any, skip_test_patterns: Sequence[str]) -> bool:
+    """review_mode auto：优先用策略的 `classify_file`（读 profile.test_paths），
+    策略未实现时退回 `improve_skip_test_paths` 的路径匹配."""
+    classify = getattr(policy, "classify_file", None)
+    if callable(classify):
+        try:
+            return classify(file_path) in (FileKind.TEST, FileKind.FIXTURE)
+        except Exception:  # noqa: BLE001 — 策略异常不得中断规划
+            pass
+    return _matches_any_path(file_path, skip_test_patterns)
+
+
 def sample_case_files(
     all_files: list[str], patterns: tuple[str, ...], max_n: int,
 ) -> tuple[list[str], list[str]]:
@@ -153,7 +166,10 @@ def apply_file_count_cap(
     files_to_review: list[str], new_files: Collection[str], keyword_paths: Sequence[str],
     max_files: int,
 ) -> tuple[list[str], list[str]]:
-    """文件数硬上限: 必保(新增+关键路径)外的低优先级 tail 截断.
+    """文件数硬上限：任何情况下 kept 都不超过 max_files.
+
+    必保集合（新增 + 关键路径）只保证"优先保留"，不保证越过上限：必保本身
+    超过 max_files 时按既有优先级顺序截断尾部，剩余全部进 truncated。
 
     files_to_review 须已按优先级降序.
     Returns: (kept, truncated)
@@ -167,7 +183,9 @@ def apply_file_count_cap(
             kw.lstrip("/") in fp or kw in fp.lstrip("/") for kw in keyword_paths
         )
         (must if is_must else optional).append(fp)
-    budget = max(0, max_files - len(must))
+    if len(must) >= max_files:
+        return must[:max_files], must[max_files:] + optional
+    budget = max_files - len(must)
     kept_optional = optional[:budget]
     truncated = optional[budget:]
     return must + kept_optional, truncated
@@ -350,10 +368,12 @@ def priority_score(
     cfg: Any,
     test_density: float = 0.0,
     is_new: bool = False,
+    review_mode: str = "test",
 ) -> float:
     """V7 文件优先级打分（与旧 ``_priority`` 逐字同源）.
 
     信号：改动大小（log1p 不封顶）+ 关键路径 + 改动密度 + 测试特征密度 + 新增文件。
+    `review_mode="business"` 时测试特征密度不参与打分（避免业务仓库被测试权重误导）。
     """
     # 改动大小: log1p 单调递增不封顶, 大改动永远比小改动高分
     score = math.log1p(diff_size) * cfg.improve_priority_weight_diff
@@ -364,8 +384,8 @@ def priority_score(
     # 改动密度: 改动占比 > 30% → 高风险 (整文件重写级别)
     if file_size > 0 and (diff_size / file_size) > 0.3:
         score += cfg.improve_priority_weight_density
-    # 测试特征密度: test 模式生效, business 模式权重=0
-    if cfg.improve_priority_weight_test_feature > 0:
+    # 测试特征密度: 只在 test 模式计权 (business 模式即使配置了权重也不生效)
+    if review_mode == "test" and cfg.improve_priority_weight_test_feature > 0:
         score += test_density * cfg.improve_priority_weight_test_feature
     # A: 新增文件优先级加分 (自然吃满 IMPROVE_FULL_FILES 配额 → full 源码)
     if cfg.improve_new_file_full and is_new:
@@ -522,7 +542,8 @@ def plan(
     skip_test_patterns = tuple(cfg.improve_skip_test_paths)
     if review_mode == "auto":
         test_count = sum(
-            1 for fp in all_files if _matches_any_path(fp, skip_test_patterns)
+            1 for fp in all_files
+            if _is_test_file(fp, policy, skip_test_patterns)
         )
         review_mode = "test" if test_count > len(all_files) * 0.5 else "business"
         logger.info(
@@ -576,9 +597,9 @@ def plan(
         file_size = read_line_count(fp)
         file_meta[fp] = (diff_size, file_size)
 
-    # 预算测试特征密度 (test 模式下才计入权重, 但所有模式都算 — log 用)
+    # 测试特征密度仅 test 模式计算并计权（business 模式不读文件内容）
     test_density: dict[str, float] = {}
-    if cfg.improve_priority_weight_test_feature > 0:
+    if review_mode == "test" and cfg.improve_priority_weight_test_feature > 0:
         for fp in all_files:
             test_density[fp] = policy.test_feature_density(fp, file_meta[fp][1])
 
@@ -590,6 +611,7 @@ def plan(
             cfg=cfg,
             test_density=test_density.get(fp, 0.0),
             is_new=fp in news,
+            review_mode=review_mode,
         )
 
     sorted_files = sorted(all_files, key=lambda fp: priorities[fp], reverse=True)

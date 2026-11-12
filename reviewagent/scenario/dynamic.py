@@ -10,7 +10,7 @@ provider 注册与执行骨架在 `review/dynamic/`。
 加载期硬失败（配置错误必须启动即暴露）：越出 profile 目录、不支持的
 `schema_version`、未知顶层/规则字段、非法或重复的 `DYN-*` 键、以及声明的
 模板文件缺失或越出 profile 目录。模板字段 `template` / `empty_template` /
-`items_template` 均只做路径规范化并校验存在性。
+`items_template` 支持 `path#section` 引用分节模板，加载期同时校验文件与 section。
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from reviewagent.scenario.prompts import split_sections
 
 _KEY_RE = re.compile(r"^DYN-[A-Z0-9-]+$")
 _SCHEMA_VERSION = 1
@@ -81,11 +83,12 @@ def _read_mapping(path: Path) -> tuple[dict[str, Any], bytes]:
 
 
 def _template_path(raw: Any, field_name: str, root: Path) -> str | None:
-    """规范化模板路径并校验：必须存在且位于 profile 根目录内."""
+    """规范化模板引用并校验：文件存在、位于 profile 根目录内、section 存在."""
     if raw is None:
         return None
     rel = str(raw)
-    path = (root / rel).resolve()
+    path_part, _, section = rel.partition("#")
+    path = (root / path_part).resolve()
     if root not in path.parents:
         raise ValueError(
             f"dynamic rule field {field_name} escapes profile root: {rel}"
@@ -94,6 +97,12 @@ def _template_path(raw: Any, field_name: str, root: Path) -> str | None:
         raise ValueError(
             f"dynamic rule field {field_name} references missing template: {rel}"
         )
+    if section:
+        available = split_sections(path.read_text(encoding="utf-8"))
+        if section not in available:
+            raise ValueError(
+                f"dynamic rule field {field_name} references missing section: {rel}"
+            )
     return rel
 
 
