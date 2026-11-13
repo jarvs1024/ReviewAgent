@@ -7,6 +7,10 @@
 
 ### Fixed
 
+- **看板作者分布 / MR 数被 200 条窗口截断**：`/metrics/authors` 改为全表 SQL 聚合
+  （新增 `merged_count`、建议状态计数、`runs_by_command`），`/metrics/overview` 增加
+  全表 `mrs` 状态计数；TestMate 网关的作者分布与顶部 MR 卡片改为直连这两个字段，
+  不再拉 `/mrs?limit=200` 自行汇总。MR 超过 200 后统计不再少算。
 - **安全类不再误报**：`ssd-python-autotest` 场景（内网测试台上的仓库内部自动化测试代码，
   无对外攻击面）下，命令 / SQL 注入、明文凭据、越权、路径穿越、不安全反序列化、弱哈希、
   敏感信息外泄、文件权限过宽等**安全类**候选不再产出 suggestion；三方依赖未锁版本、

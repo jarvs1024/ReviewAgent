@@ -117,6 +117,35 @@ def test_metrics_authors_reports_mrs_and_runs(client):
     assert by_author["Bob@bob"]["runs"] == 1
 
 
+def test_metrics_authors_reports_suggestions_and_commands(client):
+    """全表聚合: 建议状态计数 + 每个 MR 最近一次命令, 不经过 /mrs 分页."""
+    res = client.get("/api/v1/telemetry/metrics/authors")
+    assert res.status_code == 200
+    by_author = {a["author"]: a for a in res.json()["authors"]}
+    alice = by_author["Alice@alice"]
+    assert alice["mr_count"] == 1
+    assert alice["merged_count"] == 0
+    assert alice["suggestion_total"] == 3
+    assert alice["dismissed"] == 2
+    assert alice["open"] == 1
+    assert alice["applied"] == 0
+    assert alice["adoption_rate"] == 0.0
+    assert alice["runs_by_command"] == {"improve": 1}
+    bob = by_author["Bob@bob"]
+    assert bob["suggestion_total"] == 0
+    assert bob["runs_by_command"] == {"improve": 1}
+
+
+def test_metrics_overview_reports_full_mr_counts(client):
+    res = client.get("/api/v1/telemetry/metrics/overview")
+    assert res.status_code == 200
+    mrs = res.json()["mrs"]
+    assert mrs["total"] == 2
+    assert mrs["opened"] == 2
+    assert mrs["merged"] == 0
+    assert mrs["closed"] == 0
+
+
 def test_dismissals_rule_key_filters_by_suggestion_rule_keys(client):
     res = client.get("/api/v1/telemetry/dismissals", params={"rule_key": "R-ERR"})
     assert res.status_code == 200

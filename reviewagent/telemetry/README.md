@@ -349,10 +349,10 @@
 | GET | `/mrs/{project_id}/{mr_iid}/dismissals` | MR 的 dismiss 详情 (含 `dismissed_reason`, 按 `dismissed_at DESC`) |
 | GET | `/dismissals` | dismiss 列表 (`project_id` / `mr_iid` / `rule_key` / `since` / `until` / `limit` / `offset`); 时间窗口按 `dismissed_at`; `rule_key` 匹配 `suggestions.rule_keys` CSV 中的完整键; 响应 `total` 是过滤条件整表计数 |
 | GET | `/dismissals/by-rule` | dismiss 按 `suggestions.rule_keys` 聚合 (含 `(no_rule_key)` 兜底 + 每条 rule 的 `reasons[]` 分布) |
-| GET | `/metrics/overview` | `summary` 合并 `suggestion_metrics` (state_counts / severity_counts / action_counts / adopted / dismissed / resolved / adoption_rate) |
+| GET | `/metrics/overview` | `summary` 合并 `suggestion_metrics` (state_counts / severity_counts / action_counts / adopted / dismissed / resolved / adoption_rate) 与 `mr_overview` 全表 MR 状态计数 (`mrs`: total / opened / closed / merged), 不受 `/mrs` 分页 limit 截断 |
 | GET | `/metrics/severity` | severity 维度计数 |
 | GET | `/metrics/rules` | 真实规则键维度计数: `Store.rule_key_counts` 拆分 `suggestions.rule_keys` CSV, 按 `count` 降序取 `top_n` (默认 10) |
-| GET | `/metrics/authors` | 作者维度活跃度: `mr_activity.author_sticky` 的 MR 数 (created_at 窗口) + `review_runs.actor_username` 的 run 数 (started_at 窗口), 按 run 数 / MR 数降序 |
+| GET | `/metrics/authors` | 作者维度全表聚合 (SQL group by, 不受 `/mrs` limit 截断): MR 数 / 合并数 / 建议状态计数 (total / applied / dismissed / resolved / open) / 采纳率 / `runs_by_command` (每个 MR 最近一次 run 的命令计数, 无 run 归 `(unknown)`); 另附 `runs` = `review_runs.actor_username` 触发次数, 按 `runs` / MR 数降序 |
 | GET | `/weekly-reports` | 列出 `data/weekly_reports/weekly-*.json`；`project_id` 过滤按 JSON 内容里的 `project_id` 字段；`limit` 默认 20 |
 | GET | `/weekly-reports/{name}` | 读取单个周报 JSON (防 `../` 路径穿越) |
 

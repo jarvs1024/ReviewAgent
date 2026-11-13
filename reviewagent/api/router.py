@@ -242,6 +242,8 @@ async def metrics_overview(
     s = get_store()
     result = s.summary(since=_parse_iso(since), until=_parse_iso(until))
     result["suggestions"] = s.suggestion_metrics(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))
+    # 全表 MR 状态计数: 调用方不用再拉 /mrs 分页自己数 (会被 limit 截断).
+    result["mrs"] = s.mr_overview(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))
     return result
 
 
@@ -265,15 +267,11 @@ async def metrics_rules(
 
 @router.get("/metrics/authors")
 async def metrics_authors(project_id: int | None = Query(None), since: str | None = Query(None), until: str | None = Query(None)) -> dict[str, Any]:
-    s = get_store()
-    mr_clauses, mr_params = ["1=1"], []
-    if project_id is not None:
-        mr_clauses.append("project_id = ?"); mr_params.append(project_id)
-    if since:
-        mr_clauses.append("datetime(created_at) >= datetime(?)"); mr_params.append(_parse_iso(since))
-    if until:
-        mr_clauses.append("datetime(created_at) < datetime(?)"); mr_params.append(_parse_iso(until))
+    """作者维度: 全表聚合 MR 数 / 合并数 / 建议状态 / 最近一次命令分布.
 
+    另附 `runs` = review_runs.actor_username 触发次数 (老字段, 保留兼容).
+    """
+    s = get_store()
     run_clauses, run_params = ["1=1"], []
     if project_id is not None:
         run_clauses.append("project_id = ?"); run_params.append(project_id)
@@ -282,24 +280,27 @@ async def metrics_authors(project_id: int | None = Query(None), since: str | Non
     if until:
         run_clauses.append("datetime(started_at) < datetime(?)"); run_params.append(_parse_iso(until))
 
+    merged: dict[str, dict[str, Any]] = {
+        row["author"]: dict(row)
+        for row in s.author_stats(project_id=project_id, since=_parse_iso(since), until=_parse_iso(until))
+    }
     with s._conn() as conn:  # noqa: SLF001
-        mr_rows = conn.execute(
-            "SELECT COALESCE(NULLIF(author_sticky,''),'unknown') AS author, COUNT(*) AS mrs "
-            f"FROM mr_activity WHERE {' AND '.join(mr_clauses)} GROUP BY author",
-            mr_params,
-        ).fetchall()
         run_rows = conn.execute(
             "SELECT COALESCE(NULLIF(actor_username,''),'unknown') AS author, COUNT(*) AS runs "
             f"FROM review_runs WHERE {' AND '.join(run_clauses)} GROUP BY author",
             run_params,
         ).fetchall()
-
-    merged: dict[str, dict[str, Any]] = {}
-    for row in mr_rows:
-        merged.setdefault(row["author"], {"author": row["author"], "mrs": 0, "runs": 0})["mrs"] = row["mrs"]
     for row in run_rows:
-        merged.setdefault(row["author"], {"author": row["author"], "mrs": 0, "runs": 0})["runs"] = row["runs"]
-    authors = sorted(merged.values(), key=lambda a: (-a["runs"], -a["mrs"], a["author"]))
+        slot = merged.setdefault(row["author"], {
+            "author": row["author"], "mr_count": 0, "merged_count": 0,
+            "suggestion_total": 0, "applied": 0, "dismissed": 0,
+            "resolved": 0, "open": 0, "runs_by_command": {}, "adoption_rate": 0.0,
+        })
+        slot["runs"] = int(row["runs"])
+    for slot in merged.values():
+        slot.setdefault("runs", 0)
+        slot["mrs"] = slot["mr_count"]
+    authors = sorted(merged.values(), key=lambda a: (-a["runs"], -a["mr_count"], a["author"]))
     return {"authors": authors}
 
 

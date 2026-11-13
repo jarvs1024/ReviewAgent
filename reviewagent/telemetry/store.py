@@ -1740,6 +1740,99 @@ class Store:
             "adoption_pct": round(adoption_rate * 100, 1),
         }
 
+    def author_stats(
+        self, *, project_id: int | None = None,
+        since: str | None = None, until: str | None = None,
+    ) -> list[dict]:
+        """按 MR 作者聚合: MR 数 / 合并数 / 建议状态 / 最近一次命令分布.
+
+        直接对全表 group by, 不受 /mrs 分页 limit 影响 (作者分布不再被 200 窗口截断).
+        runs_by_command 口径 = 每个 MR 最近一次 run 的命令计数; 无 run 的 MR 归 '(unknown)'.
+        """
+        clauses, params = [], []
+        if project_id is not None:
+            clauses.append("m.project_id = ?"); params.append(project_id)
+        if since:
+            clauses.append("datetime(m.created_at) >= datetime(?)"); params.append(_norm_iso(since))
+        if until:
+            clauses.append("datetime(m.created_at) < datetime(?)"); params.append(_norm_iso(until))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        author_expr = (
+            "COALESCE(NULLIF(m.author_sticky,''), NULLIF(m.author_username,''), 'unknown')"
+        )
+        with self._conn() as conn:
+            mr_rows = conn.execute(
+                f"SELECT {author_expr} AS author, COUNT(*) AS mrs, "
+                "SUM(CASE WHEN m.state = 'merged' THEN 1 ELSE 0 END) AS merged "
+                f"FROM mr_activity m{where} GROUP BY author",
+                params,
+            ).fetchall()
+            sug_rows = conn.execute(
+                "SELECT author, state, COUNT(*) AS n FROM ("
+                f"SELECT {author_expr} AS author, COALESCE(s.state,'open') AS state "
+                "FROM suggestions s JOIN mr_activity m "
+                "ON m.project_id = s.project_id AND m.mr_iid = s.mr_iid"
+                f"{where}) GROUP BY author, state",
+                params,
+            ).fetchall()
+            cmd_rows = conn.execute(
+                "WITH latest AS ("
+                "SELECT project_id, mr_iid, command, ROW_NUMBER() OVER ("
+                "PARTITION BY project_id, mr_iid "
+                "ORDER BY COALESCE(finished_at, started_at) DESC, id DESC) AS rn "
+                "FROM review_runs) "
+                f"SELECT {author_expr} AS author, "
+                "COALESCE(NULLIF(l.command,''), '(unknown)') AS command, COUNT(*) AS n "
+                "FROM mr_activity m JOIN latest l "
+                "ON l.project_id = m.project_id AND l.mr_iid = m.mr_iid AND l.rn = 1"
+                f"{where} GROUP BY author, command",
+                params,
+            ).fetchall()
+            no_run_rows = conn.execute(
+                f"SELECT {author_expr} AS author, COUNT(*) AS n FROM mr_activity m "
+                "WHERE NOT EXISTS (SELECT 1 FROM review_runs r "
+                "WHERE r.project_id = m.project_id AND r.mr_iid = m.mr_iid)"
+                + (" AND " + " AND ".join(clauses) if clauses else "")
+                + " GROUP BY author",
+                params,
+            ).fetchall()
+
+        out: dict[str, dict] = {}
+
+        def _slot(author: str) -> dict:
+            return out.setdefault(author, {
+                "author": author, "mr_count": 0, "merged_count": 0,
+                "suggestion_total": 0, "applied": 0, "dismissed": 0,
+                "resolved": 0, "open": 0,
+                "runs_by_command": {}, "adoption_rate": 0.0,
+            })
+
+        for r in mr_rows:
+            slot = _slot(r["author"])
+            slot["mr_count"] = int(r["mrs"])
+            slot["merged_count"] = int(r["merged"] or 0)
+        for r in sug_rows:
+            slot = _slot(r["author"])
+            n = int(r["n"])
+            slot["suggestion_total"] += n
+            state = r["state"]
+            if state in ("applied", "dismissed", "resolved", "open"):
+                slot[state] += n
+        for r in cmd_rows:
+            slot = _slot(r["author"])
+            slot["runs_by_command"][r["command"]] = (
+                slot["runs_by_command"].get(r["command"], 0) + int(r["n"])
+            )
+        for r in no_run_rows:
+            slot = _slot(r["author"])
+            slot["runs_by_command"]["(unknown)"] = (
+                slot["runs_by_command"].get("(unknown)", 0) + int(r["n"])
+            )
+        for slot in out.values():
+            total = slot["suggestion_total"]
+            slot["adoption_rate"] = round(slot["applied"] / total, 4) if total else 0.0
+        return sorted(out.values(), key=lambda x: (-x["mr_count"], x["author"]))
+
     @staticmethod
     def _dismissal_where(
         *, project_id=None, mr_iid=None, since=None, until=None, rule_key=None,
