@@ -432,6 +432,26 @@ GitLab 上 E2E 临时项目堆积（实测 **34 个 `deletion_scheduled`** + 4 �
 
 回归：`tests/test_cleanup_e2e_projects.py`（26 例）—— 含「命名不完全匹配就不删」「保护名单每个片段都必须生效」「p31 项目永不可删」的守卫。
 
+### 7.1d 第四轮（降噪规则包落地 + 真实业务 A/B）新发现并修复（N1–N6）
+
+> 详细证据、逐条实锤与三轮对照见 **§15**。本节只做台账索引。
+
+#### 7.1d.1 真正的缺陷修复
+
+| 编号 | 缺陷 | 实锤证据 | 修复 | 回归 |
+|---|---|---|---|---|
+| **N1** | `rules/general_rules.md:86` 残留「所有 severity 都产 suggestion」—— 与降噪边界包的 `low` 两问自检**直接矛盾**（LLM 收到两套互斥指令） | 规则包正文 + `improve.md` 交叉比对 | 改为「确有影响时所有 severity 都可产 suggestion；其中 `low` 须先通过 low 两问自检」 | `tests/test_noise_boundary_contract.py::test_general_rules_has_no_unbounded_mandate` |
+| **N2** | `prompts/improve.md` 的「一律产出 suggestion」/「每个可疑 bug 都必须有一条 suggestion」与边界包冲突 | 提示词全文比对 | 改为「每个**有影响**的问题」，并注明强制例外不受降噪影响 | 同上（`test_improve_prompt_has_no_unbounded_mandate`） |
+| **N4** | **过度降噪**：边界开启时一条**会误导**的过期注释被整条裁掉，而关闭边界的基线反而报了出来 —— 边界比基线还漏报 | 真实业务 A/B（同一份 diff，MR !5 边界开 / MR !6 边界关，head 均为 `00347d8`）：基线产出 `R-OTHER:stale_comment`，边界开启时两轮均未产出 | 根因：「仍要报」只写在不报清单的**表格单元格里**，不在模型优先读的「强制例外」清单中 → 把「会误导的过期注释」**提升为强制例外的独立条目**，并在「判定顺序」第 1 条写明「命中强制例外的候选先跳过不报清单」 | `test_misleading_comment_is_first_class_exception` + 真实业务第 3 轮复检**找回该条**（`R-OTHER:stale_comment`「注释与实现矛盾」） |
+| **N6** | **数据面**：`cohort_key` 口径迁移把 MR !4 的独立问题数从 23 修正为 30（DB 对了），但**已发布的「检视汇总」note 仍停留在旧口径 23** → 图1 与图2 对不上 | MR !4 L3 从 20/20 掉到 **16/20**（4 项全在图1 对账）；GitLab 上实际 inline 评论一直是 30 条 | 新增 `scripts/ops/refresh_overviews.py`（默认 dry-run；`--apply` 用幂等的 `publish_overview` 重刷，不触发检视） | `tests/test_refresh_overviews.py`（9 例）+ 对 p31 跑一次后 **L3 恢复 20/20** |
+
+#### 7.1d.2 覆盖补齐（实现本就正确，但此前**无测试**）
+
+| 编号 | 补齐项 | 为什么这类缺口危险 | 补法 |
+|---|---|---|---|
+| **N3** | 契约测试只查「边界文件存在」，**没查边界是否真的进了 prompt** | 装配 / 渲染环节一旦静默丢弃边界包 → 降噪完全失效，而所有文件级测试照样绿 | `test_boundary_pack_is_actually_injected_into_improve_prompt`（查 `ImproveCommand._rule_block_text()` 实际内容与位置）+ `test_low_must_pass_boundary_self_check` |
+| **N5** | 边界与「仓库自定义规则」的**相对位置**没被锁 | 顺序改坏会出现两种静默失效：边界形同虚设，或仓库规则被误裁 | `test_boundary_gates_general_rules_only`：锁死两条分支的物理位置（无仓库规则 → 边界最前；有仓库规则 → 仓库规则 → 边界 → 通用规则，且仓库规则段的「命中即产 suggestion」必须保留） |
+
 ---
 
 ### 7.2 前序缺陷（D1–D4，已修复）
@@ -492,6 +512,28 @@ cache_creation_input_tokens  = 0
 **对 ReviewAgent 的结论不变**：管道完整，`total_tokens=0` 是**上游语义**（该模型不按 token 计费），
 唯一可信计量是 `cost_credits`。E11 的断言正是按这个口径写的（credits 有值即视为「有成本信号」）。
 `total_tokens` 改 NULL 语义（待办 ②）仍然可选，但优先级已降到低 —— 因为它不改变任何决策。
+
+---
+
+### 7.1e 第五轮（安全类降噪 + 全面完整验证 2 遍）新发现并修复（N7–N10）
+
+> 详细证据、逐条实锤与两轮对照见 **§16**。本节只做台账索引。
+
+| 编号 | 缺陷 | 实锤证据 | 修复 | 回归 |
+|---|---|---|---|---|
+| **N7** | **规则键缺失**：模型偶发在 `rationale` 里不写规则前缀 → 落库 `rule_keys` 为空 → 周报「问题类型」归不了类、去重退化、无法分诊 | 真实业务 MR !7（边界开、干净单轮 16 条）L3 图2「规则键引用」15/16，1 条 `rule_keys` 为空 | 提示词侧加硬约束：`improve.md` 的 self-check 新增「`rationale` **首句以规则键开头**（`R-*` / `R-OTHER:<描述>` / `R-OTHER-IMPACT:<描述>` / 仓库规则键原样复制）；**写不出键就说明这条不该报**（不要硬凑假键）」 | `test_suggestion_rationale_must_cite_rule_key`（契约）+ 真实业务复验：MR !8（全新、同内容）**空键 0 条**、L3 **20/20** |
+| **N8** | **部署态提示词漂移**：`profiles/<profile>/prompts/improve.md` 是 agent 的 system prompt，实际由 `.qoder/agents/improve.md` 物化供给；`sync_qoder_agents.py` 按 **mtime** 增量写，**漏跑一次就静默不生效** | 实测：改完 `improve.md`（N7）未同步，部署态仍是旧版（309 行 vs profile 406 行），`grep 规则键开头` 在 `.qoder/agents/improve.md` 中 **0 命中** → N7 修好了但真实检视里不生效 | 新增 `scripts/ops/check_agent_drift.py`（按**内容**比对，不看 mtime；缺失/漂移 → 退出码 1）+ 接进 `scripts/restart_local.sh`（sync 之后立刻校验，漂移即**中止启动**）+ `sync_qoder_agents.py` 抽出 `expected_agent_text()` 作为「写盘 / 校验」共用渲染函数 | `tests/test_check_agent_drift.py`（6 例，含「mtime 更新但内容陈旧仍须报出」）+ 部署链路实测（漂移守卫已生效，`exit=0`） |
+| **N10** | **E2E 的 Apply 模拟用错范围语义**：`apply_closure` 特性按 DB 的 `target_line_end` 打补丁，而该字段存的是**新代码跨度**（`n_lines = len(improved_code)`）—— 1→N 多行替换时它比**原代码跨度**大 → 补丁**多删**原代码之外的行，把文件改坏 → `auto_detect` 认不出「已落地」→ 特性误报红 | E2E 全量档 `apply_closure` 失败（`state=open adopted_actions=0 path=synthetic-update`）。根因锚点：project 56 的同内容建议报 `L22-23`（existing 2 行 = improved 2 行 → 恰好相等）；project 57 报 `L22-25`（existing 2 行 / improved 4 行 → 差 2 行）→ 多删 2 行 | `_apply_suggestion_to_file` 改为按 **`existing_code` 的实际行数**替换 —— 这正是 GitLab 真实 Apply 的语义（`policies/python.py` 的 `n_replace = len(existing_code.splitlines()) - 1`，建议块旧侧行数）；existing 为空才退回 `target_line_end` 跨度 | `tests/test_e2e_apply_patch_range.py`（5 例，含 1→N 核心回归）+ 变异验证 + 修复后 2 轮完整验证 E2E 全量档 **32/32 / 32/32** |
+| **N9** | **并发写 MR 标题导致 telemetry 与 GitLab 漂移**：链式路径持 per-MR 锁，但 note 路径（`/describe`）走 RQ 单命令入口 **不取锁**；cooldown 只挡**入队**不挡**执行** → 排队中的 note 任务与链式任务**重叠跑** → 两个 describe 并发写标题时，「GitLab 标题」与「telemetry 标题」的**最后写入者可能不同** | 第 2 轮完整验证 E2E 全量档 **31/32**（`telemetry:mr_activity` 报红：telemetry 标题 ≠ GitLab 标题）。worker 日志实测：01:52:22 note describe（**无 `chain.lock_acquired`**）+ 01:52:24 链式 describe 并发；01:52:58 写 GitLab(T1)+回写 telemetry(T1)，01:53:00 写 GitLab(T2) → **GitLab=T2 / telemetry=T1** | 单命令入口 `run_describe` / `run_improve` 改为先取**同一把** per-MR 链锁再执行（`_run_locked`）；链式路径继续直接调 `_run_command`（锁不可重入，再取会自锁）；拿不到锁 → **拒绝执行**，不裸跑 | `tests/test_note_command_lock.py`（5 例：执行期持锁 / 超时拒绝执行 / 异常释放 / 链式路径只取一次锁）+ 变异验证（绕锁 → 3 例红）+ 修复后 2 轮完整验证 E2E 全量档 **32/32** |
+
+> **N8 的教训**：`§15` 轮验证的是「规则包（`noise_boundary.md` / `general_rules.md`）进 chunk prompt」，
+> 而 `improve.md` 走的是**另一条链路**（agent system prompt → `.qoder/agents/`）。
+> 只验证前者不足以证明「提示词改动已生效」—— 静态检查、单测、契约测试**全都不会报**。
+>
+> **N9 的教训**：`cooldown` 是**入队**闸门，不是**执行**闸门；「同一 MR 的命令串行」这件事，
+> 链式路径做到了、note 路径没做到 —— 只有把两个 sink 的写序拉齐才暴露出来。
+> 单跑一次全量档未必复现（本轮第 1 轮 32/32、第 2 轮才 31/32），
+> 这正是「完整验证连跑 2 遍」的价值。
 
 ---
 
@@ -878,3 +920,474 @@ sqlite3 -header -column data/telemetry.db \
 | reconciler 无常驻进程 | 本机 launchctl 只有 weekly —— 需确认是否加载 `scripts/com.jarvs.reviewagent.reconciler.plist` |
 | 钉钉机器人 token 建议轮换 | 2026-11-11 复验时一条未脱敏 `grep` 把它打进了会话工具输出；该 token **未入库、未进代码/文档**，但建议轮换 |
 
+
+---
+
+## 15. 第四轮验证（降噪规则包落地 + 真实业务 A/B 对照）
+
+> 触发原因：用户新增「降噪规则包」（`noise_boundary.md`），要求「加入到实际场景中进行验证，
+> 部署后进行全量验证，重点关键规则是否生效，检视效果是否理想，检视意见是否正常，
+> 数据采集是否正常，边界场景是否完善，有问题 fix」。
+>
+> 本轮做法：**同内容受控 A/B** —— 在真实业务仓库 p31 上开两份 **完全相同** 的 MR
+> （`feature/nb-verify-on-20261112` → MR !5，`feature/nb-verify-off-20261112` → MR !6，
+> 两者 head 均为 `00347d8`），一份跑「边界开启」、一份跑「边界关闭」（= `HEAD` 基线），
+> 逐条比对检视结果；随后在 MR !5 上跑完意见链路、数据采集、L3 复验，最后连跑 3 轮完整验证。
+
+### 15.1 降噪包落地核实（接线 / 装配顺序 / 注入位置）
+
+| 项 | 核实结论 |
+|---|---|
+| 规则包文件 | `profiles/ssd-python-autotest/rules/noise_boundary.md`（frontmatter `priority: 900` / `render: verbatim` / `applies_to.languages: [python]`） |
+| 接线 | `profile.yaml` → `rules: [rules/noise_boundary.md, rules/general_rules.md]` |
+| 装配顺序（实测 `assemble_base().sources`） | `noise_boundary.md → general_rules.md` ✅（900 > 800，按 priority 降序） |
+| `verbatim_body` 内位置（实测） | `⛔ 检视边界` @4 → `🟡 优先 3 通用规则` @1550 → 规则表 @2549 |
+| `rules_general` 分支（无仓库规则） | 边界在**最前**（@4） |
+| `rules_repo` 分支（有仓库规则） | 仓库规则 @0 → **边界 @474** → 通用规则 @2020；仓库规则段「命中即产 suggestion」原样保留 |
+| chunk prompt 全文位置 | 优先1 跨文件 @5 → 优先2 仓库规则 @38 → **边界 @512** → 优先3 通用规则 @2058 |
+
+**结论**：边界包**物理位置**落在「跨文件影响」「仓库自定义规则」之后、「通用规则」之前 —— 与它
+「只裁剪通用 / 风格层、强制例外优先」的语义完全自洽（强制例外被排在边界之前，模型先读到它们）。
+
+### 15.2 本轮修复清单（详见 §7.1c）
+
+| 编号 | 类型 | 内容 | 落地 |
+|---|---|---|---|
+| **N1** | 真缺陷（提示词自相矛盾） | `rules/general_rules.md:86` 残留「所有 severity 都产 suggestion」——与边界包的 `low` 两问自检**直接矛盾** | 改为「确有影响时所有 severity 都可产 suggestion；其中 `low` 须先通过 low 两问自检」 |
+| **N2** | 真缺陷（提示词自相矛盾） | `prompts/improve.md` 的「一律产出 suggestion」/「每个可疑 bug 都必须有一条 suggestion」与边界包冲突 | 改为「每个**有影响**的问题」，并注明「属强制例外，不受降噪影响」 |
+| **N3** | 覆盖补齐 | 契约测试只查「文件存在」，**没查边界是否真的进了 prompt** | `test_boundary_pack_is_actually_injected_into_improve_prompt` + `test_general_rules_has_no_unbounded_mandate` + `test_low_must_pass_boundary_self_check`（5 例 → 8 例） |
+| **N4** | 真缺陷（**过度降噪**，本轮 A/B 实测发现） | 边界开启时一条**会误导**的过期注释被整条裁掉，而关闭边界的基线反而报了出来 → 边界比基线还漏报 | 根因：「仍要报」只写在不报清单的**表格单元格里**，不在模型优先读的「强制例外」清单中 → 把 `R-OTHER:stale_comment`（会误导）**提升为强制例外的独立条目**，并在「判定顺序」第 1 条写明「命中强制例外的候选先跳过不报清单」；同步新增契约测试 `test_misleading_comment_is_first_class_exception` |
+| **N5** | 覆盖补齐 | 装配环节静默丢弃边界包时，所有文件级契约测试照样绿 | `test_boundary_gates_general_rules_only` 锁死两条分支的物理位置关系（仓库规则 → 边界 → 通用规则） |
+| **N6** | 真缺陷（**数据面**：迁移后汇总口径滞后） | `cohort_key` 口径迁移把 MR !4 的独立问题数从 23 修正为 30（DB 对了），但**已发布的「检视汇总」note 仍停留在旧口径 23** → 图1 与图2 对不上，L3 掉到 16/20 | 新增 `scripts/ops/refresh_overviews.py`（默认 dry-run，`--apply` 幂等重刷）+ `tests/test_refresh_overviews.py`（9 例）；对 p31 跑一次后 **L3 恢复 20/20**（详见 §15.8） |
+
+> **N4 的修复有真实业务实证**：修复后第 3 轮检视（同一份 diff）把该条找回来了
+> —— `R-OTHER:stale_comment`「注释与实现矛盾」（`gc_probe.py:48`，low），
+> 理由「注释称返回值是『布尔标识』，但实现返回 `disk.gc_state`，按注释使用会把任意非空字符串当作 True」。
+
+### 15.3 真实业务 A/B：同一份 diff，边界开 vs 边界关
+
+样本：`testlib/lib_baw/gc_probe.py`（新增）+ `testcase/test_gc/test_gc_noise_probe.py`（新增），
+覆盖 仓库规则命中 / 强制例外 / 各类噪音样本；两份 MR 内容**逐字节相同**（head `00347d8`）。
+
+| 发现类别 | 边界开 MR !5 | 边界关 MR !6 | 差异解读 |
+|---|---|---|---|
+| 仓库自定义规则 `SSD-RULE-*` | 9 | 4 | 边界把「仓库规则明确要求」写进强制例外 → **召回 +5**（allure 字段 / 用例 docstring / 硬编码超时 / 裸 print / 分层隔离） |
+| 跨文件 caller 失配 `R-OTHER-IMPACT:*` | 11 | 7 | 强制例外 → **+4** |
+| 安全：命令注入 `R-SHELL` | 2 | 0 | **基线完全漏掉命令注入**；边界把「安全漏洞」写成强制例外后被拉回 |
+| 假通过 / 假失败（真问题） | 4 | 1 | 边界开的 4 条全是真问题（必然假失败 / 异常断言过宽 / 吞异常 / 无效断言） |
+| 断言消息 / 断言强度（`R-ASSERT` 低价值） | 0 | 3 | 边界裁掉；其中「`None != ""` 造成假通过」那条在 **N4 修复后的第 3 轮**被强制例外拉回 |
+| 硬编码临时路径 `R-TMP` | 1 | 1 | 一致 |
+| 标识符拼写 `R-OTHER:typo`（low） | 1 | 1 | 一致 —— **low 两问自检没有把标识符拼写误杀** |
+| 会误导的过期注释（low） | 1 | 1 | **修复前边界开 = 0**（N4），修复后与基线一致 |
+| 死代码 `R-OTHER:dead_code`（low） | 1 | 1 | 一致 |
+| 缺导入 `R-OTHER:missing_import` | 1 | 0 | 边界开补回 |
+| **合计** | **30** | **19** | **噪音更少 + 信号更多** |
+
+> 计数说明：MR !5 的 30 条来自 4 轮 improve（第 4 轮是 `/adopt` 触发的自动复检）；
+> 其中 `gc_probe.py:78` 一条同时引用 `SSD-RULE-LIB-LAYER-ISOLATION` 与 `R-SHELL`，分类表里跨两类各计一次。
+
+**降噪效果判定**：
+- **噪音被裁掉**：基线里的 3 条「断言补 msg / 断言强度不足」类低价值建议，边界开启后 0 条；
+- **信号被加强**：命令注入（安全）、3 条仓库规则、缺导入、4 条 caller 失配在基线里**没有**或更少，
+  边界开启后全部补齐；
+- **没有误伤信号**：边界开启后的 30 条里，**纯文本措辞 / 等价改写 / 泛化建议 / 命名口味 = 0 条**；
+- **唯一的过度降噪（会误导的注释）已修复并复验通过**。
+
+### 15.4 边界场景矩阵（逐项核对）
+
+> ⚠️ **口径已于第五轮变更（2026-11-13）**：本表「强制例外：命令注入（安全）」一行按**当时**口径
+> 记为「报」。第五轮起，**安全类在本场景不报**（内网测试台内部代码，无外部攻击面），
+> `R-SHELL` 已从强制例外移入不报清单 —— 该行与 §15.3 的「安全：命令注入」行属**历史口径**，
+> 保留原样以免篡改历史记录；**现行口径见 §16.3**。
+> 硬件数据类（`R-DATA` / `R-NVME`）与仓库自定义规则**任何时候都不受降噪影响**。
+
+| 场景 | 期望 | 实测 | 结论 |
+|---|---|---|---|
+| 仓库规则：测试函数缺 allure 字段 | 报 | ✅ `SSD-RULE-CASE-ALLURE-FIELDS`「缺失 allure 字段」 | 通过 |
+| 仓库规则：用例 docstring 缺必须段 | 报 | ✅ `SSD-RULE-CASE-DESCRIPTION`「补齐用例 docstring」 | 通过 |
+| 仓库规则：裸 print | 报 | ✅ `SSD-RULE-COMMON-NO-BARE-PRINT` | 通过 |
+| 仓库规则：硬编码超时 / 临时路径 | 报 | ✅ `SSD-RULE-COMMON-NO-HARDCODED-CONFIG`、`R-TMP` | 通过 |
+| 仓库规则：BAW 跳层 | 报 | ✅ `SSD-RULE-LIB-LAYER-ISOLATION` | 通过 |
+| 强制例外：命令注入（安全） | 报 | ✅ `R-SHELL`（**基线未报**） | 通过 |
+| 强制例外：裸 except 吞异常 | 报 | ✅ `R-ERR` + `SSD-RULE-COMMON-NO-LOG-EXC` | 通过 |
+| 强制例外：假通过（`None != ""`） | 报 | ✅ `R-ASSERT`「修复无效断言」 | 通过 |
+| 强制例外：假失败（枚举与字符串比较） | 报 | ✅ `R-OTHER:false_failure` / `R-OTHER-IMPACT:type_contract` | 通过 |
+| 强制例外：caller 失配（方法 / 属性 / 接口缺失） | 报 | ✅ `R-OTHER-IMPACT:missing_method` / `missing_attribute` / `missing_api` / `schema_drift` | 通过 |
+| low 两问自检：标识符拼写 | 报（两问都能答上） | ✅ `R-OTHER:typo`（low） | 通过 |
+| low 两问自检：会误导的过期注释 | 报（修复后） | ✅ `R-OTHER:stale_comment`（low，N4 修复后） | 通过 |
+| 噪音：纯文本措辞 / 注释拼写 | 不报 | ✅ 0 条 | 通过 |
+| 噪音：等价改写（`total = total + x` / `if-else` 返回布尔） | 不报 | ✅ 0 条 | 通过 |
+| 噪音：泛化建议（建议补测试 / 加类型注解） | 不报 | ✅ 0 条 | 通过 |
+| 噪音：命名口味 | 不报 | ✅ 0 条 | 通过 |
+| 噪音：描述类（MR 标题 / 描述本身） | 不报 | ✅ 0 条 | 通过 |
+
+### 15.5 检视意见链路（/adopt / /dismiss）
+
+| 步骤 | 结果 |
+|---|---|
+| 机器人发汇总 note | ✅ 「## 改进总览 V1/V2」+「## 检视汇总」表（严重度 × 待处理/已采纳/已忽略/已关闭） |
+| inline 评论 | ✅ 30 条全部落地，锚点行号与 diff 一致 |
+| `/adopt`（未改代码） | ✅ 机器人回复「未检测到这条建议对应位置的代码修改，暂不能标记为手工采纳」并记 `validation_status=same-head`（**设计行为**：要求先提交对应位置的修改） |
+| `/adopt`（先改代码再采纳） | ✅ `state=applied`、`applied_at` 落库、`adoption_source=adopt_command`、机器人回复「✅ 已采纳建议 (检测到目标行有修改)」 |
+| `/dismiss` | ✅ `state=dismissed`、`dismissed_at` 落库 |
+| `/adopt` 自动复检 | ✅ 触发第 4 轮 improve（`review_runs.id=264`），新发现 2 条并入汇总 |
+| 图1 / 图2 一致性 | ✅ L3 复验 **20/20 通过**（见 §15.6） |
+
+### 15.6 数据采集核对（MR !5）
+
+| 采集项 | 结果 |
+|---|---|
+| `review_runs` | ✅ 6 条运行记录：`command` / `status` / `started_at` / `finished_at` / `model` / `model_configured` / `llm_provider` / `rule_keys_cited` / `suggestion_count` / `cost_credits` / `duration_ms` 全部落库 |
+| `suggestions` | ✅ 30 行；`severity`（high 22 / medium 5 / low 3）、`state`（open 27 / applied 1 / dismissed 2）、`rule_keys`（19 个不同键）、`label`（security / potential bug / cross-file impact / code quality）、`severity_source=rule` 全部落库 |
+| applicability 三态 | ✅ `replace 18 / text_only 11 / delete 1`，取值合法且与正文形态一致 |
+| `suggestion_actions` | ✅ 4 条动作行（adopted ×2 / dismissed ×2），含 `actor_username` / `reason` / `validation_status` / `head_sha_posted` / `head_sha_current` |
+| 规则键引用可追溯 | ✅ L3「图2-规则键引用」**30/30 通过**（每条 suggestion 的 `rule_keys` 都能在评论正文里找到） |
+| 图1 汇总 ↔ DB | ✅ 总数 30 / 采纳率 3.3% / HIGH 20·1·1·0·22 / MEDIUM 0·0·0·5 / LOW 2·0·1·0·3 —— 与 DB **逐格相等** |
+| 图2 ↔ GitLab | ✅ 30 条 1:1（无缺失 / 无多余），resolve 状态零不一致，同 head 行号锚点严格相等 |
+
+### 15.7 本轮的配置护栏发现（O 编号）
+
+| 编号 | 说明 | 处置 |
+|---|---|---|
+| **O6** | **单文件建议上限（默认 5 条/文件）会掩盖后续候选** —— 首轮检视实测 `per_file_limit max_per_file=5 truncated=5`，第 6 条起只进汇总不落库，导致「硬编码路径」「会误导注释」两条真实问题**看不到** | 测边界效果时必须临时解除上限（本轮用 `IMPROVE_MAX_SUGGESTIONS_PER_FILE=50` + `IMPROVE_MAX_SUGGESTIONS=100`，**验证结束后已回滚**，生产默认仍是 5 / 15） |
+| **O7** | token 计数仍恒为 0 —— 上游 usage 回填 0 值（沿用 §14 E5/E6 结论，非本轮引入） | 记录，不处理 |
+| **O8** | `instance.env` 新增变量**必须**同步进 `tests/conftest.py::_DEPLOY_ENV_KEYS`，否则 `test_deploy_env_keys_cover_instance_env` 会红 —— 本轮临时加上限变量时**实测触发**了该护栏 | 临时变量已回滚，回归恢复全绿 |
+
+### 15.8 本轮新发现的**数据面缺陷**（N6）—— 迁移后汇总口径滞后，已修
+
+**现象**：本轮重启服务后，`telemetry.store` 的 `cohort_key` 口径迁移
+（`PRAGMA user_version=1`，新算法 = file+header+**内容指纹**）首次在本机执行，
+把 p31 MR !4 的历史建议从 **23 个 cohort 重新分成 30 个** —— 这本身是**修正**：
+旧算法（file+header）会把「同文件、同标题、不同位置」的独立问题误并成一条，
+导致**汇总少算 7 条、采纳率虚高**（迁移注释里写明的正是这个 bug）。
+
+**但迁移只回填 DB，不会回头刷新已经发布在 GitLab 上的「## 检视汇总」note**
+→ MR !4 出现「图1 汇总 = 23」而「图2 实际 inline 评论 = 30」的不一致，
+L3 复验从 20/20 掉到 **16/20**（4 项全在图1 对账）。
+
+**修复**：
+1. 新增运维脚本 `scripts/ops/refresh_overviews.py` —— 默认 `--dry-run` 只报告
+   「DB 口径 ≠ 已发布口径」的 MR，`--apply` 才用 `publish_overview`（幂等的
+   find/update 型）重刷汇总正文；**不触发任何检视**（不调 LLM）；
+2. 对 p31 跑了一次：`MR !4: DB=30 已发布=23 → 已重刷（note 1228）`，
+   重刷后 **L3 恢复 20/20**（图1 总数 30 / 采纳率 6.7% / HIGH 25·1·0·0·26 / 总计 27·2·1·0·30 与 DB 逐格相等）；
+3. 新增测试 `tests/test_refresh_overviews.py`（9 例，锁住解析与判定逻辑 + 锚点一致性）。
+
+> ⚠️ **口径变更提示**：MR !4 的「总建议数」由 23 变为 30、采纳率由 8.7% 变为 6.7%，
+> 是**迁移修正后的正确口径**（图2 与 GitLab 一直是 30 条 1:1）。
+> §12 / §14 里记录的 23 / 8.7% 是**迁移前**的旧口径历史值，保留原样以免篡改历史记录。
+
+### 15.9 本轮回归基线（3 轮完整验证用同一脚本）
+
+| 项 | 值 |
+|---|---|
+| L1 单元回归 | **1686 passed / 0 failed / 3 skipped**（HEAD 基线 1436 → 净增 **+250**；本轮新增 11 例：契约 5 例 + 运维脚本 9 例，另含上一轮 E 轮次用例） |
+| 场景包指纹 | `08cced18342641ffa2a7301f04ada8d343eef5d1366ad7a07317d9dace37c91b`（含降噪边界包 + N4 修复后的规则正文） |
+| 服务健康 | `/readyz` → `{"status":"ok","profile":"ssd-python-autotest"}`；磁盘/运行态指纹一致（`stack._check_profile_freshness()` → True） |
+| 配置护栏 | 临时验证用的建议上限覆盖**已回滚**，`config/instance.env` 恢复生产默认（单文件 5 / 总数 15） |
+
+### 15.10 三轮逐项对照（同一脚本 `/tmp/verify_round.py <n>` 连跑 3 遍）
+
+| 指标 | 第 1 轮 | 第 2 轮 | 第 3 轮 | 一致性 |
+|---|---|---|---|---|
+| 服务健康 / 指纹 | ✅ `08cced18342641ff` | ✅ `08cced18342641ff` | ✅ `08cced18342641ff` | ✅ 一致 |
+| L1 passed | 1686 | 1686 | 1686 | ✅ 一致 |
+| L1 failed | 0 | 0 | 0 | ✅ 一致 |
+| L1 skipped | 3 | 3 | 3 | ✅ 一致 |
+| L1 失败集合 | 无 | 无 | 无 | ✅ 一致 |
+| L2 快速档 | 21/21 | 21/21 | 21/21 | ✅ 一致 |
+| L2 全量档 | 32/32 | 32/32 | 32/32 | ✅ 一致 |
+| L2 全量档失败项 | 无 | 无 | 无 | ✅ 一致 |
+| L3 MR !3 | 19/20 | 19/20 | 19/20 | ✅ 一致 |
+| L3 MR !3 未过项 | 图2-旧head建议锚点在当前head仍可定位 | 同左 | 同左 | ✅ 一致（O2 产品口径，非缺陷） |
+| L3 MR !4 | 20/20 | 20/20 | 20/20 | ✅ 一致 |
+| MR !3 三态分布 | {'replace': 12, 'delete': 1, 'text_only': 2} | 同左 | 同左 | ✅ 一致 |
+| MR !4 三态分布 | {'replace': 24, 'delete': 3, 'text_only': 3} | 同左 | 同左 | ✅ 一致 |
+| MR !4 严重度分布 | {'high': 26, 'medium': 3, 'low': 1} | 同左 | 同左 | ✅ 一致 |
+| 文档数字自检 | ✅ 26/26 | ✅ 26/26 | ✅ 26/26 | ✅ 一致 |
+| 全量档报告 | report-20261112T162426Z.json | report-20261112T163648Z.json | report-20261112T164821Z.json | ⚠️ 文件名差异（时间戳） |
+| 单轮耗时(s) | L1 241.0 / fast 0.5 / full 505.8 | L1 197.7 / fast 0.5 / full 491.6 | L1 197.7 / fast 0.5 / full 434.9 | ⚠️ 有差异（耗时） |
+
+**统一签名** `(L1 passed, failed, skipped, 失败集合, fast passed/total, full passed/total, L3 mr3, L3 mr4)
+= (1686, 0, 3, (), 21, 21, 32, 32, 19, 20)` —— 三轮**完全一致** → 结论**可复现，无偶发**。
+
+> 与 §14 的差异说明：L1 基线由 1655 → **1686**（本轮新增 11 例契约测试 + 上一轮 E 轮次用例）；
+> MR !4 的总数由 23 → **30**、三态与严重度分布同步变化 —— 原因见 §15.8（cohort 口径迁移修正）。
+
+### 15.11 本轮结论
+
+1. **降噪规则包已真实生效**：装配顺序 `noise_boundary → general_rules` 实测正确，边界包真实进入
+   chunk / batch prompt（契约测试 + 位置实测双重锁定）。
+2. **检视效果理想**：同一份 diff 的受控 A/B 显示 —— 边界开启后**噪音被裁**（断言消息/强度类 3 条 → 0，
+   纯文本措辞 / 等价改写 / 泛化建议 / 命名口味全为 0），同时**信号变多**（仓库规则 +5、caller 失配 +4、
+   补回基线完全漏掉的**命令注入**安全问题）。
+3. **仓库自定义规则不受降噪影响**：allure 字段 / 用例 docstring / 裸 print / 硬编码 / 分层隔离
+   全部照常产出（9 条）。
+4. **检视意见正常**：汇总 note（V1/V2）+ inline 评论 + `/adopt`（含「先改代码再采纳」两段式）+
+   `/dismiss` + 自动复检 全链路打通，L3 **20/20**。
+5. **数据采集正常**：`review_runs` / `suggestions` / `suggestion_actions` 三张表字段齐全，
+   applicability 三态合法，规则键引用 30/30 可追溯，图1 ↔ DB ↔ GitLab 三方逐格相等。
+6. **发现并修掉 6 个问题**（N1–N6），其中 **N4（过度降噪导致漏报会误导注释）** 与
+   **N6（迁移后历史汇总口径滞后）** 都是**只有跑真实业务 A/B 才会暴露**的问题 ——
+   纯静态检查和单测都发现不了。
+
+---
+
+## 16. 第五轮验证（安全类降噪 + 全面完整验证 2 遍）
+
+> 触发原因：用户指出「检视对象是**仓库内部的自动化测试代码**（跑在内网测试台，无外部攻击面），
+> 类似什么注入、安全等问题不需要关注；还有其他常规检视类似这类安全等在这个场景包也需要降噪，
+> 看看还有哪些可以放降噪里面，**优化后全面完整验证全部点 2 遍，有问题 fix**」。
+>
+> 本轮分两件事：
+> 1. **口径变更**——把「安全类」与「依赖与环境」纳入降噪包的不报清单，并全面对齐提示词与规则包；
+> 2. **全面完整验证 2 遍**——同一个完整验证脚本（L1 + E2E fast/full + L3 + 文档自检）连跑 2 遍，
+>    要求两轮**签名完全一致**，且过程中发现的问题当场修复。
+
+### 16.1 口径变更：本场景「不报」的范围
+
+场景前提（写入 `noise_boundary.md` 顶部，作为本节全部裁剪的依据）：
+
+> 被检对象是**仓库内部自动化测试代码**（`testcase/` / `testlib/` / `test_components/` / 测试
+> fixture），运行在**内网测试台**上、由流水线调度，既不对外提供服务，也不处理外部用户输入。
+> 因此「面向生产服务的安全加固」类检查在本场景**没有可执行的后果**，一律不报。
+
+| 类别 | 本轮新增的「不报」 | 仍要报的例外 |
+|---|---|---|
+| 安全类 | 命令 / SQL 注入、`shell=True` 拼接外部入参、明文凭据（口令 / token / 私钥写死在代码里）、越权、路径穿越、不安全反序列化（`pickle` / `eval`）、弱哈希 / 非密码学随机、敏感信息打到日志、文件权限过宽 | ——（本场景无对外攻击面，无例外） |
+| 依赖与环境 | 三方依赖未锁定版本；强绑系统独有命令而无多系统兼容兜底 | 可选依赖 `import` 失败导致用例无法执行；环境不兼容导致整批用例挂掉 |
+
+**明确不降噪的部分**（防止「安全类一刀切」误伤硬件数据面）：
+
+- `R-DATA` / `R-NVME`（下发载荷 / LBA 地址 / 扇区长度的值域与对齐校验）**仍要照常报** ——
+  这类问题会造成**硬件损坏 / 数据错误**，不是「安全加固」，后果可执行；
+- 数据损坏、硬件损坏、用例假通过假失败、断言被吞、资源泄漏 / 僵尸进程 / 并发无隔离、
+  `R-OTHER-IMPACT:*` caller 失配、会误导的过期注释、仓库自定义规则 —— **全部保留为强制例外**。
+
+> ⚠️ **残留风险（用户明确决策，已知悉）**：降噪后，仓库历史代码里**真实存在**的硬编码 SSH 口令
+> （`testlib/lib_baw/gc_operation.py`）不再由检视兜底。本场景无外部攻击面，该决策可接受；
+> 但若将来这套代码被挪到有外部访问面的环境，需要重新评估。
+
+### 16.2 改动落地（提示词 / 规则包 / 接线）
+
+| 文件 | 改动 |
+|---|---|
+| `rules/noise_boundary.md` | 新增「场景前提」段；不报清单新增「安全类」「依赖与环境」两行；强制例外**删掉**「安全漏洞（命令 / SQL 注入、明文凭据、越权）」并改写为「数据损坏、硬件损坏…」；新增「安全类不报 ≠ 硬件数据类不报」提示；「与正向规则的关系」明确 `R-SHELL` 不产出 |
+| `prompts/improve.md` | 降噪段重写（优先级去掉「安全」、默认不报加安全类与依赖项、仍要报改为「数据 / 硬件 / 假通过假失败」+ caller 失配）；强制要求段拆出「安全类例外」；**删除** eval / pickle / MD5 跳过理由；锚点示例由 shell 注入改为硬编码 `/tmp` 路径；`R-SHELL` 标签示例替换；self-check 新增「首句以规则键开头」（N7） |
+| `rules/general_rules.md` | 严重度口径删「命令注入」；新增「本场景不报」小节（`R-SHELL` / 兜底安全类 / `R-DEP` 两项）；规则表 `R-SHELL` 行的类别列标注「**本场景不报**」；硬件数据类仍要报的提示 |
+| `tests/test_noise_boundary_contract.py` | 契约 **5 → 15 例**：新增「安全类在不报清单」「安全不得在强制例外」「general_rules 声明 `R-SHELL` 不报」「improve.md 与边界口径一致」「rationale 必须以规则键开头」等 |
+| `scripts/ops/check_agent_drift.py` + `scripts/sync_qoder_agents.py` + `scripts/restart_local.sh` | N8 漂移守卫（见 §7.1e） |
+| `tests/test_check_agent_drift.py` | 新增 6 例 |
+
+**checksum / golden 同步**：改动只涉及规则正文与提示词正文 → 规则正文基线（`VERBATIM` sha
+`e77f5eaf9ae380d1…`、`general_rules.md` 体量 7580 / 14262 字节 / sha `2d0c3fbbefb54e21…`）
+与 4 处 VERBATIM 基线、`test_rules_parser` 体量/sha、`test_planner` / `test_rule_checksum` /
+`test_rules_repo` / `test_rules_resolver` 基线**均已同步且实测一致**；
+golden 提示词 6 个文件 + `manifest.json` 全量重生成。
+
+### 16.3 边界场景矩阵（第 5 遍口径，真实业务逐条核对）
+
+样本：真实业务仓库 p31 的 `testlib/lib_baw/gc_probe.py` + `testcase/test_gc/test_gc_noise_probe.py`
+（含**明文凭据样本** `connect_gc_console`：`SSHClient("10.20.65.25","22","root","dml@lab123456")`）。
+
+| 场景 | 期望 | 实测 | 结论 |
+|---|---|---|---|
+| 安全：明文凭据写死 | **不报** | ✅ **0 条**（样本行完全未产出 finding） | 通过 |
+| 安全：命令注入（`subprocess` 拼串 / `shell=True`） | **不报** | ✅ **0 条** `R-SHELL`；同一行改报**真实的仓库规则问题** `SSD-RULE-LIB-LAYER-ISOLATION`（分层越界） | 通过 |
+| 依赖：未锁版本 / 多系统兼容兜底 | **不报** | ✅ 0 条 | 通过 |
+| 硬件数据面：`R-DATA` / `R-NVME` | **仍要报** | ✅ 保留在强制例外清单与规则表提示中 | 通过 |
+| 强制例外：假通过（吞异常 → 恒 True） | 报 | ✅ `R-ERR`「修复假通过」 | 通过 |
+| 强制例外：假失败（异常断言过宽） | 报 | ✅ `R-RAISE`「收窄异常断言」 | 通过 |
+| 强制例外：caller 失配（方法 / 属性 / 类型契约） | 报 | ✅ `R-OTHER-IMPACT:schema_drift` ×2、`type_mismatch` | 通过 |
+| 仓库自定义规则 | 报 | ✅ `SSD-RULE-CASE-ALLURE-FIELDS` + `SSD-RULE-CASE-DESCRIPTION`、`SSD-RULE-LIB-LAYER-ISOLATION`、`SSD-RULE-COMMON-NO-HARDCODED-CONFIG` | 通过 |
+| 会误导的过期注释（low） | 报 | ✅ `R-OTHER:stale_comment`（low） | 通过 |
+| 噪音：纯文本 / 等价改写 / 泛化建议 / 命名口味 | 不报 | ✅ 0 条 | 通过 |
+| 未分类（需人工判读） | 0 | ✅ 0 条 | 通过 |
+
+**判定**：`/tmp/nb_security_check.py 8` → **PASS**（安全类 0 / 噪音类 0 / 未分类 0 / 信号类 10）。
+
+### 16.4 N7 复验：规则键缺失（全新 MR、干净单轮）
+
+| 项 | MR !7（N7 修复**前**） | MR !8（N7 修复**后**，全新 MR、同内容 `5cfb096`） |
+|---|---|---|
+| 检视轮次 | 干净单轮 | 干净单轮 |
+| 落库建议 | 16 条 | 10 条（生产上限 5/文件、15/总数生效） |
+| **`rule_keys` 为空** | **1 条** | **0 条** ✅ |
+| L3「图2-规则键引用」 | 15/16 | **11/11 逐键通过** ✅ |
+| L3 合计 | 19/20 | **20/20** ✅ |
+
+> MR !8 的 10 条建议里含 **1 条双键建议**（`SSD-RULE-CASE-ALLURE-FIELDS` +
+> `SSD-RULE-CASE-DESCRIPTION`，落库为逗号分隔串）—— 见 §16.6「校验口径加固」。
+
+### 16.5 N8 修复：部署态提示词漂移（静默不生效）
+
+**现象**：`improve.md` 改完（406 行）但 `.qoder/agents/improve.md` 仍是旧版（309 行）——
+`grep 规则键开头` 在部署态 **0 命中** → N7 的修复在真实检视里**根本没生效**。
+
+**为什么前面的验证没发现**：§15 轮验证的是「**规则包**进 chunk prompt」（`noise_boundary.md` /
+`general_rules.md` 走 `review/assembly.py` 现场装配），而 `improve.md` 走的是**另一条链路**
+（agent system prompt → `sync_qoder_agents.py` → `.qoder/agents/*.md` → ACP server 启动时读入）。
+静态检查、单测、契约测试**一条都不会报**。
+
+**修复**：
+1. `scripts/sync_qoder_agents.py` 抽出 `expected_agent_text(src)` —— 「写盘」与「校验」共用同一渲染函数
+   （避免守卫自己算出一份不同的期望值）；
+2. 新增 `scripts/ops/check_agent_drift.py` —— 按**内容**比对（**不看 mtime**，因为
+   `sync_qoder_agents.py` 的增量写就是按 mtime 判定的，用 mtime 比对等于没比）；
+   缺失 / 内容漂移 → 退出码 1；部署目录里的多余文件（历史遗留 `improve_agent.md`）只报 warning；
+3. 接进 `scripts/restart_local.sh` —— sync 之后立刻校验，**漂移即中止启动**，
+   绝不允许带着旧 system prompt 起 worker。
+
+**实测**：`check_agent_drift.py` → `exit=0`（1 warning = 历史遗留 `improve_agent.md`）；
+`restart_local.sh` 启动日志已包含该校验步骤。
+
+### 16.6 校验口径加固：L3「规则键引用」逐键核对
+
+核对 MR !8 时发现：落库的 `rule_keys` 列存的是**逗号分隔字符串**
+（`store.record_suggestion` 用 `",".join(rule_keys)`），而 L3 的「图2-规则键引用」检查
+**只取逗号串里的第一个键**去正文里找 → 多键建议的**第二个键从未被核对过**。
+
+- 已把该检查改为**逐键核对**（每个逗号分隔片段都要在正文里出现）；
+- 加固后重跑：MR !5 **33/33 键通过**（31 条建议）、MR !6 **20/20**、MR !7 **16/16**、
+  MR !8 **11/11** —— 全部通过，**没有发现新的规则键失配**；
+- 结论：**「模型把两个键塞进一个数组元素」是假象** —— 逗号串本来就是该列的存储格式，
+  消费方（`rule_key_counts` / `suggestion_exists_at_line` / 周报翻译）都按逗号拆分，行为正确。
+  因此**没有**为此改产品代码（曾起过一版拆分逻辑，核对存储格式后确认是无效改动，已撤销）。
+
+### 16.6b N9：并发写 MR 标题导致 telemetry 与 GitLab 漂移（第 2 轮才暴露）
+
+**现象**：第 2 轮完整验证的 E2E 全量档 **31/32**，唯一失败项是
+`telemetry:mr_activity`：
+
+```
+title='新增 `service.py` 的 `total`、`save` 并调整 `handle`、`run` 返回结构'
+!= gitlab '扩充 `service` 工具函数并调整 `handle`/`run`/`Item` 签名'
+```
+
+两个标题都是 LLM 生成的（E2E 建 MR 时的初始标题是 `E2E 真实变更 r1`）→ **describe 跑了两次**。
+
+**根因**（worker 日志实锤）：
+
+| 时刻 | 事件 | 是否持 per-MR 锁 |
+|---|---|---|
+| 01:52:22 | `worker.run_describe project=56 mr=1`（note 触发的 `/describe`） | **否** —— 日志里没有 `chain.lock_acquired` |
+| 01:52:24 | `chain.lock_acquired` → 链式 describe | 是 |
+| 01:52:58 | describe#1 生成标题 T1 → 写 GitLab(01:52:59) → 回写 telemetry | — |
+| 01:53:00 | describe#2 生成标题 T2 → 写 GitLab | — |
+
+- 链式路径 `run_mr_chain` **持 per-MR 锁**；note 路径走 RQ 单命令入口
+  `run_describe` → `_run_command`，**不取锁**；
+- `should_skip_cooldown` 是 **入队** 闸门（`SET NX EX`），**不挡执行** ——
+  note 任务在队列里排了几十秒才开始跑，与链式任务**重叠**；
+- 两个 describe 并发时，各自「写 GitLab → 回写 telemetry」这两步之间的**交错顺序**可以不同：
+  #1 写完 GitLab(T1)、#2 写完 GitLab(T2)、#2 回写 telemetry(T2)、#1 回写 telemetry(T1)
+  → **GitLab=T2 / telemetry=T1**，永久漂移（dashboard 显示旧标题）。
+
+**修复**：`reviewagent/workers/tasks.py` 新增 `_run_locked()` —— 单命令入口
+（`run_describe` / `run_improve`）**先取同一把 per-MR 链锁再执行**：
+
+- 与链式路径是**同一把**锁 → 同一 MR 的命令**执行**串行 → 两个 sink 的「最后写入者」必然一致；
+- 这把锁**不可重入** → 链式路径必须继续直接调 `_run_command`（已如此，回归测试锁死）；
+- 拿不到锁（阻塞 300s 超时）→ **拒绝执行**，绝不能「裸跑」退回并发写的老路；
+- 异常路径也释放锁（`finally`）。
+
+**回归**：`tests/test_note_command_lock.py`（5 例）+ 变异验证（把 `run_describe` 改回
+`_run_command` → 3 例转红）+ 修复后 2 轮完整验证 E2E 全量档 **32/32 / 32/32**。
+
+> 本轮 L1 由 1698 → **1708**（+5 例 N9 回归 + 5 例 N10 回归测试）。
+
+### 16.6c N10：E2E 的 Apply 模拟用错范围语义（`apply_closure` 误报红）
+
+**现象**：E2E 全量档 `apply_closure` 失败：
+`state=open adopted_actions=0 applied_commit_sha=none path=synthetic-update`。
+
+**根因**：E2E 要「真实模拟一次 Apply」——把建议的 improved_code 写进文件 → commit → push
+→ 期望 `auto_detect_applied` 把这条建议判成 applied。补丁范围取自 DB 的 `target_line_end`，
+而该字段存的是**新代码跨度**：
+
+```python
+# reviewagent/review/publishing.py
+n_lines = len(nc.split("\n"))                                   # nc = improved_code
+target_line_end = (new_line + n_lines - 1) if n_lines > 1 else new_line
+```
+
+而 GitLab 的 Apply 按钮替换的是**建议块的旧侧**，旧侧行数由
+`reviewagent/review/policies/python.py` 决定：
+
+```python
+n_replace = max(0, len(existing_lines) - 1)   # existing_lines = existing_code 的行
+```
+
+**1→N 多行替换时两者不相等**（新代码比原代码长）→ 补丁**多删**原代码之外的行，
+把文件改坏 → `auto_detect` 自然认不出「建议代码已落地」。
+
+**实证锚点**（同一份 fixture，两轮 E2E 的建议内容不同）：
+
+| 轮次 | 建议 | `existing_code` 行数 | `improved_code` 行数 | 落库 `target_line`–`target_line_end` | 结果 |
+|---|---|---|---|---|---|
+| project 56 | `except:` 吞异常 | 2 | 2 | 22–23（恰好相等） | ✅ `applied` |
+| project 57 | 同一处 | 2 | 4 | 22–25（**多 2 行**） | ❌ 多删 2 行 → 文件改坏 → 未判 applied |
+
+**修复**：`scripts/e2e/flows.py::_apply_suggestion_to_file` 改为按
+**`existing_code` 的实际行数**替换（`existing_code` 为空才退回 `target_line_end` 跨度），
+与 GitLab 真实 Apply 同语义。同时在 `publishing.py` 的 `n_lines` 处补注释，写明
+`target_line_end` 的语义是「新代码跨度」，**不可**当作「原代码被替换的跨度」使用
+（生产路径只用它放宽匹配窗口，范围偏宽只是更宽松，无破坏性）。
+
+**回归**：`tests/test_e2e_apply_patch_range.py`（5 例，含 1→N 核心回归）。
+
+### 16.7 全面完整验证 2 遍
+
+验证脚本：`/tmp/verify_round.py <n>` —— 每轮跑 **L1 单元回归 + E2E 快速档 + E2E 全量档 +
+L3 真实业务复验（MR !3 / !4 / !8，只读）+ 文档数字自检**。
+
+| 指标 | 第 1 轮 | 第 2 轮 | 一致性 |
+|---|---|---|---|
+| 服务健康 / 指纹 | ✅ `1fcce9900a8b4aee` | ✅ `1fcce9900a8b4aee` | ✅ 一致 |
+| L1 passed | 1708 | 1708 | ✅ 一致 |
+| L1 failed | 0 | 0 | ✅ 一致 |
+| L1 skipped | 2 | 2 | ✅ 一致 |
+| L1 失败集合 | 无 | 无 | ✅ 一致 |
+| L2 快速档 | 21/21 | 21/21 | ✅ 一致 |
+| L2 全量档 | 32/32 | 32/32 | ✅ 一致 |
+| L2 全量档失败项 | 无 | 无 | ✅ 一致 |
+| L3 MR !3 | 19/20 | 19/20 | ✅ 一致（O2 产品口径，非缺陷） |
+| L3 MR !4 | 20/20 | 20/20 | ✅ 一致 |
+| L3 MR !8 | 20/20 | 20/20 | ✅ 一致（N7 复验锚点） |
+| 文档数字自检 | 通过 | 通过 | ✅ 一致 |
+
+**统一签名** `(L1 passed, failed, skipped, 失败集合, fast passed/total, full passed/total,
+L3 mr3, L3 mr4, L3 mr8) = (1708, 0, 2, (), 21, 21, 32, 32, 19, 20, 20)` —— 两轮**完全一致**。
+
+即：L1 单元回归 **1708 passed / 0 failed / 2 skipped**，E2E 快速档 21/21、全量档 32/32，
+L3 真实业务复验 MR !3 19/20、MR !4 20/20、MR !8 20/20。
+
+> **E2E 报告文件名的坑（复现须知）**：报告名 `report-<档位开始时刻>.json`，而 fast 档只跑
+> 0.5s —— 它与随后的 full 档**常常在同一秒启动 → 共用同一个文件名 → full 覆盖 fast**。
+> `verify_round.py` 在两档**各自跑完后立刻**读回（fast 在 full 之前读），所以读到的数值始终正确；
+> 但事后按文件名反查时会看到「同一个文件里 tier=full」。核对时以 mtime + tier 字段为准。
+
+**L1 基线口径说明**（避免与 §15 的 1686 直接相减造成误解）：
+- §15 记录的 1686 / 0 / 3 是**更早的树状态**测得（此后 `new_review_v2` 又落地了 2 个提交）；
+- 本轮的可复现对照是 **HEAD（`7bb7ab7`）收集 1670 例 → 当前收集 1710 例 = 净增 +40 例**，
+  与本轮新增用例数**逐项对上**（降噪契约 15 + 汇总重刷 9 + 漂移守卫 6 + 并发锁回归 5 + Apply 补丁范围 5）；
+- skipped 由 3 降为 2：`test_conftest_env_isolation.py::test_deploy_env_keys_cover_instance_env`
+  的 skip 条件是「本地部署文件不存在」，本机 `config/instance.env` 存在 → 该护栏**实际执行并通过**
+  （§15.7 O8 记录的护栏仍在生效）。
+
+### 16.8 本轮结论
+
+1. **口径变更已按用户决策落地**：安全类（注入 / 明文凭据 / 越权 / 路径穿越 / 不安全反序列化 /
+   弱哈希 / 敏感信息外泄 / 文件权限过宽）与依赖环境类（未锁版本 / 多系统兼容兜底）在本场景不报；
+   硬件数据类（`R-DATA` / `R-NVME`）与全部强制例外**不受影响**。
+2. **真实业务两遍复验一致**：MR !8（全新、同内容）安全类 0 / 噪音 0 / 未分类 0 / 信号类 10，
+   L3 **20/20**；`rule_keys` 空值由 1 → **0**。
+3. **全面完整验证 2 遍签名一致**：L1 1708/0/2、E2E 21/21 + 32/32、L3 19/20 + 20/20 + 20/20，
+   可复现、无偶发。
+4. **发现并修掉 4 个问题**（N7–N10）：N7 是**模型侧**规则键缺失（提示词硬约束 + 真实复验）；
+   N8 是**部署链路**提示词静默不生效（内容级漂移守卫 + 启动 fail-fast）；
+   N9 是**并发**写 MR 标题导致 telemetry 与 GitLab 漂移（note 路径补 per-MR 锁）；
+   N10 是 **E2E 的 Apply 模拟用错范围语义**（按 existing_code 跨度替换）。
+   四者都**不是**静态检查或单测能发现的 —— 只有真跑检视、核对部署态、且**连跑多遍**
+   （本轮实测：第 1 轮 32/32、第 2 轮 31/32 暴露 N9；N10 则取决于模型给出的建议是否
+   1→N 多行替换 —— 同一份代码第 1 轮触发、第 2 轮不触发），才会暴露。
