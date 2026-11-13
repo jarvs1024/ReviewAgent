@@ -193,13 +193,27 @@ run_preflight || {
     exit 1
 }
 
-echo "==> [8/10] 场景包附属文件"
-provider="$(env_value LLM_PROVIDER)"
-if [ "${provider:-qodercli}" = "qodercli" ]; then
-    # QoderCLI ACP 从 .qoder/agents/*.md 读取子代理定义，缺失会导致检视直接失败。
-    run_with_env "${VENV}/bin/python" scripts/sync_qoder_agents.py
-    echo "    .qoder/agents 已同步"
-fi
+echo "==> [8/10] 场景包附属文件（.qoder/agents 物化 + 漂移校验）"
+# .qoder/ 在 .gitignore 里 —— 代码同步（git pull / rsync）不会把它带过去，
+# 全新部署的生产机上必然是空的。而 QoderCLI ACP server 启动时会从项目级
+# .qoder/agents/*.md 读取**子代理注册表**（name/description/tools/permissionMode/
+# maxTurns/model）；两种 provider（qoder-sdk / qodercli）跑的是同一个 qodercli
+# 二进制，注册表缺失时子代理无法被解析。
+# 因此这里**无条件**物化，与本地 scripts/restart_local.sh 的链路保持一致
+# （早先只在 LLM_PROVIDER=qodercli 时同步，生产推荐的 qoder-sdk 会整个跳过）。
+#
+# sync 按 mtime 增量写：文件比源新但内容陈旧时会被跳过 —— 所以物化后立刻按
+# **内容**校验（scripts/ops/check_agent_drift.py），漂移即中止部署，
+# 绝不允许带着陈旧注册表起 worker。
+$SUDO mkdir -p "${PROJECT_DIR}/.qoder/agents"
+$SUDO chown -R "${SERVICE_USER}:${SERVICE_USER}" "${PROJECT_DIR}/.qoder"
+run_with_env "${VENV}/bin/python" scripts/sync_qoder_agents.py
+echo "    .qoder/agents 已同步"
+run_with_env "${VENV}/bin/python" scripts/ops/check_agent_drift.py || {
+    echo "    agent 提示词漂移，已中止部署（详见上方 ERROR 行；修完重跑 deploy.sh）"
+    exit 1
+}
+echo "    agent 提示词漂移校验通过"
 
 echo "==> [9/10] 安装 systemd units 并设置开机自启"
 UNITS=(

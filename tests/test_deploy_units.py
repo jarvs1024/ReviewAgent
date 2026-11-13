@@ -238,3 +238,70 @@ def test_deploy_sh_enables_autostart_topology():
     assert "systemctl disable --now reviewagent-worker.service" in text, (
         "升级时必须下线旧的单 worker unit，否则两个进程抢同一队列"
     )
+
+
+def _exec_line_index(text: str, needle: str) -> int | None:
+    """返回「真正执行」该脚本的行号（跳过注释行）；找不到返回 None."""
+    for idx, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if needle in stripped:
+            return idx
+    return None
+
+
+def test_deploy_sh_materialises_qoder_agents_for_every_provider():
+    """`.qoder/agents` 必须对所有 provider 无条件物化。
+
+    历史缺陷：`deploy.sh` 只在 `LLM_PROVIDER=qodercli` 时同步 `.qoder/agents`，
+    而生产推荐（也是模板默认）用的是 `qoder-sdk` —— 于是生产机的子代理注册表
+    永远是空的（`.qoder/` 在 .gitignore 里，git pull 也带不过去），
+    与本地 `scripts/restart_local.sh` 的无条件同步行为不一致。
+    """
+    text = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+    assert "scripts/sync_qoder_agents.py" in text, "deploy.sh 必须物化 .qoder/agents"
+    assert '= "qodercli"' not in text, (
+        "不能再按 LLM_PROVIDER 分支跳过 .qoder/agents 同步："
+        "两种 provider 跑的是同一个 qodercli 二进制，ACP server 都要读这份注册表"
+    )
+    # 按「执行行」定位（注释里也可能提到脚本名）
+    sync_at = _exec_line_index(text, "scripts/sync_qoder_agents.py")
+    check_at = _exec_line_index(text, "scripts/ops/check_agent_drift.py")
+    assert sync_at is not None, "deploy.sh 必须物化 .qoder/agents"
+    assert check_at is not None, "deploy.sh 必须做 agent 漂移校验"
+    assert sync_at < check_at, "必须先物化再校验"
+
+
+def test_deploy_sh_fails_fast_on_agent_drift():
+    """物化后必须按内容校验，漂移即中止部署。
+
+    `sync_qoder_agents.py` 按 mtime 增量写：文件比源新但内容陈旧时会被跳过，
+    于是注册表静默陈旧。漂移守卫（按内容比对）必须在同一脚本里 fail-fast。
+    """
+    text = (REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
+    assert "scripts/ops/check_agent_drift.py" in text, "deploy.sh 必须做 agent 漂移校验"
+    guard = text.split("scripts/ops/check_agent_drift.py", 1)[1]
+    assert "exit 1" in guard, "漂移校验失败必须中止部署，而不是继续装 unit 起服务"
+
+
+def test_verify_sh_checks_agent_drift():
+    """部署后复检必须覆盖 agent 提示词漂移（与本地 restart_local.sh 对齐）。"""
+    text = (REPO_ROOT / "deploy" / "verify.sh").read_text(encoding="utf-8")
+    assert "scripts/ops/check_agent_drift.py" in text, (
+        "verify.sh 必须复检 agent 提示词漂移"
+    )
+
+
+def test_preflight_agent_check_applies_to_all_providers():
+    """`.qoder/agents` 体检不能只挂在 qodercli 分支下。"""
+    text = (REPO_ROOT / "deploy" / "preflight.sh").read_text(encoding="utf-8")
+    qodercli_at = text.index("qodercli)")
+    branch_end = text.index(";;", qodercli_at)
+    qodercli_branch = text[qodercli_at:branch_end]
+    assert ".qoder/agents" not in qodercli_branch, (
+        ".qoder/agents 检查不应只挂在 qodercli 分支下（qoder-sdk 同样需要）"
+    )
+    outside = text[:qodercli_at] + text[branch_end:]
+    assert ".qoder/agents" in outside, "分支外应有 provider 无关的 .qoder/agents 体检"
+

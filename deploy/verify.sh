@@ -161,6 +161,29 @@ while IFS= read -r unit; do
     [ -n "${unit}" ] && compare_fp "${unit}"
 done < <(worker_units)
 
+section "agent 提示词漂移"
+# .qoder/agents/*.md 是 QoderCLI ACP server 启动时读取的子代理注册表，
+# 由 profiles/<profile>/prompts/*.md 物化而来。sync 按 mtime 增量写，
+# 漏跑 / 跳过时注册表会静默陈旧 —— 这里按**内容**复核（与
+# scripts/ops/check_agent_drift.py 同一判据）。
+indent_out() {
+    [ -n "${1:-}" ] && printf '%s\n' "$1" | sed 's/^/         /'
+    return 0
+}
+if [ -x "${PROJECT_DIR}/.venv/bin/python" ]; then
+    if drift_out="$(bash -c 'cd "$1" || exit 1; set -a; . "$2"; set +a; shift 2; exec "$@"' \
+        _ "${PROJECT_DIR}" "${ENV_FILE}" \
+        "${PROJECT_DIR}/.venv/bin/python" scripts/ops/check_agent_drift.py 2>&1)"; then
+        ok "agent 提示词与 profile prompts 一致"
+        indent_out "${drift_out}"
+    else
+        fail "agent 提示词漂移（.qoder/agents 与 profile prompts 不一致）"
+        indent_out "${drift_out}"
+    fi
+else
+    warn "找不到 ${PROJECT_DIR}/.venv/bin/python，跳过 agent 漂移校验"
+fi
+
 section "定时任务"
 systemctl list-timers --all 'reviewagent-*.timer' --no-pager 2>/dev/null \
     | sed -n '1,8p' | sed 's/^/  /'

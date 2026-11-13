@@ -182,11 +182,6 @@ else
             else
                 fail "LLM_PROVIDER=qodercli 但未找到 qodercli/qoderclicn（或用 QODER_SDK_CLI_PATH 指定）"
             fi
-            if [ -d "${PROJECT_DIR}/.qoder/agents" ] && [ -n "$(ls -A "${PROJECT_DIR}/.qoder/agents" 2>/dev/null)" ]; then
-                ok ".qoder/agents 已生成"
-            else
-                warn ".qoder/agents 缺失（deploy.sh 会用 scripts/sync_qoder_agents.py 生成）"
-            fi
             ;;
         opencode)
             opencode_url="$(env_value OPENCODE_URL)"
@@ -202,6 +197,16 @@ else
             warn "未识别的 LLM_PROVIDER=${provider}（按第三方协议自行确认）"
             ;;
     esac
+
+    # .qoder/agents/*.md 是 QoderCLI ACP server 启动时读取的子代理注册表，
+    # 两种 qoder provider 都需要它（deploy.sh 第 8 步无条件物化）。
+    # 这里只是体检提示：缺失不阻断部署（deploy.sh 随后会生成），
+    # 但「已生成却与 profile prompts 不一致」属于真实漂移，由 verify.sh 拦。
+    if [ -d "${PROJECT_DIR}/.qoder/agents" ] && [ -n "$(ls -A "${PROJECT_DIR}/.qoder/agents" 2>/dev/null)" ]; then
+        ok ".qoder/agents 已生成"
+    else
+        warn ".qoder/agents 缺失（deploy.sh 第 8 步会用 scripts/sync_qoder_agents.py 生成）"
+    fi
 
     redis_url="$(env_value REDIS_URL)"
     redis_url="${redis_url:-redis://127.0.0.1:6379/0}"
