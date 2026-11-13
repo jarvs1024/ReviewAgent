@@ -758,7 +758,7 @@ def test_facade_sample_and_cap_delegate_to_planner():
 def test_facade_rule_block_text_checksum_unchanged():
     text = ImproveCommand._rule_block_text()
     assert hashlib.sha256(text.encode()).hexdigest() == (
-        "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
+        "e77f5eaf9ae380d11f3d08c1d0e513ffcf8554829b3616b3768c1b3d9a8c12e5"
     )
 
 

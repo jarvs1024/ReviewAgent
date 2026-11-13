@@ -1,7 +1,7 @@
 # tests/test_rule_checksum.py
 import hashlib
 
-RULE_BODY_SHA256 = "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
+RULE_BODY_SHA256 = "e77f5eaf9ae380d11f3d08c1d0e513ffcf8554829b3616b3768c1b3d9a8c12e5"
 
 
 def test_general_rules_block_checksum():

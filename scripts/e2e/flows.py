@@ -623,17 +623,34 @@ def _pick_applyable_suggestion(mr_iid: int, log: list[str]) -> dict | None:
 def _apply_suggestion_to_file(row: dict, content: str) -> str | None:
     """把 suggestion 的 improved_code 真实写进文件内容（Apply 的等价动作）.
 
-    replace → 用 improved_code 替换 [target_line, target_line_end]
+    replace → 用 improved_code 替换「原代码跨度」
     delete  → 删掉那一段（improved_code 为空）
+
+    Why 用 `existing_code` 的行数、而不是 DB 的 `target_line_end`:
+        `target_line_end` 存的是**新代码跨度**（`publishing.py` 的
+        `n_lines = len(improved_code.split("\\n"))`），而 GitLab 的 Apply
+        替换的是**建议块的旧侧** —— 旧侧行数由 `policies/python.py` 决定:
+            n_replace = max(0, len(existing_code.split("\\n")) - 1)
+        1→N 的多行替换里两者**不相等**（新代码比原代码长）→ 按 target_line_end
+        打补丁会**多删**原代码之外的行，把文件改坏 → auto_detect 认不出
+        「已落地」→ apply_closure 误报红（实测：E2E 全量档 apply_closure 失败）。
+
+        existing_code 为空（模型没给原文）→ 退回 target_line_end 跨度。
     """
     lines = content.splitlines()
     tl = int(row.get("target_line") or 0)
     te = int(row.get("target_line_end") or tl)
     if tl <= 0 or tl > len(lines):
         return None
+    existing = str(row.get("existing_code") or "")
     improved = str(row.get("improved_code") or "")
     new_lines = improved.splitlines() if improved.strip() else []
-    patched = lines[: tl - 1] + new_lines + lines[te:]
+
+    span = len(existing.splitlines()) if existing.strip() else 0
+    if span <= 0:
+        span = max(1, te - tl + 1)
+    end = min(len(lines), tl - 1 + span)
+    patched = lines[: tl - 1] + new_lines + lines[end:]
     tail = "\n" if content.endswith("\n") else ""
     return "\n".join(patched) + tail
 

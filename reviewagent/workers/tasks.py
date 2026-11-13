@@ -427,11 +427,54 @@ def _run_command(
 
 
 def run_describe(**kw) -> dict[str, Any]:
-    return _run_command("describe", **kw)
+    return _run_locked("describe", **kw)
 
 
 def run_improve(**kw) -> dict[str, Any]:
-    return _run_command("improve", **kw)
+    return _run_locked("improve", **kw)
+
+
+# per-MR 锁的阻塞等待上限（秒）—— 与链式路径一致。
+_CHAIN_LOCK_BLOCKING_TIMEOUT = 300
+
+
+def _run_locked(command: str, **kw: Any) -> dict[str, Any]:
+    """单命令入口（note 路径）：先取 per-MR 链锁，再执行命令.
+
+    Why (N9): 链式路径 `run_mr_chain` 已经持 per-MR 锁再跑命令；但 note 路径
+    (`/describe` / `/improve` 评论) 走 RQ 单命令入口 —— 原来**不取锁**。
+    cooldown 只挡「入队」不挡「执行」，排队中的 note 任务会与链式任务**重叠跑**；
+    两个 describe 并发执行时，「GitLab 标题」与「telemetry 标题」的
+    **最后写入者可能不同**（一个写完 GitLab 还没回写 telemetry，另一个就插进来）
+    → telemetry 与 GitLab 的 MR 标题**永久漂移**（E2E `mr_activity` 审计报红、
+    dashboard 显示旧标题）。
+
+    锁与链式路径是**同一把**（per-MR）→ 链式路径必须继续直接调 `_run_command`；
+    这把锁**不可重入**，再取一次会自锁。
+
+    拿不到锁 → 拒绝执行（绝不能「裸跑」退回并发写的老路）。
+    """
+    project_id = kw["project_id"]
+    mr_iid = kw["mr_iid"]
+    lock = locks.get_lock(project_id, mr_iid)
+    if not lock.acquire(blocking=True, blocking_timeout=_CHAIN_LOCK_BLOCKING_TIMEOUT):
+        logger.warning(
+            "cmd.lock_timeout command={} project={} mr={} — 拿不到 per-MR 锁, 放弃本次执行",
+            command, project_id, mr_iid,
+        )
+        raise RuntimeError(
+            f"per-MR lock timeout: command={command} project={project_id} mr={mr_iid}"
+        )
+    try:
+        return _run_command(command, **kw)
+    finally:
+        try:
+            lock.release()
+        except Exception as e:
+            logger.warning(
+                "cmd.lock_release failed command={} project={} mr={} err={}",
+                command, project_id, mr_iid, e,
+            )
 
 
 def run_suggestion_action(
@@ -546,7 +589,7 @@ def run_mr_chain(
     # `_run_command` 内部仍会再校验一次（防御纵深：直接调用路径同样受保护）。
     _verify_job_manifest(**manifest_kwargs)
     lock = locks.get_lock(project_id, mr_iid)
-    if not lock.acquire(blocking=True, blocking_timeout=300):
+    if not lock.acquire(blocking=True, blocking_timeout=_CHAIN_LOCK_BLOCKING_TIMEOUT):
         logger.warning(
             "chain.lock_timeout project={} mr={} — 释放锁失败/超时, 放弃本次 chain",
             project_id, mr_iid,

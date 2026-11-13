@@ -178,6 +178,13 @@ if [ -x .venv/bin/python ]; then
     # resolved instance config in the same shell as the python invocation
     # so sync_qoder_agents can import reviewagent.config without RuntimeError.
     (set -a && source "${REVIEWAGENT_ENV_FILE}" && set +a && .venv/bin/python scripts/sync_qoder_agents.py) 2>&1 | tee -a logs/sync_qoder_agents.log
+    # 按**内容**校验部署态 agent 提示词与 profile prompts 一致。
+    # sync 按 mtime 增量写，漏写/跳过时 prompt 改动会静默不生效（N8）——
+    # 这里立刻 fail fast，不要带着旧 system prompt 起 worker。
+    (set -a && source "${REVIEWAGENT_ENV_FILE}" && set +a && .venv/bin/python scripts/ops/check_agent_drift.py) || {
+        echo "    ERROR: agent 提示词漂移，已中止启动（详见上方 ERROR 行）" >&2
+        exit 1
+    }
 else
     echo "    WARNING: .venv/bin/python not found; skipping sync_qoder_agents"
 fi

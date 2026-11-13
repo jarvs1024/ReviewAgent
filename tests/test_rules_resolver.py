@@ -77,7 +77,8 @@ def test_base_ruleset_orders_and_indexes():
     assert ruleset.verbatim_body
     assert "R-LOG" in ruleset.index_by_key
     assert ruleset.sources[0]["kind"] == "profile"
-    assert ruleset.sources[0]["pack_id"] == "ssd-python-autotest/core"
+    assert ruleset.sources[0]["pack_id"] == "ssd-python-autotest/noise-boundary"
+    assert ruleset.sources[1]["pack_id"] == "ssd-python-autotest/core"
     assert ruleset.render == "verbatim"
     assert ruleset.alias_map["R-LOG"] == "R-LOG"
     assert len(ruleset.fingerprint) == 32
@@ -89,7 +90,7 @@ def test_verbatim_body_checksum_is_stable():
     """规则包正文的漂移护栏：改动 prompts 以外的规则正文须同步更新基线."""
     body = assemble_base(load_profile(None)).verbatim_body.encode()
     assert hashlib.sha256(body).hexdigest() == (
-        "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
+        "e77f5eaf9ae380d11f3d08c1d0e513ffcf8554829b3616b3768c1b3d9a8c12e5"
     )
 
 

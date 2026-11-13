@@ -11,5 +11,5 @@ prompts:
   weekly_inspection_summary: prompts/weekly_inspection_summary.md
   weekly_change_summary: prompts/weekly_change_summary.md
   weekly_quality_scan: prompts/weekly_quality_scan.md
-rules: [rules/general_rules.md]
+rules: [rules/noise_boundary.md, rules/general_rules.md]
 dynamic_rules: rules/dynamic_rules.yaml

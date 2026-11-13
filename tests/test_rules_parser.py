@@ -30,10 +30,10 @@ def _make_pack(tmp_path: Path, frontmatter: str, body: str, name: str = "pack.md
 def test_verbatim_body_is_byte_identical():
     pack = parse_pack(ROOT / "rules/general_rules.md", language="python", root=ROOT)
     assert pack.render == "verbatim"
-    assert len(pack.body) == 6904
-    assert len(pack.body.encode()) == 12690
+    assert len(pack.body) == 7580
+    assert len(pack.body.encode()) == 14262
     assert hashlib.sha256(pack.body.encode()).hexdigest() == (
-        "963ce3843726312aae2647371f98518e716add4bf96f349b58ad62b2cb97ba96"
+        "2d0c3fbbefb54e21e7fd4c13e94e03288f43e4005741e638bddc39d554abab67"
     )
     assert {"R-RES", "R-LOG", "R-LOOP"} <= set(pack.index_by_key)
 

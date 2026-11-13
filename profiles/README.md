@@ -15,6 +15,7 @@ profiles/
     │       ├── source.md                 # full / partial / patch 等源码上下文变体
     │       └── dynamic.md                # cross_file_refs 空 / 有引用
     ├── rules/                      # 规则相关全部在此
+    │   ├── noise_boundary.md       # 「不报什么」降噪边界（priority 900，先于正向规则注入）
     │   ├── general_rules.md        # 静态规则条文（正文逐条解析为规则键）
     │   ├── dynamic_rules.yaml      # 动态规则声明（grep/AST 探针）
     │   └── rule_actions.yaml       # 规则键 → 周报跟进动作（默认路径，可选）

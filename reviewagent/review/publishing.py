@@ -668,6 +668,16 @@ def publish(
         if decision["action"] == "post":
             body_to_post = normalised["body"]
             nc = decision.get("normalised_code") or normalised["improved_code"]
+            # `n_lines` = **新代码**行数 → 落库的 `target_line_end` 表达的是
+            # 「新代码覆盖到哪一行」，**不是**「原代码被替换的跨度」。
+            # 两者在 1→N 多行替换时不相等（新代码更长）：
+            #   * GitLab 的 Apply 按钮替换的是**建议块旧侧**，旧侧行数 =
+            #     `len(existing_code.splitlines())`（见 policies/python.py 的
+            #     `n_replace`）—— 模拟 Apply 时必须按 existing_code 的跨度，
+            #     不能用 target_line_end（E2E 曾因此多删代码 → apply_closure 误报红）。
+            #   * `target_line_end` 在本模块只用于**放宽**匹配窗口
+            #     （auto_detect 的 exact/token/region 判定），范围偏宽只是更宽松，
+            #     不会造成误删或假阴性。
             n_lines = len(nc.split("\n"))
             _warn_block = ""
             if _applicability != REPLACE:

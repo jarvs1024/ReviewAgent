@@ -85,6 +85,19 @@ def _render_agent(name: str, description: str, body: str, tools: dict) -> str:
     )
 
 
+def expected_agent_text(src: Path) -> str:
+    """渲染 `prompts/<stem>.md` 对应的部署态 agent 正文。
+
+    单一事实源：`sync_qoder_agents` 写盘与漂移检查比对共用同一渲染函数，
+    避免"写出去的和检查的算法不一致"导致守卫失效。
+    """
+    meta = frontmatter.load(src)
+    name = str(meta.get("name") or src.stem)
+    description = str(meta.get("description") or "").strip()
+    tools = dict(meta.get("tools") or {})
+    return _render_agent(name, description, meta.content, tools)
+
+
 def sync_qoder_agents(prompts_dir: Path, agents_dir: Path) -> list[Path]:
     """Mirror every non-private prompt into `agents_dir/<stem>.md`.
 
@@ -97,14 +110,10 @@ def sync_qoder_agents(prompts_dir: Path, agents_dir: Path) -> list[Path]:
     for src in sorted(prompts_dir.glob("*.md")):
         if src.stem.startswith("_"):
             continue
-        meta = frontmatter.load(src)
-        name = str(meta.get("name") or src.stem)
-        description = str(meta.get("description") or "").strip()
-        tools = dict(meta.get("tools") or {})
         dst = agents_dir / f"{src.stem}.md"
         if not _should_rewrite(src, dst):
             continue
-        dst.write_text(_render_agent(name, description, meta.content, tools))
+        dst.write_text(expected_agent_text(src))
         written.append(dst.resolve())
     return written
 
