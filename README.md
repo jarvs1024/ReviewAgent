@@ -35,9 +35,6 @@ Python 端不做任何代码理解工作。LLM 调用通过 `reviewagent/llm/cli
 | GitLab UI Apply 自动识别 | 用户在 UI 点 "Apply suggestion" 或 push 改写代码 | ✅ |
 | Telemetry API（`/api/v1/telemetry/*`） | — | ✅ |
 | 周报（JSON + Markdown，可推钉钉，含固有代码全量扫描） | 脚本 / 定时 | ✅ |
-| `/review`（深度代码检视） | — | ❌ 未实现 |
-
-> 注：`/review`（深度代码检视）尚未实现——`commands/review.py` 未编写，webhook 不识别 `/review`，`profiles/<profile>/prompts/` 下亦无对应规划。
 
 ---
 
@@ -370,7 +367,6 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 - 跨次建议去重（fingerprint）+ 跨文件引用分析 + 评分过滤。
 
 ### 计划 / 进行中
-- **`/review` 命令**：深度代码检视，目前尚未实现（无 prompt 规划、无命令实现）。
 - **多项目扩展**：当前按 project 维度接，后续计划批量接入 + per-project 配置。
 - **监控告警**：webhook 5xx / token 超限 / 服务下线。
 

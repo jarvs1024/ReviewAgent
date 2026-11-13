@@ -5,7 +5,7 @@
        - 多 MR 共用 git 对象，节省 clone 时间
        - 文件锁 (fcntl.flock) 防多 worker 同时初始化
     2. 每个 MR 一个 worktree（tmpfs /tmp/reviewagent-worktrees/...）
-       - worktree 名含 tag（describe/review/improve）防止同 MR 的命令冲突
+       - worktree 名含 tag（describe/improve）防止同 MR 的命令冲突
        - 任务结束 rm -rf，无持久化
     3. diff 文件写在 worktree 内的 .diff.patch（任务结束随 rm 清空）
 

@@ -556,7 +556,7 @@ cache_creation_input_tokens  = 0
 | ~~中~~ | ~~**token 采集只做恒等式**（`total == prompt + completion`），未断言 `> 0`、未覆盖 `cost_credits`~~ | — | ✅ **本轮已修（E11，10 例）**：见 §7.1c。恒等式恒成立 → 改断言「provider 回报了模型 ⇒ 必须有成本信号」+「无模型 ⇒ 必须无信号」+「不得为负」+「整体至少一个 success run 带信号」 |
 | 中 | **`suggestion_actions.action='adopted'` 语义过宽**：校验失败也记 `adopted` | 统计口径**已正确**（`_is_effective_action` 排除 `same-head`/`content-unavailable`/`target-unchanged`/`already-*`），但**原始 SQL** 与时间线端点仍会看到「尝试」 | **本轮已缓解**：时间线端点新增 `effective` 列（Python 侧复用 `store.is_effective_action` 单一事实源，不在 SQL 复制规则）；原始列仍保留「尝试」语义 |
 | ~~低~~ | ~~**`review_runs.model` 字段两种口径混用**~~ | — | ✅ **本轮已修（E8，8 例）**：拆成 `model`（provider 实际回报，未回报为 NULL）+ `model_configured`（请求时配置 id）；skipped 运行的 `model` 置空 |
-| 低 | **`/review` 命令 README 标注未实现** | 文档与实现不一致 | 实现或从 README 移除 —— **属功能决策，本轮不擅动** |
+| ~~低~~ | ~~**`/review` 命令 README 标注未实现**~~ | — | ✅ **已决策移除**：用户明确该命令不实现 —— README 的「未实现」标注与路线图条目已删除。代码侧**从未有过实现**（无 `commands/review.py`、webhook 不识别 `/review`、`prompts/` 下无对应规划），故无代码残留可清 |
 | 低 | **`weekly_target_project_id=34` 在 GitLab 返回 404**（实际存在 29、31） | 定时周报目标项目无效 | **需业务确认**应指向哪个项目 |
 | 低 | **reconciler 无常驻进程**：本机 launchctl 只有 weekly | 周期对账只能手工跑 | 加载 `scripts/com.jarvs.reviewagent.reconciler.plist` |
 | 低 | 大量内部辅助函数无单测（174 项中的多数） | 回归防护弱 | 按 §6 护栏逐步补 |
@@ -899,7 +899,7 @@ sqlite3 -header -column data/telemetry.db \
 
 | 编号 | 候选缺口 | 核实结论 | 处置 |
 |---|---|---|---|
-| **E2** | `/review` 命令未实现 | README **已如实标注**「未实现」—— 文档与实现一致，不是缺陷 | **功能决策，不擅动**（属新增功能，超出「修复剩余项」范围） |
+| **E2** | `/review` 命令未实现 | README **已如实标注**「未实现」—— 文档与实现一致，不是缺陷 | **已决策移除**：用户明确不实现该命令，README 的未实现标注 + 路线图条目已删除；代码侧从无实现，无残留 |
 | **E4** | 「跨 head 的陈旧建议无法自动判定失效」（O2） | 真实业务 MR !3 实测 1/15 条建议的目标代码在当前 head 已被重构移除；按设计决策 `0b96f7b`「新 head 不隐藏未解决建议」**刻意不**自动 supersede | **产品口径决策**，不擅动（改动会同时影响「图1 不隐藏未解决建议」的口径） |
 | **E5** | token 恒为 0 | 已定位为**上游语义**：usage 的 `input_tokens`/`output_tokens` **键存在但值为 0**（`scripts/ops/probe_qoder_usage.py` 探针实证），非 ReviewAgent 管道缺陷 | **已用 E6 诊断日志 + 探针钉死**；`total_tokens` 改 NULL 语义优先级降为低（不改变任何决策） |
 | **E9** | E2E 里 push 事件被 `is_bot` 拦截 | E2E 用 `reviewagent-e2e-bot` PAT 提交 → actor 是机器人 → `router._handle_push` 的 `locks.is_bot(actor)` 跳过 —— **设计行为** | **非缺陷**；真实用户 push 路径已由真实业务 MR !4 实证（`push.auto_detect_applied applied=1`） |
@@ -918,7 +918,7 @@ sqlite3 -header -column data/telemetry.db \
 | 项 | 说明 |
 |---|---|
 | `weekly_target_project_id=34` 在 GitLab 返回 404 | 实际存在 29 / 31 —— 定时周报目标项目无效，**需确认指向哪个** |
-| `/review` 命令未实现 | README 已如实标注 —— 属功能决策，未擅自实现 |
+| ~~`/review` 命令未实现~~ | ~~README 已如实标注 —— 属功能决策，未擅自实现~~ → **已决策移除**：该命令不实现，README 的未实现标注与路线图条目已删除 |
 | GitLab 上 38 个 `deletion_scheduled` 项目 | GitLab 19.5 异步删除未真正完成 —— 需换版本或人工在 UI 清 |
 | root 名下历史遗留项目 id=3 | 机器人无权限删除 —— 需 root 账号在 UI 清理 |
 | reconciler 无常驻进程 | 本机 launchctl 只有 weekly —— 需确认是否加载 `scripts/com.jarvs.reviewagent.reconciler.plist` |

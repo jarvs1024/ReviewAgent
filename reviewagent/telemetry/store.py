@@ -1969,7 +1969,7 @@ class Store:
             mr_iid: 按 MR 过滤 (需 project_id 同时)
             since: ISO 时间下界 (e.g. '2026-07-21' 或 '2026-07-21T00:00:00Z')
             until: ISO 时间上界
-            command: describe/review/improve
+            command: describe/improve
             status: running/success/failed/timeout
             limit: 默认 100
             offset: 分页

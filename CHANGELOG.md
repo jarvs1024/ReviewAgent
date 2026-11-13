@@ -45,6 +45,9 @@
 
 ### Changed
 
+- **`/review` 命令不再规划**：深度代码检视命令确定不实现，README 的「未实现」标注与
+  路线图条目已删除。该命令**从未有过实现**（无 `commands/review.py`、webhook 不识别
+  `/review`、`prompts/` 下无对应规划），因此本次只涉及文档与一处注释，无代码行为变化。
 - **周报规则动作单一来源**：`rules/rule_actions.yaml` 成为规则键 → 跟进动作的
   唯一来源，周报确定性渲染与 `weekly_inspection_summary` 的 LLM user prompt
   均从该文件注入；删除 prompt 内重复的动作清单、`telemetry.py` 的规则键列表和
