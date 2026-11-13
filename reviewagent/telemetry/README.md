@@ -519,9 +519,9 @@ curl -X POST http://127.0.0.1:3000/webhook \
        "user":{"username":"e2e-runner"}}'
 
 # 3) 查询
-curl http://127.0.0.1:3000/api/v1/telemetry/mr/34/134/stats
-curl http://127.0.0.1:3000/api/v1/telemetry/dismissals/by-rule?project_id=34
-curl http://127.0.0.1:3000/api/v1/telemetry/mrs/34/134/dismissals
+curl http://127.0.0.1:3000/api/v1/telemetry/mr/31/8/stats
+curl http://127.0.0.1:3000/api/v1/telemetry/dismissals/by-rule?project_id=31
+curl http://127.0.0.1:3000/api/v1/telemetry/mrs/31/8/dismissals
 curl http://127.0.0.1:3000/api/v1/telemetry/weekly-reports
 ```
 
@@ -565,7 +565,7 @@ GitLab 17.5 偶尔不发 "marked this discussion as resolved" webhook 给 note_e
 from reviewagent.reconciler import reconcile_single_mr, reconcile_open_mrs
 
 # 单 MR 扫描 (测试 / 手动跑)
-result = reconcile_single_mr(project_id=34, mr_iid=247)
+result = reconcile_single_mr(project_id=31, mr_iid=8)
 # {
 #   "scanned": int,            # 扫了几条 open suggestions
 #   "updated": int,            # 翻了几条 → resolved
@@ -588,7 +588,7 @@ result = reconcile_open_mrs(project_id=None)  # None = 所有 bot 跟踪的 proj
 
 ```bash
 # 手动跑一次
-python -m reviewagent.reconciler.loop --project-id 34
+python -m reviewagent.reconciler.loop --project-id 31
 
 # 全量
 python -m reviewagent.reconciler.loop

@@ -6,8 +6,11 @@ The QoderCLI ACP server reads subagent definitions from the project-level
 `disallowedTools: [...]` (blacklist) and always pin read-only tools +
 safe defaults (maxTurns, model, permissionMode).
 
-This script is invoked at worker bootstrap and is idempotent: files are
-only rewritten when the source mtime is newer than the dest mtime.
+This script is invoked by the deployment / restart scripts (`deploy.sh` step 8,
+`scripts/restart_local.sh`) and is idempotent: files are only rewritten when
+the source mtime is newer than the dest mtime. Because that mtime-based
+incremental write can silently skip a stale-but-newer file, the caller must
+follow up with `scripts/ops/check_agent_drift.py` (content-level comparison).
 """
 
 from __future__ import annotations

@@ -522,13 +522,17 @@ cache_creation_input_tokens  = 0
 | 编号 | 缺陷 | 实锤证据 | 修复 | 回归 |
 |---|---|---|---|---|
 | **N7** | **规则键缺失**：模型偶发在 `rationale` 里不写规则前缀 → 落库 `rule_keys` 为空 → 周报「问题类型」归不了类、去重退化、无法分诊 | 真实业务 MR !7（边界开、干净单轮 16 条）L3 图2「规则键引用」15/16，1 条 `rule_keys` 为空 | 提示词侧加硬约束：`improve.md` 的 self-check 新增「`rationale` **首句以规则键开头**（`R-*` / `R-OTHER:<描述>` / `R-OTHER-IMPACT:<描述>` / 仓库规则键原样复制）；**写不出键就说明这条不该报**（不要硬凑假键）」 | `test_suggestion_rationale_must_cite_rule_key`（契约）+ 真实业务复验：MR !8（全新、同内容）**空键 0 条**、L3 **20/20** |
-| **N8** | **部署态提示词漂移**：`profiles/<profile>/prompts/improve.md` 是 agent 的 system prompt，实际由 `.qoder/agents/improve.md` 物化供给；`sync_qoder_agents.py` 按 **mtime** 增量写，**漏跑一次就静默不生效** | 实测：改完 `improve.md`（N7）未同步，部署态仍是旧版（309 行 vs profile 406 行），`grep 规则键开头` 在 `.qoder/agents/improve.md` 中 **0 命中** → N7 修好了但真实检视里不生效 | 新增 `scripts/ops/check_agent_drift.py`（按**内容**比对，不看 mtime；缺失/漂移 → 退出码 1）+ 接进 `scripts/restart_local.sh`（sync 之后立刻校验，漂移即**中止启动**）+ `sync_qoder_agents.py` 抽出 `expected_agent_text()` 作为「写盘 / 校验」共用渲染函数 | `tests/test_check_agent_drift.py`（6 例，含「mtime 更新但内容陈旧仍须报出」）+ 部署链路实测（漂移守卫已生效，`exit=0`） |
+| **N8** | **部署态 agent 注册表漂移**：`.qoder/agents/*.md` 是 QoderCLI ACP server 启动时读取的**子代理注册表**（正文 = profile prompt），由 `profiles/<profile>/prompts/*.md` 物化而来；`sync_qoder_agents.py` 按 **mtime** 增量写，**漏跑一次（或 mtime 判断失误）就静默陈旧**，而静态检查 / 单测 / 契约测试**一条都不会报** | 实测：改完 `improve.md`（N7）未同步，部署态注册表仍是旧版（309 行 vs profile 406 行），`grep 规则键开头` 在 `.qoder/agents/improve.md` 中 **0 命中** → ACP 侧派生出的子代理仍按旧约束跑 | 新增 `scripts/ops/check_agent_drift.py`（按**内容**比对，不看 mtime；缺失/漂移 → 退出码 1）+ 接进 `scripts/restart_local.sh`（sync 之后立刻校验，漂移即**中止启动**）+ `sync_qoder_agents.py` 抽出 `expected_agent_text()` 作为「写盘 / 校验」共用渲染函数 | `tests/test_check_agent_drift.py`（6 例，含「mtime 更新但内容陈旧仍须报出」）+ 部署链路实测（漂移守卫已生效，`exit=0`） |
 | **N10** | **E2E 的 Apply 模拟用错范围语义**：`apply_closure` 特性按 DB 的 `target_line_end` 打补丁，而该字段存的是**新代码跨度**（`n_lines = len(improved_code)`）—— 1→N 多行替换时它比**原代码跨度**大 → 补丁**多删**原代码之外的行，把文件改坏 → `auto_detect` 认不出「已落地」→ 特性误报红 | E2E 全量档 `apply_closure` 失败（`state=open adopted_actions=0 path=synthetic-update`）。根因锚点：project 56 的同内容建议报 `L22-23`（existing 2 行 = improved 2 行 → 恰好相等）；project 57 报 `L22-25`（existing 2 行 / improved 4 行 → 差 2 行）→ 多删 2 行 | `_apply_suggestion_to_file` 改为按 **`existing_code` 的实际行数**替换 —— 这正是 GitLab 真实 Apply 的语义（`policies/python.py` 的 `n_replace = len(existing_code.splitlines()) - 1`，建议块旧侧行数）；existing 为空才退回 `target_line_end` 跨度 | `tests/test_e2e_apply_patch_range.py`（5 例，含 1→N 核心回归）+ 变异验证 + 修复后 2 轮完整验证 E2E 全量档 **32/32 / 32/32** |
 | **N9** | **并发写 MR 标题导致 telemetry 与 GitLab 漂移**：链式路径持 per-MR 锁，但 note 路径（`/describe`）走 RQ 单命令入口 **不取锁**；cooldown 只挡**入队**不挡**执行** → 排队中的 note 任务与链式任务**重叠跑** → 两个 describe 并发写标题时，「GitLab 标题」与「telemetry 标题」的**最后写入者可能不同** | 第 2 轮完整验证 E2E 全量档 **31/32**（`telemetry:mr_activity` 报红：telemetry 标题 ≠ GitLab 标题）。worker 日志实测：01:52:22 note describe（**无 `chain.lock_acquired`**）+ 01:52:24 链式 describe 并发；01:52:58 写 GitLab(T1)+回写 telemetry(T1)，01:53:00 写 GitLab(T2) → **GitLab=T2 / telemetry=T1** | 单命令入口 `run_describe` / `run_improve` 改为先取**同一把** per-MR 链锁再执行（`_run_locked`）；链式路径继续直接调 `_run_command`（锁不可重入，再取会自锁）；拿不到锁 → **拒绝执行**，不裸跑 | `tests/test_note_command_lock.py`（5 例：执行期持锁 / 超时拒绝执行 / 异常释放 / 链式路径只取一次锁）+ 变异验证（绕锁 → 3 例红）+ 修复后 2 轮完整验证 E2E 全量档 **32/32** |
 
-> **N8 的教训**：`§15` 轮验证的是「规则包（`noise_boundary.md` / `general_rules.md`）进 chunk prompt」，
-> 而 `improve.md` 走的是**另一条链路**（agent system prompt → `.qoder/agents/`）。
-> 只验证前者不足以证明「提示词改动已生效」—— 静态检查、单测、契约测试**全都不会报**。
+> **N8 的教训**：`.qoder/agents/*.md` 是一条**独立于 system prompt 的物化链路**
+> （profile prompt → `sync_qoder_agents.py` → `.qoder/agents/` → ACP server 启动时读入）。
+> system prompt 本身由 provider **每次调用现读 profile**（`qoder_sdk_provider.py` 的
+> `meta["prompt"]` / `qodercli_subprocess.py` 的 `--append-system-prompt`），
+> 改 profile 并重启即生效；**注册表**陈旧则会让 ACP 侧派生的子代理跑旧约束。
+> 两件事要分开说——只验证前者不足以证明「注册表已同步」，静态检查、单测、
+> 契约测试**全都不会报**。
 >
 > **N9 的教训**：`cooldown` 是**入队**闸门，不是**执行**闸门；「同一 MR 的命令串行」这件事，
 > 链式路径做到了、note 路径没做到 —— 只有把两个 sink 的写序拉齐才暴露出来。
@@ -1219,15 +1223,28 @@ golden 提示词 6 个文件 + `manifest.json` 全量重生成。
 > MR !8 的 10 条建议里含 **1 条双键建议**（`SSD-RULE-CASE-ALLURE-FIELDS` +
 > `SSD-RULE-CASE-DESCRIPTION`，落库为逗号分隔串）—— 见 §16.6「校验口径加固」。
 
-### 16.5 N8 修复：部署态提示词漂移（静默不生效）
+### 16.5 N8 修复：部署态 agent 注册表漂移（静默陈旧）
 
 **现象**：`improve.md` 改完（406 行）但 `.qoder/agents/improve.md` 仍是旧版（309 行）——
-`grep 规则键开头` 在部署态 **0 命中** → N7 的修复在真实检视里**根本没生效**。
+`grep 规则键开头` 在部署态 **0 命中**。
 
-**为什么前面的验证没发现**：§15 轮验证的是「**规则包**进 chunk prompt」（`noise_boundary.md` /
-`general_rules.md` 走 `review/assembly.py` 现场装配），而 `improve.md` 走的是**另一条链路**
-（agent system prompt → `sync_qoder_agents.py` → `.qoder/agents/*.md` → ACP server 启动时读入）。
-静态检查、单测、契约测试**一条都不会报**。
+**先厘清两条链路（初稿归因有误，此处更正）**：
+
+| 链路 | 来源 | 何时读 | 改 profile 后 |
+|---|---|---|---|
+| **system prompt** | provider **每次调用现读** profile：`qoder_sdk_provider.py` 取 `meta["prompt"]` 喂 SDK；`qodercli_subprocess.py` 用 `--append-system-prompt` 拼命令行 | 每次 LLM 调用 | 改 profile + 重启即生效 |
+| **ACP 子代理注册表** | `.qoder/agents/*.md`，由 `sync_qoder_agents.py` 从同一份 profile prompt **物化** | ACP server 启动时 | 漏跑 sync 就**静默陈旧** |
+
+初稿把 N8 写成「N7 修好了但真实检视里不生效」—— **不准确**：N7 改的是
+profile 里的 `improve.md`，system prompt 链路本就现读 profile，**N7 的修复在
+真实检视里是生效的**（MR !8 空键 0 条就是证据）。真正陈旧的是**注册表**：
+ACP 侧派生出的子代理仍按旧约束跑，且没有任何静态检查会报。
+
+**为什么前面的验证没发现**：`§15` 轮验证的是「**规则包**进 chunk prompt」
+（`noise_boundary.md` / `general_rules.md` 走 `review/assembly.py` 现场装配），
+而注册表走的是**另一条链路**（profile prompt → `sync_qoder_agents.py` →
+`.qoder/agents/*.md` → ACP server 启动时读入）。静态检查、单测、契约测试
+**一条都不会报**。
 
 **修复**：
 1. `scripts/sync_qoder_agents.py` 抽出 `expected_agent_text(src)` —— 「写盘」与「校验」共用同一渲染函数
@@ -1236,10 +1253,13 @@ golden 提示词 6 个文件 + `manifest.json` 全量重生成。
    `sync_qoder_agents.py` 的增量写就是按 mtime 判定的，用 mtime 比对等于没比）；
    缺失 / 内容漂移 → 退出码 1；部署目录里的多余文件（历史遗留 `improve_agent.md`）只报 warning；
 3. 接进 `scripts/restart_local.sh` —— sync 之后立刻校验，**漂移即中止启动**，
-   绝不允许带着旧 system prompt 起 worker。
+   绝不允许带着陈旧注册表起 worker；
+4. 接进 `deploy.sh` 第 8 步与 `deploy/verify.sh` —— 生产链路补齐同样的闭环
+   （详见 §16.6d）。
 
 **实测**：`check_agent_drift.py` → `exit=0`（1 warning = 历史遗留 `improve_agent.md`）；
-`restart_local.sh` 启动日志已包含该校验步骤。
+`restart_local.sh` 启动日志已包含该校验步骤；`deploy.sh` 第 8 步与 `deploy/verify.sh`
+的部署侧复检见 §16.6d。
 
 ### 16.6 校验口径加固：L3「规则键引用」逐键核对
 
@@ -1336,6 +1356,44 @@ n_replace = max(0, len(existing_lines) - 1)   # existing_lines = existing_code �
 
 **回归**：`tests/test_e2e_apply_patch_range.py`（5 例，含 1→N 核心回归）。
 
+### 16.6d 部署链路闭环补齐（生产侧 P1/P2）
+
+**发现**（本轮文档 / 部署面一致性审查）：N8 的漂移守卫只接进了**本地**
+`scripts/restart_local.sh`，**生产链路完全没有闭环**：
+
+| 环节 | 审查前 | 审查后 |
+|---|---|---|
+| `deploy.sh` 第 8 步物化 `.qoder/agents` | **只在 `LLM_PROVIDER=qodercli` 时执行**；生产推荐（也是模板默认）的 `qoder-sdk` 整个跳过 | **无条件物化**（两种 provider 跑的是同一个 qodercli 二进制，ACP server 都要读这份注册表） |
+| 部署期漂移校验 | 无 | 物化后立刻 `check_agent_drift.py`，**漂移即中止部署** |
+| `deploy/verify.sh` 部署后复检 | 无 | 新增「agent 提示词漂移」段，漂移 → 验证不通过 |
+| `deploy/preflight.sh` 体检 | `.qoder/agents` 检查挂在 `qodercli)` 分支内 | 提到 provider 无关的位置（两种 provider 都需要） |
+
+**为什么这是真问题**：`.qoder/` 在 `.gitignore` 里 —— `git pull` / `rsync`
+**不会**把注册表带到生产机。全新部署的生产机上 `.qoder/agents` 必然是空的，
+而审查前的 `deploy.sh` 在 `qoder-sdk` 下又恰好跳过物化 → **生产永远没有注册表**，
+且与本地 `restart_local.sh` 的无条件同步行为不一致。
+
+**回归**：`tests/test_deploy_units.py` 新增 4 例（无条件物化 / 先物化后校验 /
+漂移即 `exit 1` / `verify.sh` 覆盖漂移 / preflight 检查不挂 provider 分支），
+**逐条做过变异验证**（把脚本 stash 回旧版 → 对应用例转红）。
+
+**对本轮既有基线的影响**：本轮只改文档与部署脚本，**未触碰任何运行期代码**
+（prompts / rules / 场景包均未变 → `profile_fingerprint` 仍是 `1fcce9900a8b4aee`），
+因此 §16.7 的两轮统一签名（E2E 21/21 + 32/32、L3 19/20 + 20/20 + 20/20）不受影响。
+**L1 由 1708 变为 1712**（净增 +4 例部署契约），skipped 仍为 2。
+
+**本轮实测（改完后按新脚本重新部署 + 验证）**：
+
+| 项 | 结果 |
+|---|---|
+| 本地重新部署（改后的 `restart_local.sh`） | ✅ 服务起、`/readyz` 200、`profile_fingerprint` 不变 |
+| L1 单元回归 | ✅ **1712 passed / 0 failed / 2 skipped**（1708 + 4 例部署契约） |
+| E2E 快速档 | ✅ **21/21** |
+| E2E 全量档 | ✅ **32/32**（`report-20261113T054302Z.json`，含 `apply_closure` / `reconcile_resolved`） |
+| L3 真实业务 MR !8 | ✅ **20/20**（规则键逐键 11/11） |
+| agent 漂移守卫 | ✅ `exit=0`（1 warning = 历史遗留 `improve_agent.md`） |
+| 文档自检（`/tmp/doc_selfcheck.py`） | ✅ **44/44**（本轮从 33 项扩到 44 项，新增跨文件一致性检查） |
+
 ### 16.7 全面完整验证 2 遍
 
 验证脚本：`/tmp/verify_round.py <n>` —— 每轮跑 **L1 单元回归 + E2E 快速档 + E2E 全量档 +
@@ -1385,9 +1443,12 @@ L3 真实业务复验 MR !3 19/20、MR !4 20/20、MR !8 20/20。
 3. **全面完整验证 2 遍签名一致**：L1 1708/0/2、E2E 21/21 + 32/32、L3 19/20 + 20/20 + 20/20，
    可复现、无偶发。
 4. **发现并修掉 4 个问题**（N7–N10）：N7 是**模型侧**规则键缺失（提示词硬约束 + 真实复验）；
-   N8 是**部署链路**提示词静默不生效（内容级漂移守卫 + 启动 fail-fast）；
+   N8 是**部署链路**的 ACP 子代理注册表静默陈旧（内容级漂移守卫 + 启动/部署 fail-fast）；
    N9 是**并发**写 MR 标题导致 telemetry 与 GitLab 漂移（note 路径补 per-MR 锁）；
    N10 是 **E2E 的 Apply 模拟用错范围语义**（按 existing_code 跨度替换）。
    四者都**不是**静态检查或单测能发现的 —— 只有真跑检视、核对部署态、且**连跑多遍**
    （本轮实测：第 1 轮 32/32、第 2 轮 31/32 暴露 N9；N10 则取决于模型给出的建议是否
    1→N 多行替换 —— 同一份代码第 1 轮触发、第 2 轮不触发），才会暴露。
+5. **文档与部署面一致性审查**（本轮追加）：修掉 N8 的因果误述（system prompt 与
+   ACP 注册表是两条链路）、补齐生产侧物化与漂移校验闭环（§16.6d）、以及文档面
+   的周报项目号 / 验证计数 / 新增运维脚本等 9 处过时或缺失内容。

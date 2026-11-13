@@ -8,7 +8,7 @@
     的 suggestion 标 resolved + resolution_source='gitlab_resolve'.
 
 Usage:
-    python3 scripts/sync_resolved_suggestions.py --project-id 34 --mr-iid 247
+    python3 scripts/sync_resolved_suggestions.py --project-id 31 --mr-iid 8
     python3 scripts/sync_resolved_suggestions.py --all
     python3 scripts/sync_resolved_suggestions.py --all --dry-run
 """

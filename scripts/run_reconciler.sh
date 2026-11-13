@@ -7,7 +7,7 @@
 #   - 独立脚本简单, 失败隔离, launchd 自动重启.
 #
 # 用法 (手动跑一次):
-#   bash scripts/run_reconciler.sh --project-id 34
+#   bash scripts/run_reconciler.sh --project-id 31
 #
 # 安装 launchd agent (系统级, 60s 一次):
 #   cp scripts/com.jarvs.reviewagent.reconciler.plist /Users/jarvs/Library/LaunchAgents/

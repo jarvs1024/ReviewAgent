@@ -257,9 +257,10 @@ LLM_PROVIDER=qodercli  # 旧 subprocess 路径, 完整保留未动
 
 ### 验证状态（2026-11）
 
-- **单元测试**：1418 passed / 2 skipped（`python -m pytest`；需真实 GitLab/Redis 的集成用例不在本机跑）
+- **单元测试**：1712 passed / 0 failed / 2 skipped（`python -m pytest`；需真实 GitLab/Redis 的集成用例不在本机跑）
 - **快速档 E2E**：`scripts/e2e/run_e2e.py --tier fast` 21/21 检查通过（覆盖 34 条 behavior witness）
-- **全量档 E2E**：`scripts/e2e/run_e2e.py --tier full` 24/24 检查通过（8 个功能 + 字段级 telemetry 审计）
+- **全量档 E2E**：`scripts/e2e/run_e2e.py --tier full` 32/32 检查通过
+  （16 个命令 / 流程功能 + 16 项产物校验：`config` 5 项 / `telemetry` 6 项 / `config_real` 5 项）
 - **历史真实 MR（2026-09）**：MR 318/319 的 `/describe`（21s）与 `/improve`（103s，2 条 inline + 总览 + 汇总表）结果见 [`docs/LLM_PROVIDER_ADAPTER.md`](docs/LLM_PROVIDER_ADAPTER.md) 附录 A（当时快照，非当前测试计数）
 
 
@@ -277,6 +278,10 @@ sudo bash deploy.sh --check  # 只做前置检查（不修改系统）
 `deploy.sh` 完成后所有 unit 均已 `systemctl enable`：webhook、`reviewagent-worker@1..RQ_WORKER_COUNT`、
 weekly-worker 常驻，weekly.timer 与 reconciler.timer 进入 `timers.target`，重启机器自动拉起。
 `deploy/preflight.sh` 与 `deploy/verify.sh` 可单独运行做环境体检与部署后复检。
+
+`deploy.sh` 第 8 步会**无条件**物化 `.qoder/agents`（QoderCLI ACP server 启动时读取的子代理注册表；
+`.qoder/` 在 `.gitignore` 里，`git pull` 不会带过去），并按内容校验是否与 profile prompts 一致 ——
+**漂移即中止部署**。生产链路与本地 `scripts/restart_local.sh` 是同一套闭环。
 
 - 服务器部署细节 → 见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 - 快速启动（本地开发 / 运维） → 见 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
@@ -338,7 +343,8 @@ env 只在 [`reviewagent/settings/binder.py`](reviewagent/settings/binder.py) �
 # 快速档：进程内跑配置生效性审计（catalog 91 字段：34 behavior / 55 live / 2 script；快速档执行 21 组行为检查），无需外部服务
 .venv/bin/python scripts/e2e/run_e2e.py --tier fast
 
-# 全量档：临时 GitLab 项目/分支/MR + 真实 LLM/队列，跑 8 个功能并按真实产物校验配置
+# 全量档：临时 GitLab 项目/分支/MR + 真实 LLM/队列，跑 16 个命令 / 流程功能，
+# 并按真实产物逐项校验配置与 telemetry（共 32 项检查）
 .venv/bin/python scripts/e2e/run_e2e.py --tier full --round 1
 ```
 

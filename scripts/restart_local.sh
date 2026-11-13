@@ -170,17 +170,17 @@ if ${MANAGE_REDIS}; then
     fi
 fi
 
-# Materialise .qoder/agents/*.md so the qodercli ACP server (when each
-# RQ worker pre-boots it lazily on first job) picks up the synced
-# subagent prompts. Idempotent: skips when nothing has changed.
+# Materialise .qoder/agents/*.md —— QoderCLI ACP server 启动时读取的**子代理
+# 注册表**（system prompt 本身由 provider 每次现读 profile，不走这里）。
+# Idempotent: skips when nothing has changed.
 if [ -x .venv/bin/python ]; then
     # reviewagent.config reads required env at import time. Source the
     # resolved instance config in the same shell as the python invocation
     # so sync_qoder_agents can import reviewagent.config without RuntimeError.
     (set -a && source "${REVIEWAGENT_ENV_FILE}" && set +a && .venv/bin/python scripts/sync_qoder_agents.py) 2>&1 | tee -a logs/sync_qoder_agents.log
     # 按**内容**校验部署态 agent 提示词与 profile prompts 一致。
-    # sync 按 mtime 增量写，漏写/跳过时 prompt 改动会静默不生效（N8）——
-    # 这里立刻 fail fast，不要带着旧 system prompt 起 worker。
+    # sync 按 mtime 增量写，漏写/跳过时子代理注册表会静默陈旧（N8）——
+    # 这里立刻 fail fast，不要带着陈旧注册表起 worker。
     (set -a && source "${REVIEWAGENT_ENV_FILE}" && set +a && .venv/bin/python scripts/ops/check_agent_drift.py) || {
         echo "    ERROR: agent 提示词漂移，已中止启动（详见上方 ERROR 行）" >&2
         exit 1

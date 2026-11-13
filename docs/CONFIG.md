@@ -19,6 +19,12 @@
 > GitLab 三项必填项生成时使用临时 stub 值（secret 一律渲染为 `***`，`GITLAB_URL`
 > 在 schema 中也按 secret 处理），不把真实凭证写进文件。
 >
+> 生成命令**不加载** `config/instance.env`（只喂 stub env），所以下方「生成输出」
+> 反映的是**场景 / 配置层**的生效值 —— 即 `profile.yaml` + `config/profiles/<name>/review.yaml`
+> 叠加 schema 默认值的结果。**实例平面**（`config/instance.env`）的覆盖值不在本文件里；
+> 想看某个实例的真实生效配置（含 `source=env` 的行），在**已 source 该实例配置**的
+> shell 里直接跑 `.venv/bin/python -m reviewagent config show --diff-default --sources`。
+>
 > `--diff-default` 只列出与 schema 默认值不同的字段，因此本文件很短不代表配置缺失：
 > 它说明该实例几乎全部字段都落在 `reviewagent/settings/schema.py` 的默认值上。
 > 完整字段与默认值以 `reviewagent/settings/schema.py` 为唯一来源；实例平面

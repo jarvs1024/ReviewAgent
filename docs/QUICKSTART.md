@@ -1,7 +1,7 @@
 # 快速启动指南
 
 > 适用于：本地开发 / 服务器运维
-> 更新日期：2026-11-08
+> 更新日期：2026-11-13
 
 配置分三个平面：实例平面（`config/instance.env`，模板
 `config/examples/instance.env.example`）、场景平面（`profiles/` + 用户调参
@@ -101,10 +101,13 @@ curl -X POST http://localhost:3000/webhook \
       "note": "/describe"
     },
     "merge_request": {"iid": 1},
-    "project": {"id": 34},
+    "project": {"id": 31},
     "user": {"username": "test"}
   }'
 ```
+
+> `project.id` 用真实业务仓库的 id（本机实例为 **31**）；填已删除的临时项目 id
+> 会让命令路由不到目标 MR。
 
 ---
 
@@ -118,10 +121,14 @@ bash scripts/run_weekly_report.sh
 WEEKLY_PUSH=true bash scripts/run_weekly_report.sh
 
 # 指定项目 / 上周
-bash scripts/run_weekly_report.sh --project-id 34 --week-offset -1
+bash scripts/run_weekly_report.sh --project-id 31 --week-offset -1
 ```
 
 > 周报含三段采集（默认 `telemetry,merged_mrs,repo_scan`）：本周检视概况、main 变更汇总、代码质量全量扫描（含固有代码评估）。三段各一次 LLM 调用。
+>
+> 目标项目由 `REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` 决定（本机实例为 **31**，
+> 写进 `config/instance.env`）；`--project-id` 只是临时覆盖，不要指向已删除的
+> 临时项目 id（GitLab 上已 404，会导致采集段直接失败）。
 
 ---
 
@@ -170,7 +177,32 @@ MR description / 建议没改？
 
 ---
 
-## 七、相关文档
+## 七、运维脚本（一次性 / 例行）
+
+`scripts/ops/` 下是两个**只读优先**的运维脚本，都不触发检视、不调 LLM。
+
+```bash
+# 1. agent 提示词漂移守卫：核对 .qoder/agents/*.md（ACP 子代理注册表）与
+#    profiles/<profile>/prompts/*.md 是否一致（按**内容**比对，不看 mtime）
+#    退出码 0 = 一致；1 = 缺失 / 内容漂移
+#    deploy.sh 第 8 步与 deploy/verify.sh 都会跑它；本地可用它自查
+set -a; source config/instance.env; set +a
+.venv/bin/python scripts/ops/check_agent_drift.py
+
+# 2. 重刷「检视汇总」note：cohort 口径迁移后历史 MR 的汇总数字滞后时用
+#    默认 dry-run（只报告哪些 MR 的汇总对不上）；确认后再 --apply
+.venv/bin/python scripts/ops/refresh_overviews.py                 # 全量 dry-run
+.venv/bin/python scripts/ops/refresh_overviews.py --project 31    # 指定项目 dry-run
+.venv/bin/python scripts/ops/refresh_overviews.py --project 31 --apply
+```
+
+> `check_agent_drift.py` 需要先 `source config/instance.env`：`reviewagent.config`
+> 在 import 期就要求 `GITLAB_*` 必填项。漂移了先跑
+> `scripts/sync_qoder_agents.py` 重新物化，再跑校验。
+
+---
+
+## 八、相关文档
 
 - [`README.md`](../README.md) — 项目入口（功能 / 架构 / 配置）
 - [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — 服务器部署、切换场景与升级顺序

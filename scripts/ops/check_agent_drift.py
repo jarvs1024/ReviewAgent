@@ -1,13 +1,18 @@
 """检查部署态 agent 提示词是否与当前 profile prompts 一致（防静默漂移）。
 
 背景:
-`profiles/<profile>/prompts/improve.md` 既是 agent 的 system prompt，也是
-`.qoder/agents/improve.md` 的物化来源。`sync_qoder_agents.py` 按 **mtime** 增量写，
-漏跑一次（或 mtime 判断失误）就会让 prompt 改动**静默不生效**。
+`profiles/<profile>/prompts/improve.md` 是 **system prompt 的唯一来源** ——
+两个 provider 都是**每次调用现读 profile**（`qoder_sdk_provider.py` 把
+`meta["prompt"]` 喂给 SDK；`qodercli_subprocess.py` 用 `--append-system-prompt`
+拼命令行）。因此改 profile 里的 prompt 并重启服务，system prompt 立刻生效。
 
-实测锚点（N8）: `improve.md` 的 self-check 新增「rationale 首句以规则键开头」后
-只改了 profile 侧，没重跑同步 → 部署态 agent 仍是旧版（309 行 vs 406 行），
-N7 的修复在真实检视里不生效，MR !7 复验仍有 1 条 `rule_keys` 为空。
+`.qoder/agents/improve.md` 是**另一份物化**：QoderCLI ACP server 启动时读取的
+**子代理注册表**（name / description / tools / permissionMode / maxTurns / model），
+正文是同一份 prompt。派生出来的子代理跑的是这份正文。
+
+`sync_qoder_agents.py` 按 **mtime** 增量写，漏跑一次（或 mtime 判断失误）就会让
+注册表与 profile 不一致 —— ACP 侧派生出的子代理仍按旧约束跑，而且**没有任何
+静态检查会报**。
 
 本脚本按**内容**比对（不看 mtime），覆盖两种漂移:
 * 缺失: `prompts/<stem>.md` 有对应 prompt，但 `agents/<stem>.md` 不存在；
@@ -21,6 +26,9 @@ N7 的修复在真实检视里不生效，MR !7 复验仍有 1 条 `rule_keys` �
   .venv/bin/python scripts/ops/check_agent_drift.py            # 检查当前激活 profile
   .venv/bin/python scripts/ops/check_agent_drift.py --profile ssd-python-autotest
 退出码: 0 = 无漂移；1 = 存在缺失/内容漂移（stdout 逐条列出）。
+
+注意: `reviewagent.config` 在 import 期就要求 `GITLAB_*` 必填项，必须先
+source 实例配置再运行本脚本。
 """
 from __future__ import annotations
 

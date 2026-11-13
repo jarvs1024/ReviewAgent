@@ -1,6 +1,6 @@
 # 部署文档
 
-> 更新日期：2026-11-08
+> 更新日期：2026-11-13
 
 ReviewAgent 通过 systemd 管理全部服务，部署在 Linux 服务器上。配置分三个平面：
 **实例平面**（`config/instance.env`，本机一份）、**场景平面**（`profiles/` + 用户调参
@@ -56,18 +56,54 @@ sudo bash deploy.sh --no-verify            # 部署但跳过 verify.sh
 5. `[5/10]` 建好 `/var/lib/reviewagent/{repos,weekly_reports}` 与 `/tmp/reviewagent-worktrees`（属主 `workflow`）；
 6. `[6/10]` 按 `REDIS_URL` 解析 host/port，优先 `systemctl enable --now redis-server`（没有 distro unit 时手动拉起并 `ping` 校验）；
 7. `[7/10]` 跑 `deploy/preflight.sh`（任何 FAIL 都中止，不带着坏配置改 systemd）；
-8. `[8/10]` 场景包附属文件：`LLM_PROVIDER` 为 `qodercli`（含未设置）时同步 `.qoder/agents`（显式 `qoder-sdk` 时跳过）；
+8. `[8/10]` 场景包附属文件：**无条件**物化 `.qoder/agents`（QoderCLI ACP server 启动时读取的
+   **子代理注册表**，正文来自 `profiles/<profile>/prompts/*.md`；两种 provider 跑的是同一个
+   qodercli 二进制，都需要它），随后按**内容**做漂移校验（`scripts/ops/check_agent_drift.py`），
+   **漂移即中止部署**；
 9. `[9/10]` 安装 `deploy/*.service|*.timer`（自动把默认路径替换成 `PROJECT_DIR` / `REVIEWAGENT_DATA_DIR`），
    下线旧 `reviewagent-worker.service`，`daemon-reload` 后 `enable --now` 全部 unit，
    按 `RQ_WORKER_COUNT` 启 `reviewagent-worker@1..N` 并关掉多余实例；
-10. `[10/10]` 跑 `deploy/verify.sh` 校验开机自启、`/health`、`/readyz`、Redis 与 API/worker 的配置指纹一致性
-    （`--no-verify` 跳过）。
+10. `[10/10]` 跑 `deploy/verify.sh` 校验开机自启、`/health`、`/readyz`、Redis、API/worker 的配置指纹一致性
+    与 **agent 提示词漂移**（`--no-verify` 跳过）。
 
 两个检查脚本也可单独执行：
 
 ```bash
 sudo bash deploy/preflight.sh      # 环境：systemd/python/git/用户/磁盘/端口/密钥/GitLab API/Redis/目录/unit/config check
-sudo bash deploy/verify.sh         # 结果：is-enabled + is-active + 探针 + 指纹一致 + timer 列表
+sudo bash deploy/verify.sh         # 结果：is-enabled + is-active + 探针 + 指纹一致 + agent 漂移 + timer 列表
+```
+
+### `.qoder/agents` 为什么必须由部署脚本物化
+
+`.qoder/` 在 `.gitignore` 里 —— `git pull` / `rsync` **不会**把它带到生产机，
+全新部署的机器上它必然是空的。而 QoderCLI ACP server 启动时会从项目级
+`.qoder/agents/*.md` 读取**子代理注册表**（name / description / tools /
+permissionMode / maxTurns / model，正文是同一份 profile prompt）。
+
+> 注意区分两条链路：**system prompt** 由 provider **每次调用现读** profile
+> （`qoder_sdk_provider.py` 的 `meta["prompt"]` / `qodercli_subprocess.py` 的
+> `--append-system-prompt`），改 profile 并重启即生效；**注册表**是物化产物，
+> 漏跑同步就静默陈旧，而且静态检查、单测、契约测试**一条都不会报**。
+
+因此第 8 步的物化 + 校验是**闭环**，缺一不可：
+
+```bash
+# 手工执行（deploy.sh 已包含，运维自排查时可用）
+sudo -u workflow bash -c 'cd /home/workflow/ReviewAgent && set -a && . config/instance.env && set +a && .venv/bin/python scripts/sync_qoder_agents.py'
+sudo -u workflow bash -c 'cd /home/workflow/ReviewAgent && set -a && . config/instance.env && set +a && .venv/bin/python scripts/ops/check_agent_drift.py'
+```
+
+`sync_qoder_agents.py` 按 **mtime** 增量写（文件比源新但内容陈旧时会被跳过），
+所以校验必须按**内容**比对 —— `check_agent_drift.py` 正是这么做的：
+退出码 `0` = 一致，`1` = 缺失 / 内容漂移（逐条列在 stdout）。
+
+### 其它运维脚本
+
+```bash
+# 重刷「检视汇总」note（cohort 口径迁移后历史 MR 汇总数字滞后时用）
+# 默认 dry-run（只报告哪些 MR 对不上）；确认后再 --apply
+.venv/bin/python scripts/ops/refresh_overviews.py --project 31
+.venv/bin/python scripts/ops/refresh_overviews.py --project 31 --apply
 ```
 
 **开机自启**由 `systemctl enable` 持久化：`reviewagent-webhook`、`reviewagent-worker@1..N`、
@@ -326,6 +362,11 @@ journalctl -u 'reviewagent-worker@*' -n 200 | grep -E 'config.resolved|bootstrap
 python -c 'import redis; print(redis.from_url("redis://127.0.0.1:6380/0").ping())'
 ls -la /var/lib/reviewagent/telemetry.db
 curl -s http://127.0.0.1:3000/api/v1/telemetry/health
+
+# 6. agent 提示词漂移（ACP 子代理注册表 vs profile prompts）
+#    deploy/verify.sh 已含此项；手工复检：
+sudo -u workflow bash -c 'cd /home/workflow/ReviewAgent && set -a && . config/instance.env && set +a && .venv/bin/python scripts/ops/check_agent_drift.py'
+# 期望：agent 提示词一致（可能有「多余文件」warning，不算失败）
 ```
 
 ---
@@ -340,3 +381,7 @@ curl -s http://127.0.0.1:3000/api/v1/telemetry/health
    否则值里会带上注释文本（例如 `LOG_FORMAT=text   # ...` 变成非法值，`config check` 报错）。
 5. **数据目录写到了代码目录**：旧部署把数据放 `ReviewAgent/data/`；升级后统一
    `/var/lib/reviewagent`，迁移前先按 BACKUP_RESTORE 备份再拷贝，不要两边同时写。
+6. **`.qoder/agents` 是空的**：`.qoder/` 在 `.gitignore` 里，`git pull` / `rsync` 不会把它
+   带到机器上。生产机首次部署必须让 `deploy.sh` 第 8 步跑完（物化 + 漂移校验）；
+   跳过的话 ACP server 读不到子代理注册表，而且**没有任何静态检查会报**。
+   手工补：`scripts/sync_qoder_agents.py` 然后 `scripts/ops/check_agent_drift.py` 确认一致。

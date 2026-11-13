@@ -7,7 +7,7 @@
     的一批 suggestions, 用这个脚本一次性扫.
 
 Usage:
-    python3 scripts/reconcile_late_detect.py --project-id 34 --mr-iid 247 [--head-sha HEAD]
+    python3 scripts/reconcile_late_detect.py --project-id 31 --mr-iid 8 [--head-sha HEAD]
     python3 scripts/reconcile_late_detect.py --all  # 扫所有 MR
 
     --head-sha 默认从 GitLab API 拉该 MR 当前 head_sha.

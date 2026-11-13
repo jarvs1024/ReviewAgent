@@ -7,6 +7,31 @@
 
 ### Fixed
 
+- **安全类不再误报**：`ssd-python-autotest` 场景（内网测试台上的仓库内部自动化测试代码，
+  无对外攻击面）下，命令 / SQL 注入、明文凭据、越权、路径穿越、不安全反序列化、弱哈希、
+  敏感信息外泄、文件权限过宽等**安全类**候选不再产出 suggestion；三方依赖未锁版本、
+  强绑系统独有命令无多系统兼容兜底等**依赖环境类**同样不报。
+  **不受影响**：硬件数据类（`R-DATA` / `R-NVME`）与全部强制例外（数据/硬件损坏、
+  假通过假失败、资源泄漏、caller 失配、会误导的注释、仓库自定义规则）**照常报**。
+  口径写在 `profiles/ssd-python-autotest/rules/noise_boundary.md`，逐条实测记录见
+  `docs/VERIFICATION.md` §16.1 / §16.3。
+- **note 触发的命令不再并发写 MR 标题**：`/describe` / `/improve` 经评论入口触发时，
+  现在与链式路径**共用同一把 per-MR 锁**（拿不到锁就拒绝执行，不裸跑）。
+  此前 note 路径不取锁，cooldown 只挡入队不挡执行 —— 排队中的 note 任务与链式任务
+  重叠跑时，GitLab 标题与 telemetry 标题的「最后写入者」可能不同，造成两者永久漂移。
+- **周报目标项目修正**：`REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID` 由 `34` 改为 `31`
+  （`config/instance.env` 与入库的 `config/examples/instance.env.example` 同步）。
+  原值指向一个已被删除的 E2E 临时项目，GitLab 上已 404。
+- **E2E 的 Apply 模拟用错范围语义**：`apply_closure` 特性此前按 `target_line_end`
+  （存的是**新代码**跨度）打补丁，1→N 多行替换时会多删原代码之外的行、把文件改坏，
+  导致特性误报红。改为按 `existing_code` 的实际行数替换 —— 与 GitLab 真实 Apply 同语义。
+- **生产侧 agent 注册表物化与漂移校验闭环**：`deploy.sh` 第 8 步此前**只在**
+  `LLM_PROVIDER=qodercli` 时同步 `.qoder/agents`，生产推荐的 `qoder-sdk` 整个跳过；
+  而 `.qoder/` 在 `.gitignore` 里，`git pull` / `rsync` 也不会把它带到生产机 ——
+  结果是**生产永远没有子代理注册表**，且没有任何校验会报。现在改为无条件物化，
+  物化后按**内容**校验漂移（`scripts/ops/check_agent_drift.py`），**漂移即中止部署**；
+  `deploy/verify.sh` 新增对应的部署后复检项，`deploy/preflight.sh` 的注册表体检
+  也从 provider 分支里提出来（两种 provider 都需要它）。
 - **`/adopt` 统计口径**：校验失败（`same-head` / `content-unavailable` /
   `target-unchanged`）或目标已 dismissed/resolved 的 `/adopt` 仍保留审计行，
   但不再计入 `suggestion_stats` / `suggestion_metrics` 的 `action_counts.adopted`，
@@ -65,6 +90,14 @@
 
 ### Added
 
+- **运维脚本 `scripts/ops/`**：
+  - `check_agent_drift.py` —— 核对部署态 `.qoder/agents/*.md`（QoderCLI ACP server 启动时
+    读取的**子代理注册表**）与 `profiles/<profile>/prompts/*.md` 是否一致，按**内容**比对
+    （不看 mtime，因为物化脚本本身就是按 mtime 增量写的）；退出码 `0` = 一致，`1` = 缺失 /
+    内容漂移。已接进 `scripts/restart_local.sh`（漂移即中止启动）、`deploy.sh` 第 8 步
+    （漂移即中止部署）与 `deploy/verify.sh`（部署后复检）。
+  - `refresh_overviews.py` —— cohort 口径迁移后重刷历史 MR 的「检视汇总」note；
+    默认 dry-run（只报告哪些 MR 的汇总数字对不上），`--apply` 才真的重刷，幂等。
 - **`/readyz` 回显生效场景包指纹**：200 响应新增 `profile` / `profile_fingerprint`
   （服务进程实际加载的内容），可与磁盘当前指纹核对；全量档 E2E 预检据此新增
   `profile.freshness` 检查——改完 prompts/profile 忘记重启本地栈时立即失败并提示
