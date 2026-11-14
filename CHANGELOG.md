@@ -7,6 +7,26 @@
 
 ### Fixed
 
+- **检视汇总的「采纳率」不再出现两个口径**：`/api/v1/telemetry/mr/{proj}/{iid}/stats`
+  此前用 `adopted / processed`（不含待处理），而「检视汇总」note 与周报用
+  `applied / 总建议数`（含待处理）—— 同一份数据能算出两个数：
+  实测 MR !8 是 7.1% vs 25.0%、MR !9 是 20.0% vs 50.0%、p31 项目级是 5.5% vs 50.0%
+  （差 9 倍）。现在 `/stats` 与汇总表**同源同口径**：数据统一走
+  `list_latest_by_cohort`（同 cohort 只算最新一条、排除 superseded），
+  采纳率统一为 `applied / 总建议数`。`processed` 字段保留（它表达「已处理建议数」，
+  与采纳率分母语义不同）。
+- **检视汇总不再丢掉「HEAD <短码>」行**：`/dismiss`、`/adopt`、UI Apply、
+  GitLab 直接 resolve、`auto_detect_applied`、reconciler 这 6 条状态迁移路径
+  刷新汇总时都不传 `head_sha`，导致汇总表底部的 commit 标记被整行抹掉 ——
+  用户看到「2 条已采纳」却无法确认这是基于哪个 commit。实测 p31 MR !9：
+  `/dismiss` 前有 `HEAD e866ffc`、`/dismiss` 后消失。存量 52 个有汇总 note 的 MR 里
+  **19 个已中招（36.5%）**。现在 `publish_overview` 在 `head_sha` 缺失时自动补当前
+  MR head（一处改动覆盖全部 6 个调用点 + 运维脚本），取不到时降级、不阻塞发布。
+- **运维脚本 `refresh_overviews.py` 不再抹掉「最后新增 N 条」**：重刷时原先固定传
+  `inline_posted_count=0`，把用户判断「这轮检视新增了几条」的唯一线索清零；
+  现在原样保留已发布的数值。同时判定逻辑新增「缺 HEAD 行也算对不上」——
+  旧判定只比对「总建议数」，那 19 个存量 MR 的总数是一致的，
+  **修复比例 0/19**，永远挑不出来。
 - **看板作者分布 / MR 数被 200 条窗口截断**：`/metrics/authors` 改为全表 SQL 聚合
   （新增 `merged_count`、建议状态计数、`runs_by_command`），`/metrics/overview` 增加
   全表 `mrs` 状态计数；TestMate 网关的作者分布与顶部 MR 卡片改为直连这两个字段，

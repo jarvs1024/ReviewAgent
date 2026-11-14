@@ -1452,3 +1452,102 @@ L3 真实业务复验 MR !3 19/20、MR !4 20/20、MR !8 20/20。
 5. **文档与部署面一致性审查**（本轮追加）：修掉 N8 的因果误述（system prompt 与
    ACP 注册表是两条链路）、补齐生产侧物化与漂移校验闭环（§16.6d）、以及文档面
    的周报项目号 / 验证计数 / 新增运维脚本等 9 处过时或缺失内容。
+
+---
+
+## 17. 第六轮验证（真实场景四态迁移 + 采集接口对齐 + D1/D2 修复）
+
+### 17.1 真实场景构造
+
+在 p31（`review-bot-v2/ssd-real-biz-full`，真实业务 SSD 仓库）新建
+[MR !9](http://127.0.0.1:8929/review-bot-v2/ssd-real-biz-full/-/merge_requests/9)
+（分支 `feature/verify-state-machine-20261114`），新增样本文件
+`testcase/test_gc/test_gc_state_probe.py`，埋 4 个受控缺陷：断言被吞（假通过）、
+`open()` 未托管、裸 `print`、未使用常量。首轮检视产出 5 条建议（HIGH 1 / MEDIUM 3 / LOW 1）。
+
+**场景构造的一个坑**：首版用机器人账号（`review-bot-v2`）推送，MR update 事件全部被
+`webhook.skip bot_self` 拦下 —— 防回环逻辑的**预期行为**，但导致 auto_detect / UI Apply
+完全不触发。换成 root 账号推送后链路才走通。凡是「机器人账号建的 MR」都存在这个静默失效点。
+
+### 17.2 四态迁移验证（Δ 不变量）
+
+| 目标状态 | 真实触发方式 | 建议 | DB 结果 | 归因字段 |
+|---|---|---|---|---|
+| 已采纳 | push 改码 → `auto_detect_applied` 精确匹配 | 530 | `applied` | `adoption_source=manual_change`、`adoption_evidence=exact_match` |
+| 已采纳 | note `/adopt` 手工确认 | 527 | `applied` | `adoption_source=adopt_command`、`validation_status=ok` |
+| 已忽略 | note `/dismiss` | 529 | `dismissed` | `dismissed_by=review-tester@root` |
+| 已关闭（未分类） | GitLab UI resolve + `sync_resolved_suggestions.py` | 528 | `resolved` | `resolution_source=gitlab_resolve` |
+
+每次迁移满足 `open −1` / 目标 `+1` / 总数不变；汇总表**秒级自动刷新**。
+`/adopt` 正确触发 re-improve（run 410 `triggered_by=adopt`）。
+
+**两条采纳路径必须分开构造**：`auto_detect_applied` 对未 resolve 的讨论要求
+`improved_code` **逐行精确匹配**；用户写法哪怕只差一个注释就不命中，此时 `/adopt`
+才接管（走宽松的区域变化判定）。本次即靠「加注释」构造出可复现的 `/adopt` 成功路径。
+
+### 17.3 三方逐字段对账：0 差异
+
+DB（cohort 归并后）↔ 汇总表 note 正文 ↔ telemetry API 的 severity×state 矩阵（3×4 +
+总计行）、总数、逐条 `state/severity/adoption_source/resolution_source/state_label`
+**全部一致**；20 个 telemetry 端点全部 HTTP 200 可用。
+
+### 17.4 发现的 5 个问题
+
+- **D1（高）采纳率三口径并存**：汇总表 `applied/总建议数`（含 open）、`/stats`
+  `adopted/processed`（不含 open）、`/metrics/*` `adopted/总表数`（未归并）。
+  实测 MR !8 是 7.1% vs 25.0%、MR !9 是 20.0% vs 50.0%、p31 项目级是 5.5% vs 50.0%
+  （差 9 倍）。两个分母的增长规律相反（分母含 open 的一直走低），差距会**越拉越大**。
+  产品内部（汇总表 + 周报）其实自洽，冲突方只有 `/stats`。
+- **D2（中高）生产路径丢 `HEAD` 行**：6 处状态迁移调用点（dismiss / adopt / ui_apply /
+  resolve / auto_detect / reconciler）都不传 `head_sha` → 汇总表底部的 commit 标记被整行
+  抹掉。实测 p31 MR !9：`/dismiss` 前有 `HEAD e866ffc`、`/dismiss` 后消失。
+  存量 52 个有汇总 note 的 MR 里 **19 个已中招（36.5%）**，末行都是「最后新增 0 条」。
+- **D3（中）`/stats` 不做 cohort 归并**：数据源是原始表 GROUP BY，汇总表用
+  `list_latest_by_cohort`。当前库 0 个 MR 有归并差异，**暂未暴露**。
+- **D4（次）`applied_commit_sha` 对手动改码恒为空**：只在 GitLab UI "Apply suggestion"
+  产生的 commit 上填充，而 `store.py` 的 dedup 第三查正以该字段为键。
+- **D5（次）`/adopt` 成功路径偏窄**：见 §17.2 ——「精确优先」的设计取舍会让采纳率
+  系统性低于用户真实意图，也是 D1 两个口径差距的来源。
+
+### 17.5 D1 / D2 修复与回填
+
+**D2**：在 `publish_overview` 内部补全 `head_sha`（而不是逐个改 6 个调用点）——
+一处改动覆盖全部状态迁移路径 + `scripts/ops/refresh_overviews.py`。取不到时降级、
+不阻塞发布；显式传入时**不**额外调 GitLab（improve 主流程零新增成本）；补全出的 head
+**不参与** `run_late_detect` 判定（否则会绕过调用方显式传的 `run_late_detect=False`）。
+
+**运维脚本**：判定逻辑新增「缺 HEAD 行也算对不上」（旧判定只比对总数，那 19 个存量 MR
+的总数一致，修复比例 **0/19**）；重刷时原样保留已发布的「最后新增 N 条」（原先固定传 0，
+把用户判断这轮新增了几条的唯一线索清零）。
+
+**D1**：`suggestion_stats` 与汇总表**同源同口径** —— 数据统一走 `list_latest_by_cohort`
+（同 cohort 只算最新一条、排除 superseded），采纳率统一为 `applied / 总建议数`；
+`processed` 字段保留（它表达「已处理建议数」，与采纳率分母语义不同）。
+
+**TDD**：先写失败测试（6 + 10 + 6 例）→ 变绿 → **4 组变异验证全部被捕获**
+（取消自动补全 → 2 红；绕过 `run_late_detect` → 1 红；去掉 has_head 判定 → 2 红；
+回填归零 inline_count → 1 红；采纳率改回 processed → 1 红；数据源改回原始表 → 1 红）
+→ 全量 L1 **1733 passed / 3 skipped**（3 个 skip 是环境条件 skip，stash 后的基线代码
+同样是 3 个，与本次改动无关）。
+
+**端到端验收（真实路径，非单测）**：
+- p31 MR !4 回填成功，末行 `🆕 最后新增 0 条 · ⏱ … · HEAD 91d23b9`；
+- MR !9 真实 `/dismiss` 后末行 `🆕 最后新增 0 条 · ⏱ … · HEAD 949f9c8`
+  —— **HEAD 行保住了**（修复前这里会整行消失）；
+- 对账脚本复跑：汇总表 20.0% == API 20.0%，**差异清单 0 项**。
+
+**回填实测的意外**：19 个里只有 p31 MR !4 真正刷成功，其余 18 个 E2E 临时项目
+（project 45–63）返回 **403 Forbidden** —— 它们已被 GitLab 标记 `deletion_scheduled`，
+**读可以、写被拒**。这批项目本就在待清理清单里，回填无实际意义；但也说明
+`refresh_overviews.py` 的 `--apply` 对 pending-deletion 项目会静默失败
+（`publish_overview` 内部把 update 异常吞成非致命，返回 `note=None`）。
+
+**另一个未授权项**：project 37 MR !1（DB=12 / 已发布=10）是**既有**的待刷项
+（旧判定也能挑出来），不在「19 个缺 HEAD」的授权范围内，本轮**未动**。
+
+**与既有审查发现的交叉**：此前 `/code-review` 报出的 F2（`scripts/ops/refresh_overviews.py`
+传 `inline_posted_count=0, head_sha=""` → 刷新后「最后新增 N 条」变 0 条、整项丢掉
+`HEAD <短码>`）**已被本轮修复覆盖** —— `head_sha=""` 现在会自动补全，`inline_posted_count`
+原样保留。F1（note job_timeout 没为等锁留余量）、F3（`sync_qoder_agents.py` 写盘未指定
+encoding）、F4（`publishing.py` 注释指向 `n_replace` 的语义误述 + `splitlines()` 与
+GitLab 侧 split 在含 `\x0c` 时不等）**仍未修**，待用户决策。

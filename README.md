@@ -254,7 +254,7 @@ LLM_PROVIDER=qodercli  # 旧 subprocess 路径, 完整保留未动
 
 ### 验证状态（2026-11）
 
-- **单元测试**：1712 passed / 0 failed / 2 skipped（`python -m pytest`；需真实 GitLab/Redis 的集成用例不在本机跑）
+- **单元测试**：1733 passed / 0 failed / 3 skipped（`python -m pytest`；需真实 GitLab/Redis 的集成用例不在本机跑；skip 数为环境条件跳过 —— 缺 launchd timer 的 ExecStart、缺部署变量各跳一批，随本机环境浮动）
 - **快速档 E2E**：`scripts/e2e/run_e2e.py --tier fast` 21/21 检查通过（覆盖 34 条 behavior witness）
 - **全量档 E2E**：`scripts/e2e/run_e2e.py --tier full` 32/32 检查通过
   （16 个命令 / 流程功能 + 16 项产物校验：`config` 5 项 / `telemetry` 6 项 / `config_real` 5 项）
