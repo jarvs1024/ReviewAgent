@@ -45,6 +45,8 @@ from reviewagent.config import current  # noqa: E402
 from reviewagent.telemetry.store import get_store  # noqa: E402
 
 _TOTAL_RE = re.compile(r"总建议数\s*(\d+)")
+_INLINE_RE = re.compile(r"最后新增\s*(\d+)\s*条")
+_HEAD_RE = re.compile(r"HEAD\s+[0-9a-f]{7}")
 _OVERVIEW_HEADER = "## 检视汇总"
 
 
@@ -81,7 +83,23 @@ def _db_total(project_id: int, mr_iid: int) -> int:
     return len(rows)
 
 
-def _published_total(project_id: int, mr_iid: int) -> int | None:
+def _published_meta_from_body(body: str) -> dict:
+    """从已发布的汇总 note 正文解析出判定所需的元信息.
+
+    Returns: {"total": int|None, "has_head": bool, "inline_count": int|None}
+    """
+    m_total = _TOTAL_RE.search(body)
+    m_inline = _INLINE_RE.search(body)
+    return {
+        "total": int(m_total.group(1)) if m_total else None,
+        # HEAD 行缺失 = 状态迁移路径刷新时没传 head_sha 造成的 (D2).
+        # 存量 52 个有汇总 note 的 MR 里 19 个已中招, 旧判定只看 total → 修不了.
+        "has_head": bool(_HEAD_RE.search(body)),
+        "inline_count": int(m_inline.group(1)) if m_inline else None,
+    }
+
+
+def _published_meta(project_id: int, mr_iid: int) -> dict | None:
     from reviewagent.gitlab.client import GitLabClient
 
     gl = GitLabClient()
@@ -89,10 +107,37 @@ def _published_total(project_id: int, mr_iid: int) -> int | None:
         body = n.get("body") or ""
         if not body.startswith(_OVERVIEW_HEADER):
             continue
-        m = _TOTAL_RE.search(body)
-        if m:
-            return int(m.group(1))
+        return _published_meta_from_body(body)
     return None
+
+
+def _needs_refresh(db_total: int, published: dict | None) -> bool:
+    """已发布汇总 note 与 DB 不一致, 或缺 HEAD 行 → 需要重刷.
+
+    Why 缺 HEAD 也要刷:
+        状态迁移路径刷新汇总时不传 head_sha → 底部 "HEAD <短码>" 整行消失,
+        用户无法确认这份汇总对应哪个 commit. 这 19 个存量 MR 的「总建议数」
+        与 DB 是一致的, 旧判定永远挑不出它们.
+    """
+    if not published or published.get("total") is None:
+        return False
+    if published["total"] != db_total:
+        return True
+    return not published.get("has_head", False)
+
+
+def _refresh_inline_count(published: dict | None) -> int:
+    """回填时保留已发布的「最后新增 N 条」(不归零).
+
+    Why: 「最后新增 N 条」是用户判断这轮检视新增了几条的唯一线索.
+    脚本原来固定传 inline_posted_count=0 → 每刷一次就把这个线索抹掉.
+    """
+    if not published:
+        return 0
+    value = published.get("inline_count")
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
 
 
 def main() -> int:
@@ -109,22 +154,28 @@ def main() -> int:
     for pid, mr in pairs:
         try:
             db_total = _db_total(pid, mr)
-            pub_total = _published_total(pid, mr)
+            published = _published_meta(pid, mr)
         except Exception as e:  # noqa: BLE001
             report.append({"project_id": pid, "mr_iid": mr, "error": str(e)})
             continue
+        pub_total = (published or {}).get("total")
         item = {
             "project_id": pid, "mr_iid": mr,
             "db_total": db_total, "published_total": pub_total,
-            "needs_refresh": pub_total is not None and pub_total != db_total,
+            "published_has_head": (published or {}).get("has_head"),
+            "published_inline_count": (published or {}).get("inline_count"),
+            "needs_refresh": _needs_refresh(db_total, published),
         }
         if item["needs_refresh"] and args.apply:
             try:
                 from reviewagent.commands._common import publish_overview
 
+                # 不传 head_sha → publish_overview 会自动补当前 MR head (D2 修复)
+                # inline_posted_count 原样保留已发布的值, 不归零 (F2 修复)
                 note_id = publish_overview(
                     project_id=pid, mr_iid=mr,
-                    inline_posted_count=0, run_late_detect=False,
+                    inline_posted_count=_refresh_inline_count(published),
+                    run_late_detect=False,
                 )
                 item["refreshed_note_id"] = note_id
                 item["applied"] = True
@@ -141,8 +192,11 @@ def main() -> int:
               f"{'（--apply 才执行）' if stale and not args.apply else ''}")
         for r in report:
             flag = "⟳" if r.get("needs_refresh") else "·"
+            extra = ""
+            if r.get("published_total") is not None and not r.get("published_has_head", True):
+                extra += " 缺HEAD"
             print(f"  {flag} project {r['project_id']} MR !{r['mr_iid']}: "
-                  f"DB={r.get('db_total')} 已发布={r.get('published_total')}"
+                  f"DB={r.get('db_total')} 已发布={r.get('published_total')}{extra}"
                   + (f" applied={r.get('applied')} note={r.get('refreshed_note_id')}"
                      if r.get("needs_refresh") else "")
                   + (f" error={r['error']}" if r.get("error") else ""))

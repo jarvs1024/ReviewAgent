@@ -569,7 +569,7 @@ def publish_overview(
         project_id: GitLab project id
         mr_iid: MR iid
         inline_posted_count: 本轮新增的 suggestion 数
-        head_sha: MR head_sha (空字符串则不显示 HEAD 行)
+        head_sha: MR head_sha (空字符串则自动补全当前 MR head; 补全失败则不显示 HEAD 行)
         run_late_detect: 是否先跑一次 late_detect (把"已关闭(未分类)"翻"已采纳").
             improve.py 主流程传 True (build_overview 之前调一次保证数据最新);
             /adopt /dismiss / ui_apply 路径传 False (避免无谓网络开销, 它们的
@@ -581,6 +581,32 @@ def publish_overview(
     """
     if gitlab is None:
         gitlab = GitLabClient()
+
+    # 0.5. head_sha 自动补全.
+    #
+    # Why 必须在这里补, 而不是逐个改调用点:
+    #   状态迁移路径 (/dismiss /adopt /ui_apply /resolve /auto_detect /
+    #   reconciler) 全都不传 head_sha, 而 build_overview_body 的
+    #   head_sha 默认 "" → 汇总表底部 "HEAD <短码>" 整行被抹掉, 用户无法确认
+    #   这份汇总对应哪个 commit. 实测 (MR !9): dismiss 前 "HEAD e866ffc",
+    #   dismiss 后消失; 存量 52 个有汇总 note 的 MR 里 19 个已中招.
+    #   在这里补 = 一处改动覆盖全部 6 个状态迁移调用点 + 运维脚本
+    #   (scripts/ops/refresh_overviews.py).
+    #
+    # 显式传入 head_sha 时**不**额外调 GitLab —— improve 主流程已经把
+    # head_sha 缓存好传进来了, 不该再付一次网络往返.
+    #
+    # 注意: 补全出来的 head 只用于 build body, **不参与** run_late_detect 的
+    # 判定 (下面第 1 步用的是原始入参). 否则状态迁移路径显式传的
+    # run_late_detect=False 会被绕开, 反而多跑一次 auto_detect.
+    build_head_sha = head_sha
+    if not build_head_sha:
+        try:
+            refs = gitlab.get_mr_diff_refs(project_id, mr_iid)
+            build_head_sha = refs.get("head_sha") or refs.get("start_sha") or ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning("publish_overview.head_sha_fetch_failed (non-fatal): {}", e)
+            build_head_sha = ""
 
     # 0. Pre-reconcile: catch-up 任何 "用户在 UI 点 ✓ 但 GitLab 没发 webhook" 的孤儿.
     # Why: GitLab 17.5 在用户纯 UI 操作 (点解决主题、不改代码、不评论) 时, 偶尔不发
@@ -622,7 +648,7 @@ def publish_overview(
     # 2. Build markdown
     body = build_overview_body(
         project_id=project_id, mr_iid=mr_iid,
-        inline_posted_count=inline_posted_count, head_sha=head_sha,
+        inline_posted_count=inline_posted_count, head_sha=build_head_sha,
     )
 
     # 3. Find existing comment by header prefix → update; else post new

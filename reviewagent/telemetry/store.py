@@ -1509,23 +1509,41 @@ class Store:
         }
 
     def suggestion_stats(self, project_id: int, mr_iid: int) -> dict:
+        """MR 级建议统计 —— 与「检视汇总」表**同源同口径**.
+
+        D1 修复 (MR !9 真实场景实测):
+            此前这里用原始 suggestions 表 GROUP BY state, 且
+            adoption_rate = adopted / processed; 而检视汇总表
+            (build_overview_body) 用 list_latest_by_cohort (同 cohort 只算最新一条)
+            + adoption_rate = applied / grand_total.
+            同一份数据能算出两个采纳率:
+                MR !8  汇总表 7.1%  vs  /stats 25.0%
+                MR !9  汇总表 20.0% vs  /stats 50.0%
+                p31 项目级 周报 5.5% vs MR 级 API 50.0%   (差 9 倍)
+
+            现在两边同源: 数据统一走 list_latest_by_cohort (该函数已排除
+            superseded, 且保留"最新一条 + 全部 terminal state"), 采纳率统一为
+            applied / total —— 与汇总表、周报 (suggestion_metrics) 一致.
+
+        processed 字段保留不动: 它表达"已处理建议数" (applied+dismissed+resolved),
+        与采纳率分母语义不同, 仍是有用信息.
+        """
+        latest = self.list_latest_by_cohort(project_id=project_id, mr_iid=mr_iid)
+        states: dict[str, int] = {}
+        severities: dict[str, int] = {}
+        for row in latest:
+            state = str(row.get("state") or "open")
+            states[state] = states.get(state, 0) + 1
+            severity = str(row.get("severity") or "").strip() or "unspecified"
+            severities[severity] = severities.get(severity, 0) + 1
+
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT state, COUNT(*) AS n FROM suggestions WHERE project_id=? AND mr_iid=? GROUP BY state",
-                (project_id, mr_iid),
-            ).fetchall()
             actions = conn.execute(
                 "SELECT action, validation_status, COUNT(*) AS n "
                 "FROM suggestion_actions WHERE project_id=? AND mr_iid=? "
                 "GROUP BY action, validation_status",
                 (project_id, mr_iid),
             ).fetchall()
-            severities = conn.execute(
-                "SELECT COALESCE(NULLIF(severity,''),'unspecified') AS severity, COUNT(*) AS n "
-                "FROM suggestions WHERE project_id=? AND mr_iid=? GROUP BY severity",
-                (project_id, mr_iid),
-            ).fetchall()
-        states = {row["state"]: row["n"] for row in rows}
         action_counts: dict[str, int] = {}
         for row in actions:
             if _is_effective_action(row["action"], row["validation_status"]):
@@ -1540,11 +1558,12 @@ class Store:
         return {
             "total": total, "state_counts": states,
             "action_counts": action_counts,
-            "severity_counts": {row["severity"]: row["n"] for row in severities},
+            "severity_counts": severities,
             "adopted": adopted, "dismissed": dismissed, "resolved": resolved,
             "processed": processed,
             "open": states.get("open", 0),
-            "adoption_rate": round(adopted / processed * 100, 1) if processed else 0.0,
+            # 与检视汇总表同口径: applied / 总建议数 (含 open).
+            "adoption_rate": round(adopted / total * 100, 1) if total else 0.0,
         }
 
     def get_latest_in_cohort_excluding(

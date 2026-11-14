@@ -5,7 +5,10 @@
     mr_total          : 项目累计 MR 数
     suggestion_count  : 本周窗口 suggestion 数
     suggestion_total  : 项目累计 suggestion 数
-    adoption_rate     : 已采纳 / (已采纳 + 已关闭), 0~1
+    adoption_rate     : 已采纳 / 总建议数 (含待处理), 0~1
+                         ← 与检视汇总表的采纳率同口径 (applied / grand_total).
+                         注释曾写成"已采纳 / (已采纳 + 已关闭)", 与实现不符 ——
+                         实现走 store.suggestion_metrics, 分母是全部 suggestion.
     severity_breakdown: {high: N, medium: M, ...}
     top_rules         : [(rule_key, count), ...] 前 5 名
 
