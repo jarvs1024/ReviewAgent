@@ -33,6 +33,13 @@ INSTANCE_ENV = REPO / "config" / "instance.env"
 # 允许留在环境里的键: baseline 本身, 或与单测无关的键
 _ALLOWED_TO_REMAIN = set(_BASELINE) | {
     "REVIEW_CONFIG_DIR",      # session 级隔离 fixture 会自己设
+    # ⚠️ 这 3 个既在 _BASELINE 里 (单测需要固定值), 又会出现在
+    #    config/instance.env 里 (可选兜底参数)。它们属于 baseline ——
+    #    conftest 会用 _BASELINE 的值覆盖, 所以**不该**进 _DEPLOY_ENV_KEYS
+    #    (进了会在 import 期被清掉 → test_baseline_env_still_present 失败)。
+    "QODERCLI_MODEL",
+    "QODERCLI_NODE_PATH",
+    "QODERCLI_JS_PATH",
 }
 
 
