@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import sys
 from pathlib import Path
 
@@ -62,7 +63,29 @@ def parse_args() -> argparse.Namespace:
                    help="覆盖 REVIEWAGENT_WEEKLY_TARGET_PROJECT_ID")
     p.add_argument("--enqueue", action="store_true",
                    help="只入 RQ 队列（由 worker 异步执行，含 opencode LLM 调用），fire-and-forget")
-    return p.parse_args()
+    args = p.parse_args()
+
+    # ⚠️ WEEKLY_PUSH 环境变量 = 定时任务授权真发
+    #
+    # Why: 2026-11-12 起 runner 的真发条件是 `push AND not dry_run` (显式 --push),
+    #   但 systemd 的 ExecStart 里写死了 `--week-offset -1 --enqueue` (没有 --push)
+    #   → 定时周报连续 6 周全部走 dry_run, 从没真发出去, 而且 RQ 仍报 Job OK
+    #   (静默失败)。scripts/run_weekly_report.sh 里的 WEEKLY_PUSH=true 开关
+    #   只在那条 shell 路径上生效, 而 systemd 直接调了本脚本, 绕过了它。
+    #
+    #   现在把同一个开关下沉到本脚本: 由**部署方** (systemd Environment=)
+    #   显式授权, 而不是把 --push 写死在命令行里 —— 命令行可以被人随手复制执行,
+    #   env 是部署配置的一部分, 语义更清楚。
+    #
+    # 安全语义保持不变:
+    #   · 手动跑 `python scripts/weekly_report.py` (没有 WEEKLY_PUSH) → 仍走 dry_run,
+    #     不会误发到团队群 (2026-11-11 真实误发过一次的教训)
+    #   · 只有 WEEKLY_PUSH=true 的部署环境 (systemd timer) 才会真发
+    env_push = os.environ.get("WEEKLY_PUSH", "").strip().lower() == "true"
+    if env_push and not args.push:
+        args.push = True
+        print("[ok] WEEKLY_PUSH=true → 启用真实推送 (定时任务模式)")
+    return args
 
 
 def main() -> int:

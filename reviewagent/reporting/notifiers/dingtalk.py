@@ -61,12 +61,20 @@ class DingTalkNotifier:
                                  meta={"skipped": "no_chunks"})
 
         if self.dry_run or not self.webhook_url:
-            for idx, chunk in enumerate(markdown_chunks, start=1):
-                ct = title if len(markdown_chunks) == 1 else f"{title} ({idx}/{len(markdown_chunks)})"
-                logger.info(
-                    "dingtalk.dry_run chunk {}/{} ({} bytes) title={!r}\n{}",
-                    idx, len(markdown_chunks), len(chunk.encode("utf-8")), ct, chunk,
-                )
+            # ⚠️ WARN 而不是 INFO: "生成了但没发" 必须一眼可见。
+            #   2026-11-12~11-16 定时周报连续 6 周全走这条分支, 但日志只有
+            #   INFO 级的一行 dingtalk.dry_run, RQ 还报 Job OK —— 静默失败。
+            #
+            #   并且**不 dump chunk 正文**: 周报正文近 1.4 万字节, 整段打进
+            #   日志会触发 rsyslog "message too long (14042) with configured size
+            #   8096" 把消息截断, 反而把关键信息冲掉。这里只打摘要。
+            total_bytes = sum(len(c.encode("utf-8")) for c in markdown_chunks)
+            logger.warning(
+                "dingtalk.not_sent dry_run=True chunks={} bytes={} title={!r} "
+                "reason={}",
+                len(markdown_chunks), total_bytes, title,
+                "no_webhook" if not self.webhook_url else "dry_run_flag",
+            )
             return DeliveryResult(
                 success=True,
                 chunks_sent=len(markdown_chunks),

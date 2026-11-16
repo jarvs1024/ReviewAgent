@@ -280,6 +280,21 @@ def run_weekly_job(
             "dry_run": True,
             "chunks_total": result.chunks_total,
         }
+        # ⚠️ 打 WARN 而不是 INFO —— 这是**静默失败**的最后一环。
+        #
+        # Why: 2026-11-12 起真发条件收紧成 `push AND not dry_run`, 而 systemd
+        #   的 ExecStart 没带 --push → 定时周报连续 6 周全走 dry_run,
+        #   但 RQ 仍报 "Job OK"、日志也只有 INFO 级的 dingtalk.dry_run,
+        #   **没有任何告警** —— 没人发现周报从没发出去。
+        #
+        #   现在 dry_run 一律 WARN: 任何"生成了但没发"的周报在日志里都是
+        #   一眼可见的告警, 而不是 INFO 里一行被 rsyslog 截断的 payload。
+        logger.warning(
+            "weekly.not_sent dry_run=True title={} reason={} "
+            "hint=定时任务需要 WEEKLY_PUSH=true; 手动跑默认不外发",
+            f"{cfg.report_emoji} {cfg.report_title} ({artifact.week_label})",
+            "no_webhook_or_dry_run",
+        )
 
     return {
         "week_label": artifact.week_label,

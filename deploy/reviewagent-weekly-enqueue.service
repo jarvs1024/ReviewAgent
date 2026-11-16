@@ -10,6 +10,19 @@ WorkingDirectory=/home/workflow/ReviewAgent
 Environment="PATH=/home/workflow/ReviewAgent/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment=REVIEWAGENT_DATA_DIR=/var/lib/reviewagent
 Environment=PYTHONUNBUFFERED=1
+# ⚠️ WEEKLY_PUSH=true = 定时任务授权**真实外发**周报到钉钉群。
+#
+# Why 必须显式声明:
+#   runner 的真发条件是 `push AND not dry_run` (2026-11-12 起收紧,
+#   为了避免手动跑一次脚本就把内部周报误推到团队群 —— 11-11 真的误发过)。
+#   定时任务必须自己声明"我被授权外发", 否则会一直走 dry_run。
+#
+#   2026-11-12 ~ 11-16 连续 6 周的定时周报都没真发出去 (日志 push=False),
+#   而且 RQ 仍报 Job OK —— 静默失败, 没人发现。
+#
+#   注意: 手动跑 `python scripts/weekly_report.py` 不会带这个 env → 仍走 dry_run,
+#   安全语义不变。
+Environment=WEEKLY_PUSH=true
 EnvironmentFile=/home/workflow/ReviewAgent/config/instance.env
 ExecStartPre=/home/workflow/ReviewAgent/.venv/bin/python -m reviewagent config check
 ExecStart=/home/workflow/ReviewAgent/.venv/bin/python /home/workflow/ReviewAgent/scripts/weekly_report.py --week-offset -1 --enqueue
