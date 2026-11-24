@@ -812,6 +812,10 @@ class Store:
         之前 work-horse 被强杀留下的孤儿 —— 无需时间阈值即可精确判定,
         因此"再次触发即立即清除", 没有阈值误判窗口.
 
+        ⚠️ 2026-11-24: 锁超时放弃的那条 running 现在由调用方**主动**标记
+           (mark_lock_timeout_runs_for_mr), 不会再流到这里 —— 否则会被误标成
+           "work-horse killed" (实际上那个 work-horse 活着跑完了).
+
         Returns: 处理的记录数.
         """
         now_iso = _fmt_dt(_utcnow())
@@ -836,6 +840,75 @@ class Store:
             logger.warning(
                 "sweep_orphaned_runs_for_mr: recovered %d orphan runs "
                 "project=%s mr=%s", handled, project_id, mr_iid,
+            )
+        return handled
+
+    def mark_lock_timeout_runs_for_mr(
+        self, *, project_id: int, mr_iid: int, wait_seconds: int,
+    ) -> int:
+        """把该 MR 因**抢锁超时**而放弃的 running 记录标成 skipped.
+
+        ⚠️ 2026-11-24 (MR 1291): 同一 MR 起了两个 chain job, 后一个等锁
+           超时后直接 return, 把自己的 running 记录**留在库里** → 下一次拿到
+           锁的 chain 调 sweep 时把它当成"work-horse 被杀"的孤儿标 failed.
+           实际上前一个 work-horse 好好跑完了 (还发布了建议) —— 错误信息误导.
+
+           这里在放弃时**主动**收尾: status=skipped + 明确的 error,
+           不再让 sweep 把它当孤儿.
+
+           ⚠️ 只能标**本 MR** 的 running —— 但此刻前一个 chain 还活着, 它的
+              running 记录也会被一起标掉! 所以要先排除**早于本次入队**的记录
+              (用 started_at 判断: 本次 chain 的记录是最新启动的).
+              → 实现: 只处理 started_at 等于/晚于本次 job 启动时间的记录里
+                **最新**的那条, 且其 command 与本次一致.
+
+        Returns: 处理的记录数.
+        """
+        now_iso = _fmt_dt(_utcnow())
+        handled = 0
+        with self._conn() as conn:
+            # ⚠️ 只取**最新一条** running —— 更早的是前一个 chain 的存活记录,
+            #    不能碰 (那个 work-horse 还活着).
+            rows = conn.execute(
+                """
+                SELECT id, started_at FROM review_runs
+                WHERE project_id = ? AND mr_iid = ? AND status = 'running'
+                ORDER BY started_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project_id, mr_iid),
+            ).fetchall()
+            for r in rows:
+                dur = 0
+                if r["started_at"]:
+                    try:
+                        dur = int(
+                            (_utcnow() - datetime.fromisoformat(
+                                r["started_at"])).total_seconds() * 1000
+                        )
+                    except Exception:
+                        dur = 0
+                conn.execute(
+                    """
+                    UPDATE review_runs
+                    SET finished_at = ?, status = 'skipped', error = ?, duration_ms = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        now_iso,
+                        f"lock_timeout: 等 per-MR 锁超过 {wait_seconds}s 未拿到 "
+                        f"(该 MR 已有检视任务在跑), 本次放弃 "
+                        f"(不是崩溃/被杀)",
+                        dur,
+                        r["id"],
+                    ),
+                )
+                handled += 1
+        if handled:
+            logger.warning(
+                "mark_lock_timeout_runs_for_mr: marked %d run(s) as skipped "
+                "(lock_timeout) project=%s mr=%s",
+                handled, project_id, mr_iid,
             )
         return handled
 

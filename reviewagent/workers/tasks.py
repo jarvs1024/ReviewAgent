@@ -44,6 +44,58 @@ def get_queue() -> Queue:
     return Queue(config.rq_queue_name, connection=get_redis())
 
 
+# ---------- 同 MR 的重复入队防护 ----------
+#
+# ⚠️ 2026-11-24 生产事故 (MR 1291, project 7):
+#   11:27:37 GitLab push → 入队 job A
+#   11:31:08 GitLab 又 push → 入队 job B   ← A 还在跑 (32 分钟)
+#   B 抢 per-MR 锁失败, 等满 300s → chain.lock_timeout 放弃
+#   A 跑完释放锁 → 第三次拿锁 → sweep 把 B 那条 running 当"孤儿"标 failed
+#   → UI 上出现一条误导的 failed (错误信息说 "work-horse killed", 其实它活着)
+#
+# 根因: 同一 MR 在**前一个任务还在跑**时又被 push → 起了两个 chain job.
+# 修法: 入队前检查该 MR 是否已有 queued/started 的 chain job, 有就跳过
+#       (最新代码已经在仓库里, 前一个任务会拿到最新的 diff —— 增量检视
+#        本来就是拿仓库当前状态, 不需要每个 push 都重跑一遍).
+
+def _active_chain_job_for_mr(
+    project_id: int, mr_iid: int, *, connection: redis.Redis | None = None
+) -> str | None:
+    """查该 MR 是否已有活跃 (queued/started/deferred/scheduled) 的 chain job.
+
+    Returns: job_id (活跃的) 或 None (没有活跃的).
+
+    ⚠️ 用 RQ 自己的 queue.get_jobs() —— 不要手写 SCAN + Job.fetch:
+       job hash 里存的是 **pickle 的二进制**, Job.fetch 要 HGETALL 整个 hash;
+       连接若是 decode_responses=True 会 UnicodeDecodeError.
+       生产 get_redis() 是默认 decode_responses=False (二进制安全), 但这里
+       走 RQ 官方 API 更稳 (RQ 自己处理序列化).
+    """
+    conn = connection or get_redis()
+    queue = Queue(config.rq_queue_name, connection=conn)
+    wanted = "reviewagent.workers.tasks.run_mr_chain"
+    # JobStatus.QUEUED → "jobstatus.queued"; 取最后一段
+    active_statuses = {"queued", "started", "deferred", "scheduled"}
+    try:
+        jobs = queue.get_jobs()
+    except Exception as e:  # noqa: BLE001 - 反序列化失败不能挡住入队
+        logger.warning("active_chain_job_for_mr: get_jobs failed (non-fatal): {}", e)
+        return None
+    for job in jobs:
+        try:
+            if job.func_name != wanted:
+                continue
+            status = str(job.get_status()).lower().split(".")[-1]
+            if status not in active_statuses:
+                continue
+            kwargs = job.kwargs or {}
+        except Exception:  # noqa: BLE001 - 单个 job 读失败跳过
+            continue
+        if kwargs.get("project_id") == project_id and kwargs.get("mr_iid") == mr_iid:
+            return job.id
+    return None
+
+
 def get_weekly_queue() -> Queue:
     """周报专用队列 — 与 review 命令队列 (improve/describe/suggestion) 物理隔离, 互不阻塞.
 
@@ -268,8 +320,24 @@ def enqueue_mr_chain(
     - 不同 MR 并行: 多 worker 各自处理不同 MR 的 chain job
     - 重试: 瞬态失败自动重试 2 次 (interval=10s)
 
-    返回: [job_id] (单元素列表)
+    返回: [job_id] (单元素列表) 或 [] (被去重跳过)
     """
+    # ⚠️ 2026-11-24: 同一 MR 在前一个任务还在跑时又被 push → 起两个 chain job,
+    #    后一个必然抢锁超时, 并让 sweep 把前一个的 running 误标成 failed.
+    #    这里在**入队前**去重: 已有活跃 job 就跳过 (增量检视拿的是仓库当前状态).
+    try:
+        active_job = _active_chain_job_for_mr(project_id, mr_iid)
+    except Exception as e:  # noqa: BLE001 - 去重失败不能挡住正常入队
+        logger.warning("chain.dedup_check failed (non-fatal): {}", e)
+        active_job = None
+    if active_job:
+        logger.info(
+            "chain.enqueue_skipped_duplicate commands={} project={} mr={} "
+            "active_job={}",
+            list(commands), project_id, mr_iid, active_job,
+        )
+        return []
+
     q = get_queue()
     job = q.enqueue(
         "reviewagent.workers.tasks.run_mr_chain",
@@ -594,6 +662,16 @@ def run_mr_chain(
             "chain.lock_timeout project={} mr={} — 释放锁失败/超时, 放弃本次 chain",
             project_id, mr_iid,
         )
+        # ⚠️ 2026-11-24: 主动收尾自己那条 running 记录 —— 否则它会留在库里,
+        #    被下一个拿到锁的 chain 的 sweep 当成"work-horse 被杀"的孤儿,
+        #    标成 failed (误导: 那个 work-horse 其实活着跑完了).
+        try:
+            get_store().mark_lock_timeout_runs_for_mr(
+                project_id=project_id, mr_iid=mr_iid,
+                wait_seconds=_CHAIN_LOCK_BLOCKING_TIMEOUT,
+            )
+        except Exception as e:  # noqa: BLE001 - 标记失败不能挡住返回
+            logger.warning("mark_lock_timeout_runs_for_mr failed (non-fatal): {}", e)
         return [{"command": "lock", "status": "failed", "error": "lock_timeout"}]
     try:
         # 进程外根治假 running: 拿到 per-MR 链锁 ⇒ 此刻该 MR 绝无存活 chain,

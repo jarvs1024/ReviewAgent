@@ -26,7 +26,6 @@ from reviewagent.workers import tasks
 # fixtures
 # ---------------------------------------------------------------------------
 
-
 @pytest.fixture
 def fake_redis(monkeypatch):
     """fakeredis 替换 MRLockManager 的 Redis 连接（无 IO）."""
@@ -36,7 +35,6 @@ def fake_redis(monkeypatch):
         lambda self: redis_client,
     )
     return redis_client
-
 
 @pytest.fixture
 def telemetry(tmp_path):
@@ -49,7 +47,6 @@ def telemetry(tmp_path):
         yield store
     finally:
         store_mod._store = None
-
 
 def _mr_open_payload(*, head_sha: str) -> dict:
     return {
@@ -71,7 +68,6 @@ def _mr_open_payload(*, head_sha: str) -> dict:
         },
     }
 
-
 class _FakeStore:
     """run_mr_chain 只用 sweep_orphaned_runs_for_mr，其余 store 调用不应出现."""
 
@@ -82,11 +78,9 @@ class _FakeStore:
         self.swept.append((project_id, mr_iid))
         return 0
 
-
 # ---------------------------------------------------------------------------
 # Step 1a: 重复 webhook —— 同一 head_sha 只入队一次（router 层）
 # ---------------------------------------------------------------------------
-
 
 async def test_duplicate_open_webhook_enqueues_once(fake_redis, telemetry, monkeypatch):
     """同 MR 同 head_sha 连续两次投递 → 只入队一次，第二次 skipped（same sha）."""
@@ -115,11 +109,9 @@ async def test_duplicate_open_webhook_enqueues_once(fake_redis, telemetry, monke
     assert enqueued[0]["mr_iid"] == 7
     assert enqueued[0]["commands"] == ("describe", "improve")
 
-
 # ---------------------------------------------------------------------------
 # Step 1b: 并发 push —— 同 MR 两个 chain 串行执行（链锁）
 # ---------------------------------------------------------------------------
-
 
 def test_concurrent_chains_for_same_mr_are_serialized(fake_redis, monkeypatch):
     """两线程同 project/mr 跑 run_mr_chain：锁保证命令体最大并发 = 1，两个都 success.
@@ -202,11 +194,9 @@ def test_concurrent_chains_for_same_mr_are_serialized(fake_redis, monkeypatch):
         assert [item["status"] for item in result] == ["success"]
     assert fake_store.swept == [(34, 7), (34, 7)]
 
-
 # ---------------------------------------------------------------------------
 # Step 1c: 锁竞争 / TTL / 过期后可重新获取
 # ---------------------------------------------------------------------------
-
 
 def test_chain_lock_contention_ttl_and_expiry(fake_redis):
     from reviewagent.webhook.locks import _CHAIN_LOCK_TTL_SECONDS, MRLockManager
@@ -235,11 +225,9 @@ def test_chain_lock_contention_ttl_and_expiry(fake_redis):
     assert recovered.acquire(blocking=False) is True
     assert recovered.release() is True
 
-
 # ---------------------------------------------------------------------------
 # Step 1d: 锁等待超时 = fail-closed，且不执行命令
 # ---------------------------------------------------------------------------
-
 
 def test_chain_lock_timeout_is_fail_closed(monkeypatch):
     class _TimeoutLock:
@@ -282,15 +270,12 @@ def test_chain_lock_timeout_is_fail_closed(monkeypatch):
     # 链锁语义必须是「阻塞等待 300s」：改成非阻塞 / 其它超时会破坏串行与 fail-closed 契约
     assert timed_out_lock.acquire_calls == [{"blocking": True, "blocking_timeout": 300}]
 
-
 # ---------------------------------------------------------------------------
 # Step 1e: Redis 故障 —— cooldown / diff_head fail-open，链锁 fail-closed
 # ---------------------------------------------------------------------------
 
-
 def _raise_connection_error(_self):
     raise ConnectionError("redis is down")
-
 
 def test_redis_failure_cooldown_and_diff_head_fail_open(monkeypatch):
     monkeypatch.setattr(
@@ -303,7 +288,6 @@ def test_redis_failure_cooldown_and_diff_head_fail_open(monkeypatch):
     # fail-open：不跳过（宁可多跑一次串行检视，也不丢事件）
     assert manager.should_skip_cooldown(34, 7, "describe") is False
     assert manager.check_diff_head_changed(34, 7, "head-sha-1") is True
-
 
 def test_redis_failure_chain_lock_is_fail_closed(monkeypatch):
     from reviewagent.webhook.locks import MRLockManager
@@ -330,7 +314,6 @@ def test_redis_failure_chain_lock_is_fail_closed(monkeypatch):
             actor_username="alice",
         )
 
-
 # ---------------------------------------------------------------------------
 # Step 1f: 非 improve 链路同样携带 / 校验运行指纹（T15 carry 缺陷回归）
 # ---------------------------------------------------------------------------
@@ -342,7 +325,6 @@ _MANIFEST_KEYS = (
     "ruleset_fingerprint",
     "dynamic_rules_fingerprint",
 )
-
 
 def _active_manifest() -> dict:
     """按入队侧同一入口（`manifest_for_active`）计算当前生效 manifest."""
@@ -360,7 +342,6 @@ def _active_manifest() -> dict:
         provider=config.llm_provider,
     )
 
-
 def _manifest_payload(*, profile_fingerprint: str | None = None) -> dict:
     """8 字段 manifest 中入队/校验用的 5 个扁平指纹字段（可篡改单个字段）."""
     manifest = _active_manifest()
@@ -368,7 +349,6 @@ def _manifest_payload(*, profile_fingerprint: str | None = None) -> dict:
     if profile_fingerprint is not None:
         payload["profile_fingerprint"] = profile_fingerprint
     return payload
-
 
 class _FakeQueue:
     """记录 `q.enqueue(func, **kwargs)` 的假队列（不连 Redis）."""
@@ -379,7 +359,6 @@ class _FakeQueue:
     def enqueue(self, func, **kwargs):
         self.calls.append({"func": func, **kwargs})
         return SimpleNamespace(id="job-1")
-
 
 def test_suggestion_and_weekly_enqueue_carry_manifest_fingerprints(monkeypatch):
     """enqueue_suggestion_action / enqueue_weekly_report 注入的指纹值必须与 manifest 一致."""
@@ -441,7 +420,6 @@ def test_suggestion_and_weekly_enqueue_carry_manifest_fingerprints(monkeypatch):
             == manifest["dynamic_rules_fingerprint"]
         )
 
-
 def test_run_suggestion_action_rejects_stale_manifest(monkeypatch):
     """在途 /adopt job 的 profile_fingerprint 与激活环境不一致 → 拒绝且不触碰 process_*."""
     from reviewagent.commands import suggestion_actions
@@ -483,7 +461,6 @@ def test_run_suggestion_action_rejects_stale_manifest(monkeypatch):
         assert set(kwargs) == set(_MANIFEST_KEYS)
         assert kwargs == expected
 
-
 def test_run_weekly_report_rejects_stale_manifest(monkeypatch):
     """在途周报 job 的 profile_fingerprint 不一致 → 拒绝且不运行 run_weekly_job."""
     from reviewagent.reporting import runner as reporting_runner
@@ -512,3 +489,260 @@ def test_run_weekly_report_rejects_stale_manifest(monkeypatch):
     assert len(verified) == 1
     assert set(verified[0]) == set(_MANIFEST_KEYS)
     assert verified[0] == expected
+
+# ---------------------------------------------------------------------------
+# 2026-11-24 (MR 1291 生产事故): 同 MR 重复入队 + lock_timeout 被误标孤儿
+#
+# 事故链:
+#   11:27:37 push → 入队 job A;  11:31:08 又 push → 入队 job B
+#   A 持 per-MR 锁跑 32 分钟; B 等锁 300s 超时 → 直接 return
+#   B 把自己的 running 记录留在库里 → A 跑完释放锁 → C 拿锁 → sweep
+#   把 B 那条当"work-horse 被杀"的孤儿标 failed (误导: A 其实活着跑完了)
+#
+# 两条修法:
+#   A) enqueue_mr_chain 入队前去重 —— 同 MR 已有活跃 job 就跳过
+#   C) lock_timeout 时主动把自己的 running 标成 skipped (别留给 sweep)
+# ---------------------------------------------------------------------------
+
+def test_enqueue_skips_when_same_mr_has_active_chain_job(monkeypatch, fake_redis):
+    """同 MR 已有 queued/started 的 chain job → 第二次入队被跳过."""
+    monkeypatch.setattr(tasks, "get_redis", lambda: fake_redis)
+    monkeypatch.setattr(tasks, "_active_chain_job_for_mr", lambda *a, **k: "job-active")
+
+    enqueued: list[dict] = []
+
+    class _Queue:
+        def enqueue(self, *args, **kwargs):
+            enqueued.append(kwargs)
+            return SimpleNamespace(id="job-new")
+
+    monkeypatch.setattr(tasks, "get_queue", lambda: _Queue())
+
+    job_ids = tasks.enqueue_mr_chain(
+        commands=("describe", "improve"),
+        project_id=34,
+        mr_iid=7,
+        triggered_by="webhook",
+        actor_username="alice",
+    )
+
+    assert job_ids == [], "有活跃 job 时应返回空列表 (跳过)"
+    assert not enqueued, "不应该真的入队"
+
+def test_enqueue_proceeds_when_no_active_job(monkeypatch, fake_redis):
+    """没有活跃 job → 正常入队, 返回 job_id."""
+    monkeypatch.setattr(tasks, "get_redis", lambda: fake_redis)
+    monkeypatch.setattr(tasks, "_active_chain_job_for_mr", lambda *a, **k: None)
+
+    enqueued: list[dict] = []
+
+    class _Queue:
+        def enqueue(self, *args, **kwargs):
+            enqueued.append(kwargs)
+            return SimpleNamespace(id="job-new")
+
+    monkeypatch.setattr(tasks, "get_queue", lambda: _Queue())
+
+    job_ids = tasks.enqueue_mr_chain(
+        commands=("describe", "improve"),
+        project_id=34,
+        mr_iid=7,
+        triggered_by="webhook",
+        actor_username="alice",
+    )
+
+    assert job_ids == ["job-new"]
+    assert len(enqueued) == 1
+
+def test_enqueue_dedup_check_failure_does_not_block_enqueue(monkeypatch, fake_redis):
+    """去重检查本身炸了 → 不能挡住正常入队 (fail-open)."""
+    monkeypatch.setattr(tasks, "get_redis", lambda: fake_redis)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(tasks, "_active_chain_job_for_mr", _boom)
+
+    class _Queue:
+        def enqueue(self, *args, **kwargs):
+            return SimpleNamespace(id="job-new")
+
+    monkeypatch.setattr(tasks, "get_queue", lambda: _Queue())
+
+    job_ids = tasks.enqueue_mr_chain(
+        commands=("improve",),
+        project_id=34,
+        mr_iid=7,
+        triggered_by="webhook",
+        actor_username="alice",
+    )
+
+    assert job_ids == ["job-new"], "去重检查失败应 fail-open, 正常入队"
+
+def test_active_chain_job_detects_queued_job():
+    """真实 RQ job 在 queued 状态 → 能被查到 (集成级, 用 fakeredis).
+
+    ⚠️ 这里**必须**用 decode_responses=False 的 fakeredis:
+       RQ 把 job 存成 pickle 塞在 job hash 里, decode_responses=True 会
+       HGETALL 解码失败 (UnicodeDecodeError) → 读不出 job.
+       生产 get_redis() 就是默认的 decode_responses=False (二进制安全).
+    """
+    import fakeredis
+    from rq import Queue
+
+    monkeypatch_queue = fakeredis.FakeStrictRedis(decode_responses=False)
+    # ⚠️ 队列名要用 config.rq_queue_name (默认 "review") —— 硬编码会查不到
+    q = Queue(tasks.config.rq_queue_name, connection=monkeypatch_queue)
+    job = q.enqueue(
+        "reviewagent.workers.tasks.run_mr_chain",
+        commands=["describe", "improve"],
+        project_id=34,
+        mr_iid=7,
+        triggered_by="webhook",
+        actor_username="alice",
+    )
+    assert job.get_status() == "queued"
+
+    found = tasks._active_chain_job_for_mr(34, 7, connection=monkeypatch_queue)
+    assert found == job.id, f"应查到 {job.id}, 实际 {found}"
+
+    # 别的 MR 查不到
+    assert tasks._active_chain_job_for_mr(34, 8, connection=monkeypatch_queue) is None
+    assert tasks._active_chain_job_for_mr(99, 7, connection=monkeypatch_queue) is None
+
+def test_chain_lock_timeout_marks_own_run_as_skipped(telemetry, monkeypatch):
+    """锁超时 → 主动把自己的 running 记录标成 skipped (不是 failed/orphaned).
+
+    ⚠️ 这是 C 方案的核心: 之前那条记录会留给 sweep, 被误标成
+       "work-horse killed" 的 failed.
+    """
+    from datetime import UTC, datetime
+
+    from reviewagent.telemetry.models import ReviewRun
+
+    # 造一条 running 记录 (模拟本次 chain 已经建了 run)
+    run_id = telemetry.insert_run(
+        ReviewRun(
+            project_id=34,
+            mr_iid=7,
+            command="improve",
+            triggered_by="webhook",
+            actor_username="alice",
+            started_at=datetime.now(UTC),
+            status="running",
+        )
+    )
+
+    class _TimeoutLock:
+        key = "reviewagent:lock:34:7"
+
+        def acquire(self, **kwargs) -> bool:
+            return False
+
+        def release(self) -> bool:  # pragma: no cover
+            raise AssertionError("release must not run when acquire failed")
+
+    class _LockManager:
+        def get_lock(self, project_id: int, mr_iid: int):
+            return _TimeoutLock()
+
+    monkeypatch.setattr(tasks, "locks", _LockManager())
+    monkeypatch.setattr(tasks, "_verify_job_manifest", lambda **_kwargs: None)
+
+    result = tasks.run_mr_chain(
+        commands=["improve"],
+        project_id=34,
+        mr_iid=7,
+        triggered_by="webhook",
+        actor_username="alice",
+    )
+
+    assert result == [{"command": "lock", "status": "failed", "error": "lock_timeout"}]
+
+    # 查那条记录: 应是 skipped + 明确的 lock_timeout 原因 (不是 failed/orphaned)
+    import sqlite3
+
+    with sqlite3.connect(str(telemetry.path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, error, finished_at FROM review_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "skipped", f"应是 skipped, 实际 {row['status']}"
+    assert "lock_timeout" in (row["error"] or ""), row["error"]
+    assert "work-horse" not in (row["error"] or ""), "不该再说是 work-horse 被杀"
+    assert row["finished_at"], "应有 finished_at"
+
+def test_mark_lock_timeout_does_not_touch_older_running_run(telemetry):
+    """⚠️ 前一个 chain 还活着 → 它的 running 记录不能被标掉.
+
+    store 只处理**最新一条** running —— 更早的是存活 chain 的记录.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from reviewagent.telemetry.models import ReviewRun
+
+    now = datetime.now(UTC)
+    old_id = telemetry.insert_run(
+        ReviewRun(
+            project_id=34, mr_iid=7, command="improve",
+            triggered_by="webhook", actor_username="alice",
+            started_at=now - timedelta(minutes=30), status="running",
+        )
+    )
+    new_id = telemetry.insert_run(
+        ReviewRun(
+            project_id=34, mr_iid=7, command="improve",
+            triggered_by="webhook", actor_username="alice",
+            started_at=now, status="running",
+        )
+    )
+
+    n = telemetry.mark_lock_timeout_runs_for_mr(
+        project_id=34, mr_iid=7, wait_seconds=300
+    )
+    assert n == 1
+
+    import sqlite3
+
+    with sqlite3.connect(str(telemetry.path)) as conn:
+        conn.row_factory = sqlite3.Row
+        old = conn.execute("SELECT status FROM review_runs WHERE id = ?",
+                           (old_id,)).fetchone()
+        new = conn.execute("SELECT status, error FROM review_runs WHERE id = ?",
+                           (new_id,)).fetchone()
+
+    assert old["status"] == "running", "存活 chain 的记录不能被标掉"
+    assert new["status"] == "skipped"
+    assert "lock_timeout" in (new["error"] or "")
+
+def test_sweep_no_longer_catches_lock_timeout_records(telemetry):
+    """回归锁: 主动标记后, sweep 不该再把它当孤儿标 failed."""
+    from datetime import UTC, datetime
+
+    from reviewagent.telemetry.models import ReviewRun
+
+    run_id = telemetry.insert_run(
+        ReviewRun(
+            project_id=34, mr_iid=7, command="improve",
+            triggered_by="webhook", actor_username="alice",
+            started_at=datetime.now(UTC), status="running",
+        )
+    )
+    # 先主动标记 (lock_timeout 路径)
+    telemetry.mark_lock_timeout_runs_for_mr(project_id=34, mr_iid=7, wait_seconds=300)
+    # 再 sweep —— 不该再动它
+    swept = telemetry.sweep_orphaned_runs_for_mr(project_id=34, mr_iid=7)
+    assert swept == 0
+
+    import sqlite3
+
+    with sqlite3.connect(str(telemetry.path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT status, error FROM review_runs WHERE id = ?",
+                           (run_id,)).fetchone()
+
+    assert row["status"] == "skipped"
+    assert "work-horse" not in (row["error"] or "")

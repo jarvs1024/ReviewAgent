@@ -268,6 +268,16 @@ async def _handle_code_change(payload: dict, object_kind: str, enqueue_mr_chain)
         triggered_by="webhook",
         actor_username=mr.actor_username,
     )
+    if not job_ids:
+        # ⚠️ 2026-11-24: 同 MR 已有活跃 chain job → 去重跳过 (不是错误).
+        #    那个 job 会拿到最新的 diff, 不需要再起一个.
+        logger.info(
+            "webhook.skipped_duplicate_inflight project={} mr={} commands={}",
+            mr.project_id, mr.mr_iid, list(commands),
+        )
+        _metric_inc("reviewagent_webhook_skipped_total", reason="duplicate_inflight")
+        return {"status": "skipped", "reason": "duplicate_inflight",
+                "commands": list(commands), "job_ids": []}
     _metric_inc("reviewagent_chain_enqueued_total", source="mr_webhook", project_id=str(mr.project_id), mr_iid=str(mr.mr_iid))
     logger.info("webhook.queued commands={} project={} mr={} jobs={}", list(commands), mr.project_id, mr.mr_iid, job_ids)
     return {"status": "queued", "commands": list(commands), "job_ids": job_ids}
