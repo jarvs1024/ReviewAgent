@@ -428,10 +428,6 @@ class ImproveCommand(BaseCommand):
                 + "\n".join(_anchors) + "\n\n---\n\n"
             )
 
-        return hardening_prefix(sec_profile) + build_chunk_prompt(
-                + "\n".join(_anchors) + "\n\n---\n\n"
-            )
-
         # 历史反馈 (2026-11-24): 曾经被工程师忽略的同类问题 —— 别再提.
         # ⚠️ 只在开关打开时有内容 (默认关); 措辞刻意保留「逃生口」,
         #    避免 AI 变得过度保守 (宁可漏报也不报).
