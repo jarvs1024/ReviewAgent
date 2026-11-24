@@ -640,6 +640,162 @@ def check_opencode_clip(cfg: Any) -> str:
     return "opencode_max_diff_chars: 6 字符截到 3 附原始长度标记；未超限原样"
 
 
+@witness("dismissal_reuse")
+def check_dismissal_reuse(cfg: Any) -> str:
+    """被忽略意见跨轮次复用 —— 6 个字段一起验 (它们是一条链).
+
+    验的是**行为 delta**:
+      · 总开关关 → 不注入任何内容 (prompt 逐字节不变)
+      · 开关开 + 有历史 → 注入段落, 且含「逃生口」措辞
+      · kinds 白名单 → 不在白名单的 kind 不注入
+      · max_items → 注入条数受上限约束
+      · lookback_days → 超出时间窗口的不注入
+      · min_occurrences → 出现次数不够的不注入
+    """
+    import tempfile
+    from pathlib import Path as _P
+
+    from reviewagent.review.dismissal_context import collect_and_render
+    from reviewagent.telemetry.dismissal import pattern_fingerprint
+    from reviewagent.telemetry.store import Store
+
+    tmpdir = _P(tempfile.mkdtemp(prefix="ra-dismissal-witness-"))
+    st = Store(tmpdir / "t.db")
+
+    def add(rule: str, *, kind: str = "false_positive", path: str = "a/b/c.py"):
+        st.upsert_dismissed_pattern(
+            project_id=7,
+            pattern_fingerprint=pattern_fingerprint(
+                file_path=path, rule_key=rule, header="标题"),
+            rule_key=rule,
+            file_path_pattern=path.rsplit("/", 1)[0] + "/**",
+            title_signature="sig",
+            dismissed_reason="误报" if kind == "false_positive" else "范围外",
+            dismissal_kind=kind,
+            dismissed_by="alice",
+        )
+
+    add("R1")
+    add("R2", kind="out_of_scope")
+
+    def render(**over):
+        base = _cfg(
+            cfg,
+            dismissal_reuse_enabled=True,
+            dismissal_reuse_kinds="false_positive",
+            dismissal_reuse_max_items=8,
+            dismissal_reuse_lookback_days=90,
+            dismissal_reuse_min_occurrences=1,
+            dismissal_reuse_scope="project",
+        )
+        return collect_and_render(
+            config=dataclasses.replace(base, **over),
+            project_id=7,
+            file_paths=["a/b/c.py"],
+            rule_keys=["R1", "R2"],
+            store=st,
+        )
+
+    # ① 总开关关 → 空
+    off = render(dismissal_reuse_enabled=False)
+    assert off == "", f"开关关闭时应为空, 实际 {off[:60]!r}"
+
+    # ② 开关开 → 有内容, 且含逃生口
+    on = render()
+    assert "历史反馈" in on, on[:120]
+    assert "误报" in on, on[:120]
+    assert "差异" in on, "必须保留逃生口, 否则 AI 会过度保守"
+
+    # ③ kinds 白名单: out_of_scope 不该出现
+    assert "范围外" not in on, "out_of_scope 不在白名单, 不该注入"
+
+    # ④ kinds 换成含 out_of_scope → 应该出现
+    on2 = render(dismissal_reuse_kinds="false_positive,out_of_scope")
+    assert "范围外" in on2, "白名单含 out_of_scope 时应注入"
+
+    # ⑤ max_items: 造 3 条 → limit=1 只出 1 条
+    for i in range(3):
+        add(f"RX{i}", path=f"x/{i}/c.py")
+    limited = collect_and_render(
+        config=_cfg(
+            cfg,
+            dismissal_reuse_enabled=True,
+            dismissal_reuse_kinds="false_positive",
+            dismissal_reuse_max_items=1,
+            dismissal_reuse_lookback_days=90,
+            dismissal_reuse_min_occurrences=1,
+            dismissal_reuse_scope="project",
+        ),
+        project_id=7,
+        file_paths=["a/b/c.py"],
+        rule_keys=["R1", "R2", "RX0", "RX1", "RX2"],
+        store=st,
+    )
+    n_lines = limited.count("\n- ")
+    assert n_lines == 1, f"max_items=1 应只注入 1 条, 实际 {n_lines}"
+
+    # ⑥ min_occurrences: 只出现过 1 次的 RZ → 要求 2 次就不该出现
+    add("RZ", path="z/c.py")
+    strict = collect_and_render(
+        config=_cfg(
+            cfg,
+            dismissal_reuse_enabled=True,
+            dismissal_reuse_kinds="false_positive",
+            dismissal_reuse_max_items=8,
+            dismissal_reuse_lookback_days=90,
+            dismissal_reuse_min_occurrences=2,
+            dismissal_reuse_scope="project",
+        ),
+        project_id=7,
+        file_paths=["a/b/c.py"],
+        rule_keys=["R1", "RZ"],
+        store=st,
+    )
+    assert "RZ" not in strict, "出现次数不足的 pattern 不该注入"
+
+    # ⑦ lookback_days: 窗口设为 0 天 → 什么都不该注入
+    tiny = collect_and_render(
+        config=_cfg(
+            cfg,
+            dismissal_reuse_enabled=True,
+            dismissal_reuse_kinds="false_positive",
+            dismissal_reuse_max_items=8,
+            dismissal_reuse_lookback_days=0,
+            dismissal_reuse_min_occurrences=1,
+            dismissal_reuse_scope="project",
+        ),
+        project_id=7,
+        file_paths=["a/b/c.py"],
+        rule_keys=["R1"],
+        store=st,
+    )
+    assert tiny == "", f"lookback=0 天应不注入, 实际 {tiny[:80]!r}"
+
+    # ⑧ scope: 换 project 查不到别的项目
+    other = collect_and_render(
+        config=_cfg(
+            cfg,
+            dismissal_reuse_enabled=True,
+            dismissal_reuse_kinds="false_positive",
+            dismissal_reuse_max_items=8,
+            dismissal_reuse_lookback_days=90,
+            dismissal_reuse_min_occurrences=1,
+            dismissal_reuse_scope="project",
+        ),
+        project_id=999,
+        file_paths=["a/b/c.py"],
+        rule_keys=["R1"],
+        store=st,
+    )
+    assert other == "", "scope=project 时别的项目不该命中"
+
+    return (
+        "dismissal_reuse: 关→空, 开→注入(带逃生口), "
+        "kinds白名单生效, max_items=1→1条, min_occ=2→过滤, "
+        "lookback=0→空, scope=project→隔离"
+    )
+
+
 def run_quick(cfg: Any = None) -> list[tuple[str, str]]:
     """执行全部快速档 witness，返回 `[(check_id, evidence)]`；失败直接抛出."""
     if cfg is None:

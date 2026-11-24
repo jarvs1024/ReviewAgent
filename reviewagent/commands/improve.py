@@ -92,6 +92,28 @@ class ImproveCommand(BaseCommand):
     # 不能提示「点上方『应用建议』按钮」, 否则 reviewer 会去找一个不存在的按钮.
     HELP_TEXT_FOOTER_TEXT_ONLY = _HELP_TEXT_FOOTER_TEXT_ONLY
     # ---------- 并行分块调用 ----------
+    def _dismissal_context_section(self, file_path: str) -> str:
+        """历史「被忽略意见」的 prompt 段落 (2026-11-24).
+
+        ⚠️ 开关关闭 (默认) → 永远返回空串 → prompt 与改动前**逐字节相同**.
+        ⚠️ 任何异常都吞掉 —— 历史反馈是**增强**, 不是检视的必要条件.
+        """
+        try:
+            from reviewagent.config import config as _cfg
+            from reviewagent.review.dismissal_context import collect_and_render
+
+            if not getattr(_cfg, "dismissal_reuse_enabled", False):
+                return ""
+            return collect_and_render(
+                config=_cfg,
+                project_id=self.project_id,
+                file_paths=[file_path],
+                store=getattr(self, "_dismissal_store", None),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("improve.dismissal_context failed (non-fatal): {}", e)
+            return ""
+
     def _lazy_deps(self):
         from reviewagent.review.dynamic import load_dynamic_rules
         from reviewagent.review.policies.registry import get as get_policy
@@ -405,6 +427,15 @@ class ImproveCommand(BaseCommand):
                 "- **不要仅限于此清单** — 继续主动发现清单之外的新问题\n\n"
                 + "\n".join(_anchors) + "\n\n---\n\n"
             )
+
+        return hardening_prefix(sec_profile) + build_chunk_prompt(
+                + "\n".join(_anchors) + "\n\n---\n\n"
+            )
+
+        # 历史反馈 (2026-11-24): 曾经被工程师忽略的同类问题 —— 别再提.
+        # ⚠️ 只在开关打开时有内容 (默认关); 措辞刻意保留「逃生口」,
+        #    避免 AI 变得过度保守 (宁可漏报也不报).
+        prior_section += self._dismissal_context_section(file_path)
 
         return hardening_prefix(sec_profile) + build_chunk_prompt(
             ChunkPromptParts(

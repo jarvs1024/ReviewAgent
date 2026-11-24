@@ -10,6 +10,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from reviewagent.config import config
 from reviewagent.gitlab.client import client as _gl
@@ -126,6 +127,38 @@ CREATE TABLE IF NOT EXISTS suggestion_actions (
 
 CREATE INDEX IF NOT EXISTS idx_actions_project_mr ON suggestion_actions(project_id, mr_iid);
 CREATE INDEX IF NOT EXISTS idx_actions_suggestion ON suggestion_actions(suggestion_note_id);
+
+-- dismissed_patterns: 被忽略意见的「特征指纹」沉淀 (2026-11-24)
+-- 用途: 下次检视时把「历史同类问题已被忽略」注入 prompt, 让 AI 别再提同类建议.
+-- 粒度: pattern_fingerprint (L2 特征) —— 目录模式 + 规则键 + 标题词根;
+--       cohort_key (L1 精确) —— 「同一个问题」, 用于跨 MR 精确抑制.
+-- ⚠️ 只记录「技术判断类」的忽略 (false_positive / preference) ——
+--    out_of_scope / already_fixed 与 AI 判断能力无关, 记录只会污染 prompt.
+CREATE TABLE IF NOT EXISTS dismissed_patterns (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id          INTEGER NOT NULL,
+    pattern_fingerprint TEXT NOT NULL,   -- L2 特征指纹 (24 hex)
+    cohort_key          TEXT,              -- L1 精确指纹 (同一处代码)
+    rule_key            TEXT,              -- 命中的规则键 (最强信号)
+    file_path_pattern   TEXT,              -- 目录模式 (testcase/test_tcg/Locking/**)
+    title_signature     TEXT,              -- 标题词根摘要
+    severity            TEXT,
+    dismissed_reason    TEXT,              -- 用户原始原因 (最重要)
+    dismissal_kind      TEXT,              -- false_positive / preference / ...
+    dismissed_by        TEXT,
+    suggestion_note_id  TEXT,              -- 溯源: 原始 GitLab discussion
+    original_title      TEXT,
+    original_detail     TEXT,
+    occurrence_count    INTEGER DEFAULT 1, -- 累计被 dismiss 次数
+    created_at          TIMESTAMP NOT NULL,
+    updated_at          TIMESTAMP,
+    last_seen_at        TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_dp_pattern ON dismissed_patterns(project_id, pattern_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_dp_rule ON dismissed_patterns(project_id, rule_key);
+CREATE INDEX IF NOT EXISTS idx_dp_cohort ON dismissed_patterns(project_id, cohort_key);
+CREATE INDEX IF NOT EXISTS idx_dp_seen ON dismissed_patterns(project_id, last_seen_at);
 
 -- suggestions: 记录 improve 发布的每条 suggestion (用于 /adopt 验证)
 CREATE TABLE IF NOT EXISTS suggestions (
@@ -1333,6 +1366,151 @@ class Store:
                 (project_id, mr_iid),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ---------- dismissed_patterns (被忽略意见的跨轮次复用) ----------
+    def upsert_dismissed_pattern(
+        self,
+        *,
+        project_id: int,
+        pattern_fingerprint: str,
+        cohort_key: str | None = None,
+        rule_key: str | None = None,
+        file_path_pattern: str | None = None,
+        title_signature: str | None = None,
+        severity: str | None = None,
+        dismissed_reason: str | None = None,
+        dismissal_kind: str | None = None,
+        dismissed_by: str | None = None,
+        suggestion_note_id: str | None = None,
+        original_title: str | None = None,
+        original_detail: str | None = None,
+    ) -> int:
+        """沉淀一条「被忽略意见」的特征指纹.
+
+        同一 pattern 再次被 dismiss → occurrence_count += 1 (不新增行),
+        并刷新 reason/时间 —— 因为**多次**被忽略比一次更有说服力.
+
+        Returns: dismissed_patterns.id
+        """
+        now = _fmt_dt(_utcnow())
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT id, occurrence_count FROM dismissed_patterns
+                WHERE project_id = ? AND pattern_fingerprint = ?
+                """,
+                (project_id, pattern_fingerprint),
+            ).fetchone()
+            if cur is not None:
+                conn.execute(
+                    """
+                    UPDATE dismissed_patterns
+                    SET occurrence_count = occurrence_count + 1,
+                        last_seen_at = ?, updated_at = ?,
+                        dismissed_reason = COALESCE(?, dismissed_reason),
+                        dismissal_kind = COALESCE(?, dismissal_kind),
+                        dismissed_by = COALESCE(?, dismissed_by),
+                        cohort_key = COALESCE(?, cohort_key),
+                        severity = COALESCE(?, severity)
+                    WHERE id = ?
+                    """,
+                    (
+                        now, now, dismissed_reason, dismissal_kind, dismissed_by,
+                        cohort_key, severity, cur["id"],
+                    ),
+                )
+                return int(cur["id"])
+            cur2 = conn.execute(
+                """
+                INSERT INTO dismissed_patterns (
+                    project_id, pattern_fingerprint, cohort_key, rule_key,
+                    file_path_pattern, title_signature, severity,
+                    dismissed_reason, dismissal_kind, dismissed_by,
+                    suggestion_note_id, original_title, original_detail,
+                    occurrence_count, created_at, updated_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (
+                    project_id, pattern_fingerprint, cohort_key, rule_key,
+                    file_path_pattern, title_signature, severity,
+                    dismissed_reason, dismissal_kind, dismissed_by,
+                    suggestion_note_id, original_title, original_detail,
+                    now, now, now,
+                ),
+            )
+            return int(cur2.lastrowid)
+
+    def list_dismissed_patterns(
+        self,
+        *,
+        project_id: int,
+        pattern_fingerprints: list[str] | None = None,
+        rule_keys: list[str] | None = None,
+        cohort_keys: list[str] | None = None,
+        kinds: tuple[str, ...] | None = None,
+        since: str | None = None,
+        min_occurrences: int = 1,
+        limit: int = 8,
+    ) -> list[dict]:
+        """检索历史「被忽略意见」, 供下次检视注入 prompt.
+
+        三个检索维度 (OR 关系, 任一命中即返回):
+          · pattern_fingerprints —— L2 特征指纹 (同类问题)
+          · rule_keys            —— 规则键 (同一条规则反复被 dismiss)
+          · cohort_keys          —— L1 精确指纹 (同一处代码)
+
+        Args:
+            since: ISO 时间下界 (只看最近的); None = 不限.
+            min_occurrences: 至少被忽略这么多次才算.
+            limit: 最多返回几条 (prompt 预算).
+        """
+        where = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        or_parts: list[str] = []
+        if pattern_fingerprints:
+            marks = ",".join("?" for _ in pattern_fingerprints)
+            or_parts.append(f"pattern_fingerprint IN ({marks})")
+            params.extend(pattern_fingerprints)
+        if rule_keys:
+            marks = ",".join("?" for _ in rule_keys)
+            or_parts.append(f"rule_key IN ({marks})")
+            params.extend(rule_keys)
+        if cohort_keys:
+            marks = ",".join("?" for _ in cohort_keys)
+            or_parts.append(f"cohort_key IN ({marks})")
+            params.extend(cohort_keys)
+        if or_parts:
+            where.append("(" + " OR ".join(or_parts) + ")")
+        else:
+            # 没有任何检索条件 → 不返回 (避免误查全表)
+            return []
+        if kinds:
+            where.append("dismissal_kind IN (" + ",".join("?" for _ in kinds) + ")")
+            params.extend(kinds)
+        if since:
+            where.append("(last_seen_at IS NULL OR last_seen_at >= ?)")
+            params.append(since)
+        where.append("occurrence_count >= ?")
+        params.append(int(min_occurrences))
+        sql = (
+            "SELECT * FROM dismissed_patterns WHERE "
+            + " AND ".join(where)
+            + " ORDER BY occurrence_count DESC, last_seen_at DESC LIMIT ?"
+        )
+        params.append(int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_dismissed_patterns(self, *, project_id: int) -> int:
+        """统计某项目沉淀的 pattern 数 (可观测性)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c, COALESCE(SUM(occurrence_count), 0) AS s "
+                "FROM dismissed_patterns WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        return int(row["c"] or 0)
 
     def update_suggestion_state(
         self,

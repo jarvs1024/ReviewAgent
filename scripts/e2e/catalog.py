@@ -162,6 +162,20 @@ _WITNESSES: tuple[Witness, ...] = (
     _behavior("improve_batch_max_files", "batch_grouping", "review/planner.py:cfg.improve_batch_max_files"),
     _behavior("improve_batch_max_total_lines", "batch_grouping", "review/planner.py:cfg.improve_batch_max_total_lines"),
     _behavior("improve_clip_diff_lines", "full_source_budget", "review/planner.py:cfg.improve_clip_diff_lines"),
+    _behavior("improve_clip_diff_lines", "full_source_budget", "review/planner.py:cfg.improve_clip_diff_lines"),
+    # ---------- 被忽略意见的跨轮次复用 (2026-11-24) ----------
+    _behavior("dismissal_reuse_enabled", "dismissal_reuse",
+              "review/dismissal_context.py:collect_and_render；开关关闭 → prompt 不变"),
+    _behavior("dismissal_reuse_kinds", "dismissal_reuse",
+              "review/dismissal_context.py:_allowed_kinds；可复用 kind 白名单"),
+    _behavior("dismissal_reuse_max_items", "dismissal_reuse",
+              "review/dismissal_context.py:collect_and_render；注入条数上限"),
+    _behavior("dismissal_reuse_lookback_days", "dismissal_reuse",
+              "review/dismissal_context.py:_lookback_since；时间窗口"),
+    _behavior("dismissal_reuse_min_occurrences", "dismissal_reuse",
+              "review/dismissal_context.py:collect_and_render；最少出现次数"),
+    _behavior("dismissal_reuse_scope", "dismissal_reuse",
+              "review/dismissal_context.py:collect_and_render；检索范围"),
 )
 
 CATALOG: dict[str, Witness] = {w.field: w for w in _WITNESSES}

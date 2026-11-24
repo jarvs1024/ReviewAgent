@@ -152,6 +152,29 @@ SCHEMA: tuple[FieldSpec, ...] = (
     FieldSpec("weekly_cron_schedule", str, "Mon 10:30", env="REVIEWAGENT_WEEKLY_CRON_SCHEDULE", scope="instance"),
     FieldSpec("weekly_dashboard_url", str, "http://127.0.0.1:8080/code-review",
               env="REVIEWAGENT_WEEKLY_DASHBOARD_URL", scope="instance"),
+    # ---------- 被忽略意见的跨轮次复用 (2026-11-24) ----------
+    # 总开关: 关掉时完全不查历史、不注入 prompt、不写库.
+    FieldSpec("dismissal_reuse_enabled", bool, False,
+              env="DISMISSAL_REUSE_ENABLED", scope="instance",
+              doc="跨轮次复用被忽略意见: 查历史 + 注入 prompt"),
+    # 哪类忽略才复用 (逗号分隔): false_positive,preference
+    FieldSpec("dismissal_reuse_kinds", str, "false_positive,preference",
+              env="DISMISSAL_REUSE_KINDS", scope="instance",
+              doc="可复用的 dismissal_kind (逗号分隔); "
+                  "out_of_scope/already_fixed 不复用"),
+    FieldSpec("dismissal_reuse_max_items", int, 8,
+              env="DISMISSAL_REUSE_MAX_ITEMS", scope="instance", minimum=0,
+              doc="最多注入几条历史反馈 (prompt 预算)"),
+    FieldSpec("dismissal_reuse_lookback_days", int, 90,
+              env="DISMISSAL_REUSE_LOOKBACK_DAYS", scope="instance", minimum=0,
+              doc="只看最近 N 天的历史忽略"),
+    FieldSpec("dismissal_reuse_min_occurrences", int, 1,
+              env="DISMISSAL_REUSE_MIN_OCCURRENCES", scope="instance", minimum=1,
+              doc="至少被忽略几次才注入"),
+    FieldSpec("dismissal_reuse_scope", str, "project",
+              env="DISMISSAL_REUSE_SCOPE", scope="instance",
+              choices=("project", "global"),
+              doc="project=只看本项目历史; global=跨项目"),
 )
 
 SCHEMA_BY_NAME: dict[str, FieldSpec] = {spec.name: spec for spec in SCHEMA}

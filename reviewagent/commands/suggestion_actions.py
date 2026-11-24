@@ -594,6 +594,66 @@ def _strict_token_adoption_match(
 
 
 # ---------- handlers ----------
+def _allowed_kinds() -> frozenset[str]:
+    """配置里指定的「可复用 kind」集合 (逗号分隔)."""
+    from reviewagent.config import config
+
+    raw = (getattr(config, "dismissal_reuse_kinds", "") or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
+def _record_dismissed_pattern(
+    store,
+    *,
+    project_id: int,
+    mr_iid: int,
+    suggestion: dict[str, Any] | None,
+    reason: str | None,
+    actor_username: str | None,
+) -> int | None:
+    """把一条「被忽略意见」沉淀成特征指纹 (dismissed_patterns).
+
+    开关关闭 → 直接返回 None (完全不写库).
+    kind 不可复用 (范围外/已自行处理/理由为空) → 返回 None.
+    """
+    from reviewagent.config import config
+    from reviewagent.telemetry.dismissal import (
+        dismissal_entry_from_suggestion,
+        is_reusable_kind,
+    )
+
+    if not getattr(config, "dismissal_reuse_enabled", False):
+        return None
+    entry = dismissal_entry_from_suggestion(suggestion, reason=reason)
+    if entry is None:
+        return None
+    if not is_reusable_kind(entry["dismissal_kind"], _allowed_kinds()):
+        return None
+    row_id = store.upsert_dismissed_pattern(
+        project_id=project_id,
+        pattern_fingerprint=entry["pattern_fingerprint"],
+        cohort_key=entry["cohort_key"] or None,
+        rule_key=entry["rule_key"] or None,
+        file_path_pattern=entry["file_path_pattern"] or None,
+        title_signature=entry["title_signature"] or None,
+        severity=entry["severity"] or None,
+        dismissed_reason=entry["dismissed_reason"],
+        dismissal_kind=entry["dismissal_kind"],
+        dismissed_by=actor_username,
+        suggestion_note_id=entry["suggestion_note_id"] or None,
+        original_title=entry["original_title"] or None,
+        original_detail=entry["original_detail"],
+    )
+    logger.info(
+        "/dismiss.pattern_recorded project={} mr={} kind={} rule={} fp={}",
+        project_id, mr_iid, entry["dismissal_kind"],
+        entry["rule_key"] or "-", entry["pattern_fingerprint"][:12],
+    )
+    return row_id
+
+
 def process_dismiss(
     *,
     project_id: int,
@@ -648,6 +708,23 @@ def process_dismiss(
         validation_status="ok",
         head_sha_posted=(sug or {}).get("head_sha"),
     )
+
+    # 4.1 沉淀「被忽略意见」的特征指纹 (2026-11-24)
+    # Why: 让下次检视能把「历史同类问题已被忽略」当参考给 AI, 别再提同类建议.
+    # ⚠️ 只在开关打开时做; 且只有「技术判断类」(误报/偏好) 才记录 ——
+    #    范围外/已自行处理与 AI 判断力无关, 记录只会污染 prompt.
+    # ⚠️ 非致命: 失败只记日志, 不影响 dismiss 本身.
+    try:
+        _record_dismissed_pattern(
+            store,
+            project_id=project_id,
+            mr_iid=mr_iid,
+            suggestion=sug,
+            reason=reason,
+            actor_username=actor_username,
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("/dismiss.pattern_record failed (non-fatal): {}", _e)
 
     # 4.5. 立即刷新 MR 顶部"检视汇总" (与下一次 improve run 之间无延迟)
     # Why: 之前只在 improve.py 末尾刷一次, /dismiss 不走 improve pipeline,

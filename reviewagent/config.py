@@ -183,6 +183,17 @@ class Config:
     weekly_cron_schedule: str = "Mon 10:30"
     weekly_dashboard_url: str = "http://127.0.0.1:8080/code-review"
 
+    # ---- 被忽略意见的跨轮次复用 (2026-11-24) ----
+    # 总开关: 关掉时不查历史 / 不注入 prompt / 不写库 (prompt 逐字节不变)
+    dismissal_reuse_enabled: bool = False
+    # 哪类 dismissal_kind 才复用 (逗号分隔): false_positive,preference
+    # out_of_scope / already_fixed 与 AI 判断力无关, 复用只会污染 prompt
+    dismissal_reuse_kinds: str = "false_positive,preference"
+    dismissal_reuse_max_items: int = 8          # prompt 预算: 最多注入几条
+    dismissal_reuse_lookback_days: int = 90      # 只看最近 N 天
+    dismissal_reuse_min_occurrences: int = 1     # 至少被忽略几次才注入
+    dismissal_reuse_scope: str = "project"       # project=本项目 / global=跨项目
+
     # ---------- 派生路径 ----------
     @property
     def sqlite_path(self) -> Path:
