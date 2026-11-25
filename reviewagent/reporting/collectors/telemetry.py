@@ -324,7 +324,8 @@ class TelemetryCollector:
         if not rows:
             return {
                 "total": 0, "success": 0, "failed": 0, "running": 0,
-                "skipped": 0, "success_rate": 0.0, "avg_duration_ms": 0,
+                "skipped": 0, "success_rate": 0.0, "success_rate_strict": 0.0,
+                "avg_duration_ms": 0,
                 "by_command": {}, "by_status": {}, "by_day": {},
                 "top_mrs": [], "failed_runs": [],
             }
@@ -377,7 +378,15 @@ class TelemetryCollector:
 
         total = len(rows)
         avg_ms = duration_total // total if total else 0
-        success_rate = round(success_count / total * 100, 1) if total else 0.0
+        # 成功率口径: **跳过算成功**.
+        # Why: skipped 不是失败 —— 它是「本次不跑」(锁超时/去重/无变化),
+        #      把它算失败会让成功率虚低, 且与 TestMate 主页的
+        #      (success + skipped) / total 口径不一致 (同一份数据两个数).
+        # 分母用 total (含 running): running 是「还在跑」, 不算成功也不算失败,
+        #      留在分母里才不会被高估.
+        success_rate = (
+            round((success_count + skipped_count) / total * 100, 1) if total else 0.0
+        )
         for cmd, b in by_command.items():
             if b["count"] > 0:
                 b["avg_duration_ms"] = b["duration_total"] // b["count"]
@@ -414,6 +423,11 @@ class TelemetryCollector:
             "running": running_count,
             "skipped": skipped_count,
             "success_rate": success_rate,
+            # 附加: 严格成功率 (跳过**不算**成功) —— 给需要区分的场景用,
+            # 以及让前端能同时展示两个口径 (历史周报是旧口径, 只有 success_rate).
+            "success_rate_strict": (
+                round(success_count / total * 100, 1) if total else 0.0
+            ),
             "avg_duration_ms": avg_ms,
             "by_command": dict(sorted(by_command.items())),
             "by_status": by_status_plain,
